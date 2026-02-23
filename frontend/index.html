@@ -5,37 +5,39 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Crypto Sniper Paper Dashboard</title>
   <style>
+    @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Fraunces:opsz,wght@9..144,700&display=swap');
     :root {
-      --bg: #071018;
+      --bg: #061019;
       --panel: rgba(12, 22, 31, 0.88);
       --panel-2: rgba(16, 30, 42, 0.95);
       --ink: #ecf4fb;
       --muted: #9cb3c7;
-      --line: #223646;
+      --line: rgba(157, 179, 198, 0.13);
       --good: #30d59b;
       --bad: #ff6f8d;
       --accent: #4dc3ff;
       --accent-2: #7dd3fc;
-      --shadow: 0 24px 70px rgba(0, 0, 0, 0.42);
-      --radius: 18px;
+      --shadow: 0 28px 80px rgba(0, 0, 0, 0.45);
+      --radius: 20px;
     }
 
     * { box-sizing: border-box; }
     body {
       margin: 0;
-      font-family: "Trebuchet MS", system-ui, sans-serif;
+      font-family: "Space Grotesk", "Aptos", "Segoe UI Variable", "Trebuchet MS", sans-serif;
       color: var(--ink);
       background:
-        radial-gradient(circle at 12% 8%, rgba(77, 195, 255, 0.22), transparent 42%),
-        radial-gradient(circle at 88% 6%, rgba(48, 213, 155, 0.14), transparent 35%),
+        radial-gradient(circle at 12% 8%, rgba(77, 195, 255, 0.2), transparent 42%),
+        radial-gradient(circle at 88% 6%, rgba(48, 213, 155, 0.12), transparent 35%),
         radial-gradient(circle at 50% 110%, rgba(125, 211, 252, 0.08), transparent 50%),
-        linear-gradient(180deg, #060c12, #071018 38%, #09131b);
+        linear-gradient(180deg, #050b11, #071018 38%, #09131b);
       min-height: 100vh;
+      font-feature-settings: "tnum" 1;
     }
 
     .shell {
       width: min(1100px, calc(100% - 32px));
-      margin: 24px auto 48px;
+      margin: 20px auto 48px;
     }
 
     .hero {
@@ -45,7 +47,7 @@
       border: 1px solid rgba(159, 178, 194, 0.13);
       border-radius: 24px;
       box-shadow: var(--shadow);
-      padding: 24px;
+      padding: 22px;
       position: relative;
       overflow: hidden;
     }
@@ -64,7 +66,7 @@
     .eyebrow {
       color: var(--accent);
       font-size: 12px;
-      letter-spacing: 0.15em;
+      letter-spacing: 0.16em;
       text-transform: uppercase;
       margin: 0 0 8px;
       font-weight: 700;
@@ -74,8 +76,9 @@
       margin: 0;
       font-size: clamp(28px, 4vw, 42px);
       line-height: 1.05;
-      font-weight: 800;
-      font-family: Georgia, "Times New Roman", serif;
+      font-weight: 700;
+      font-family: "Fraunces", Georgia, "Times New Roman", serif;
+      letter-spacing: -0.02em;
       text-wrap: balance;
     }
 
@@ -83,23 +86,44 @@
       margin: 10px 0 18px;
       color: var(--muted);
       max-width: 72ch;
-      line-height: 1.45;
+      line-height: 1.5;
     }
 
     .controls {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+    }
+
+    .control-row {
       display: grid;
       grid-template-columns: 1fr auto;
       gap: 12px;
       align-items: stretch;
     }
 
+    .tool-row {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+      padding-top: 2px;
+    }
+
+    .tool-group {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
     .dropzone {
-      border: 1px dashed rgba(56, 189, 248, 0.38);
-      background: linear-gradient(180deg, rgba(6, 13, 19, 0.75), rgba(7, 16, 24, 0.55));
+      border: 1px dashed rgba(56, 189, 248, 0.28);
+      background: linear-gradient(180deg, rgba(7, 13, 19, 0.82), rgba(7, 15, 23, 0.62));
       border-radius: 14px;
-      padding: 14px;
+      padding: 14px 16px;
       color: var(--muted);
-      min-height: 54px;
+      min-height: 58px;
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -111,25 +135,62 @@
 
     .btn {
       appearance: none;
-      border: 1px solid rgba(56, 189, 248, 0.3);
-      background: linear-gradient(180deg, rgba(56, 189, 248, 0.16), rgba(56, 189, 248, 0.08));
+      border: 1px solid rgba(56, 189, 248, 0.24);
+      background: linear-gradient(180deg, rgba(56, 189, 248, 0.12), rgba(56, 189, 248, 0.06));
       color: var(--ink);
-      padding: 12px 16px;
+      padding: 11px 14px;
       border-radius: 12px;
-      font: 700 14px/1 "Trebuchet MS", sans-serif;
+      font: 700 13px/1 "Space Grotesk", "Trebuchet MS", sans-serif;
       cursor: pointer;
-      transition: transform 120ms ease, border-color 120ms ease;
+      transition: transform 120ms ease, border-color 120ms ease, background-color 120ms ease;
+      white-space: nowrap;
     }
 
-    .btn:hover { transform: translateY(-1px); border-color: rgba(56, 189, 248, 0.5); }
+    .btn:hover { transform: translateY(-1px); border-color: rgba(56, 189, 248, 0.46); }
     .btn:active { transform: translateY(0); }
     .btn.secondary {
-      border-color: rgba(159, 178, 194, 0.2);
-      background: rgba(11, 17, 22, 0.35);
-      color: var(--muted);
+      border-color: rgba(159, 178, 194, 0.14);
+      background: rgba(11, 17, 22, 0.45);
+      color: #c6d7e6;
+    }
+
+    .btn.warn {
+      border-color: rgba(251, 191, 36, 0.26);
+      background: linear-gradient(180deg, rgba(251, 191, 36, 0.12), rgba(251, 191, 36, 0.05));
+      color: #fde68a;
     }
 
     input[type="file"] { display: none; }
+
+    .seed-control {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font: 700 11px/1 "Space Grotesk", sans-serif;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      padding: 8px 10px;
+      border-radius: 12px;
+      border: 1px solid rgba(159, 178, 194, 0.12);
+      background: rgba(10, 16, 23, 0.5);
+    }
+
+    .seed-control input {
+      width: 96px;
+      padding: 9px 10px;
+      border-radius: 10px;
+      border: 1px solid rgba(159, 178, 194, 0.16);
+      background: rgba(9, 14, 20, 0.9);
+      color: var(--ink);
+      font: 700 13px/1 "Space Grotesk", sans-serif;
+    }
+
+    .seed-control input:focus {
+      outline: none;
+      border-color: rgba(56, 189, 248, 0.42);
+      box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.12);
+    }
 
     .grid {
       margin-top: 18px;
@@ -167,7 +228,7 @@
 
     .label {
       color: var(--muted);
-      font: 600 11px/1.2 "Trebuchet MS", sans-serif;
+      font: 700 11px/1.2 "Space Grotesk", "Trebuchet MS", sans-serif;
       letter-spacing: 0.08em;
       text-transform: uppercase;
       margin-bottom: 8px;
@@ -176,8 +237,8 @@
     .value {
       font-size: clamp(22px, 3vw, 30px);
       line-height: 1.1;
-      font-weight: 800;
-      font-family: Georgia, "Times New Roman", serif;
+      font-weight: 700;
+      font-family: "Fraunces", Georgia, "Times New Roman", serif;
     }
 
     .value.good { color: var(--good); }
@@ -187,7 +248,7 @@
     .tiny {
       margin-top: 6px;
       color: var(--muted);
-      font: 13px/1.3 "Trebuchet MS", sans-serif;
+      font: 13px/1.35 "Space Grotesk", "Trebuchet MS", sans-serif;
     }
 
     .summary-grid {
@@ -202,7 +263,7 @@
       gap: 12px;
       padding: 8px 0;
       border-bottom: 1px solid rgba(159, 178, 194, 0.06);
-      font-family: "Trebuchet MS", sans-serif;
+      font-family: "Space Grotesk", "Trebuchet MS", sans-serif;
     }
 
     .row:last-child { border-bottom: 0; }
@@ -218,7 +279,7 @@
       display: flex;
       justify-content: space-between;
       color: var(--muted);
-      font: 13px/1.2 "Trebuchet MS", sans-serif;
+      font: 13px/1.2 "Space Grotesk", "Trebuchet MS", sans-serif;
     }
 
     .track {
@@ -299,11 +360,62 @@
     .empty {
       margin-top: 14px;
       color: var(--muted);
-      font: 14px/1.5 "Trebuchet MS", sans-serif;
+      font: 14px/1.55 "Space Grotesk", "Trebuchet MS", sans-serif;
       padding: 14px;
       border-radius: 14px;
       border: 1px dashed rgba(159, 178, 194, 0.16);
       background: rgba(11, 17, 22, 0.35);
+    }
+
+    .table-wrap {
+      overflow: auto;
+      border: 1px solid rgba(159, 178, 194, 0.08);
+      border-radius: 12px;
+      background: rgba(7, 13, 20, 0.55);
+    }
+
+    .dash-table {
+      width: 100%;
+      border-collapse: collapse;
+      font: 13px/1.35 "Space Grotesk", "Trebuchet MS", sans-serif;
+      min-width: 760px;
+    }
+
+    .dash-table thead th {
+      text-align: left;
+      padding: 10px 10px;
+      border-bottom: 1px solid rgba(159, 178, 194, 0.16);
+      color: var(--muted);
+      font-weight: 700;
+      background: rgba(10, 17, 26, 0.95);
+      position: sticky;
+      top: 0;
+      z-index: 1;
+    }
+
+    .dash-table tbody td {
+      padding: 9px 10px;
+      border-bottom: 1px solid rgba(159, 178, 194, 0.06);
+    }
+
+    .dash-table tbody tr:nth-child(even) td {
+      background: rgba(255, 255, 255, 0.01);
+    }
+
+    .dash-table tbody tr:hover td {
+      background: rgba(56, 189, 248, 0.03);
+    }
+
+    .dash-table .cell-num { text-align: right; }
+    .dash-table .cell-strong { font-weight: 700; }
+    .dash-table .cell-pnl.good { color: var(--good); font-weight: 700; }
+    .dash-table .cell-pnl.bad { color: var(--bad); font-weight: 700; }
+
+    .section-hint {
+      margin-top: -2px;
+      margin-bottom: 10px;
+      color: var(--muted);
+      font: 12px/1.4 "Space Grotesk", sans-serif;
     }
 
     @media (prefers-reduced-motion: reduce) {
@@ -312,7 +424,7 @@
 
     @media (max-width: 900px) {
       .metric, .summary-card, .meta-card { grid-column: span 12; }
-      .controls { grid-template-columns: 1fr; }
+      .control-row { grid-template-columns: 1fr; }
       .summary-grid { grid-template-columns: 1fr; }
     }
   </style>
@@ -328,15 +440,29 @@
       </p>
 
       <div class="controls">
-        <div id="dropzone" class="dropzone" role="button" tabindex="0" aria-label="Load summary JSON">
-          <span><strong>Drop a JSON file here</strong> or choose one manually.</span>
-          <span id="file-name">No file loaded</span>
+        <div class="control-row">
+          <div id="dropzone" class="dropzone" role="button" tabindex="0" aria-label="Load summary JSON">
+            <span><strong>Drop a JSON file here</strong> or choose one manually.</span>
+            <span id="file-name">No file loaded</span>
+          </div>
+          <div class="tool-group">
+            <label class="btn" for="file-input">Load JSON</label>
+            <label class="btn secondary" for="file-input-multi">Compare Runs</label>
+            <label class="btn secondary" for="preset-csv-input">Load Preset CSV</label>
+          </div>
         </div>
-        <div style="display:flex; gap:10px; flex-wrap:wrap;">
-          <label class="btn" for="file-input">Load JSON</label>
+        <div class="tool-row">
+          <label for="robustness-seed" class="seed-control">
+            Seed
+            <input id="robustness-seed" type="number" value="1337" min="0" step="1">
+          </label>
+          <button id="run-seeded-robustness" class="btn secondary" type="button">Seeded Robustness Test</button>
+          <button id="reset-dashboard" class="btn warn" type="button">Reset</button>
           <button id="load-sample" class="btn secondary" type="button">Load Sample</button>
         </div>
         <input id="file-input" type="file" accept=".json,application/json">
+        <input id="file-input-multi" type="file" accept=".json,application/json" multiple>
+        <input id="preset-csv-input" type="file" accept=".csv,text/csv">
       </div>
     </section>
 
@@ -408,16 +534,48 @@
         <div class="label">Raw JSON (Normalized)</div>
         <pre id="raw-json">{}</pre>
       </div>
+
+      <div id="compare-card" class="card json-card" hidden>
+        <div class="label">Compare Runs (Multi-File)</div>
+        <div class="section-hint">Load multiple exported JSON summaries to compare outcomes side-by-side.</div>
+        <div class="table-wrap">
+          <table id="compare-table" class="dash-table">
+            <thead></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div id="preset-csv-card" class="card json-card" hidden>
+        <div class="label">Preset Batch CSV Comparison</div>
+        <div class="section-hint">Load a ranked preset-batch CSV export to review candidate rule profiles.</div>
+        <div class="table-wrap">
+          <table id="preset-csv-table" class="dash-table">
+            <thead></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
     </section>
   </div>
 
   <script>
     const fileInput = document.getElementById("file-input");
     const loadSampleBtn = document.getElementById("load-sample");
+    const runSeededRobustnessBtn = document.getElementById("run-seeded-robustness");
+    const robustnessSeedInput = document.getElementById("robustness-seed");
+    const resetDashboardBtn = document.getElementById("reset-dashboard");
+    const fileInputMulti = document.getElementById("file-input-multi");
+    const presetCsvInput = document.getElementById("preset-csv-input");
     const dropzone = document.getElementById("dropzone");
     const fileNameEl = document.getElementById("file-name");
     const emptyEl = document.getElementById("empty");
     const dashboardEl = document.getElementById("dashboard");
+    const compareCardEl = document.getElementById("compare-card");
+    const compareTableEl = document.getElementById("compare-table");
+    const presetCsvCardEl = document.getElementById("preset-csv-card");
+    const presetCsvTableEl = document.getElementById("preset-csv-table");
+    const defaultDropzoneText = "No file loaded";
 
     const sample = {
       steps: 50,
@@ -432,6 +590,56 @@
         win_rate: 55.56,
       },
     };
+
+    function mulberry32(seed) {
+      let t = seed >>> 0;
+      return function () {
+        t += 0x6D2B79F5;
+        let r = Math.imul(t ^ (t >>> 15), 1 | t);
+        r ^= r + Math.imul(r ^ (r >>> 7), 61 | r);
+        return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
+      };
+    }
+
+    function makeSeededRobustnessPayloads(seed = 1337, count = 10) {
+      const rand = mulberry32(seed);
+      const outputs = [];
+
+      for (let i = 0; i < count; i += 1) {
+        const trades = Math.floor(rand() * 20);
+        const wins = Math.floor(rand() * (trades + 1));
+        const losses = Math.max(0, trades - wins);
+        const totalPnl = Number(((rand() * 800) - 300).toFixed(4));
+        const actionsTaken = Math.floor(rand() * 40);
+        const ratioWinRate = trades > 0 ? wins / trades : 0;
+        const percentWinRate = ratioWinRate * 100;
+        const useRatio = rand() < 0.5;
+        const missingSummary = rand() < 0.15;
+        const partialSummary = rand() < 0.35;
+
+        const payload = {
+          steps: Math.floor(rand() * 200),
+          seed: seed + i,
+          actions_taken: actionsTaken,
+          generated_at_utc: new Date(Date.UTC(2026, 1, 23, 12, i, 0)).toISOString(),
+        };
+
+        if (!missingSummary) {
+          payload.summary = {};
+          if (!partialSummary || rand() < 0.8) payload.summary.total_trades = trades;
+          if (!partialSummary || rand() < 0.8) payload.summary.total_pnl = totalPnl;
+          if (!partialSummary || rand() < 0.8) payload.summary.wins = wins;
+          if (!partialSummary || rand() < 0.8) payload.summary.losses = losses;
+          if (!partialSummary || rand() < 0.8) payload.summary.win_rate = useRatio ? ratioWinRate : percentWinRate;
+          if (rand() < 0.25) payload.summary.extra_metric = Number((rand() * 10).toFixed(2));
+        }
+
+        if (rand() < 0.2) payload.noise = { tag: `robust_${i}`, flag: rand() < 0.5 };
+        outputs.push({ label: `Robust ${String(i + 1).padStart(2, "0")}`, payload });
+      }
+
+      return outputs;
+    }
 
     const normalize = (payload) => {
       const summary = payload && payload.summary ? payload.summary : {};
@@ -490,9 +698,187 @@
       document.getElementById("losses-bar").style.width = `${lossesPct}%`;
 
       document.getElementById("raw-json").textContent = JSON.stringify(data, null, 2);
+      compareCardEl.hidden = true;
+      presetCsvCardEl.hidden = true;
 
       emptyEl.hidden = true;
       dashboardEl.hidden = false;
+    }
+
+    function resetDashboardView() {
+      emptyEl.hidden = false;
+      dashboardEl.hidden = true;
+      compareCardEl.hidden = true;
+      presetCsvCardEl.hidden = true;
+      fileNameEl.textContent = defaultDropzoneText;
+      fileInput.value = "";
+      fileInputMulti.value = "";
+      presetCsvInput.value = "";
+      robustnessSeedInput.value = "1337";
+      compareTableEl.querySelector("thead").innerHTML = "";
+      compareTableEl.querySelector("tbody").innerHTML = "";
+      presetCsvTableEl.querySelector("thead").innerHTML = "";
+      presetCsvTableEl.querySelector("tbody").innerHTML = "";
+      document.getElementById("metric-pnl").textContent = "$0.00";
+      document.getElementById("metric-pnl").className = "value";
+      document.getElementById("metric-pnl-note").textContent = "Total realized for the run summary";
+      document.getElementById("metric-win-rate").textContent = "0.00%";
+      document.getElementById("metric-trades").textContent = "0";
+      document.getElementById("metric-actions").textContent = "0";
+      document.getElementById("wins-val").textContent = "0";
+      document.getElementById("losses-val").textContent = "0";
+      document.getElementById("trades-val").textContent = "0";
+      document.getElementById("seed-val").textContent = "-";
+      document.getElementById("steps-val").textContent = "-";
+      document.getElementById("gen-val").textContent = "-";
+      document.getElementById("meta-file").textContent = "-";
+      document.getElementById("meta-interpretation").textContent = "Neutral";
+      document.getElementById("wins-pct-label").textContent = "0%";
+      document.getElementById("losses-pct-label").textContent = "0%";
+      document.getElementById("wins-bar").style.width = "0%";
+      document.getElementById("losses-bar").style.width = "0%";
+      document.getElementById("raw-json").textContent = "{}";
+    }
+
+    function renderCompare(files) {
+      const normalizedRuns = files.map((f) => ({ label: f.label, data: normalize(f.payload) }));
+      const rows = normalizedRuns.map(({ label, data }) => ({
+        file: label,
+        seed: data.seed,
+        steps: data.steps,
+        actions: data.actions_taken,
+        trades: data.summary.total_trades,
+        pnl: data.summary.total_pnl,
+        win_rate_pct: data.summary.win_rate <= 1 ? data.summary.win_rate * 100 : data.summary.win_rate,
+        wins: data.summary.wins,
+        losses: data.summary.losses,
+      }));
+
+      const headers = ["File", "Seed", "Steps", "Actions", "Trades", "PnL", "Win Rate", "Wins", "Losses"];
+      compareTableEl.querySelector("thead").innerHTML =
+        `<tr>${headers.map(h => `<th>${h}</th>`).join("")}</tr>`;
+
+      compareTableEl.querySelector("tbody").innerHTML = rows.map((r) => `
+        <tr>
+          <td class="cell-strong">${r.file}</td>
+          <td class="cell-num">${r.seed}</td>
+          <td class="cell-num">${r.steps}</td>
+          <td class="cell-num">${r.actions}</td>
+          <td class="cell-num">${r.trades}</td>
+          <td class="cell-num cell-pnl ${r.pnl > 0 ? "good" : r.pnl < 0 ? "bad" : ""}">${money(r.pnl)}</td>
+          <td class="cell-num">${pct(r.win_rate_pct)}</td>
+          <td class="cell-num">${r.wins}</td>
+          <td class="cell-num">${r.losses}</td>
+        </tr>
+      `).join("");
+
+      compareCardEl.hidden = false;
+      presetCsvCardEl.hidden = true;
+      emptyEl.hidden = true;
+      dashboardEl.hidden = false;
+      fileNameEl.textContent = `${rows.length} files loaded`;
+    }
+
+    function parseCsvLine(line) {
+      const out = [];
+      let cur = "";
+      let inQuotes = false;
+      for (let i = 0; i < line.length; i += 1) {
+        const ch = line[i];
+        if (ch === '"') {
+          if (inQuotes && line[i + 1] === '"') {
+            cur += '"';
+            i += 1;
+          } else {
+            inQuotes = !inQuotes;
+          }
+        } else if (ch === "," && !inQuotes) {
+          out.push(cur);
+          cur = "";
+        } else {
+          cur += ch;
+        }
+      }
+      out.push(cur);
+      return out;
+    }
+
+    function parseCsv(text) {
+      const lines = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n").filter(Boolean);
+      if (!lines.length) return [];
+      const headers = parseCsvLine(lines[0]);
+      return lines.slice(1).map((line) => {
+        const cells = parseCsvLine(line);
+        const row = {};
+        headers.forEach((h, idx) => { row[h] = cells[idx] ?? ""; });
+        return row;
+      });
+    }
+
+    function renderPresetCsv(rows, label) {
+      const columns = [
+        "rank",
+        "preset_name",
+        "avg_total_pnl",
+        "worst_total_pnl",
+        "best_total_pnl",
+        "avg_total_trades",
+        "avg_win_rate",
+        "run_count",
+        "seed_count",
+        "usd_size",
+        "stop_loss_percent",
+        "sell_price",
+      ];
+
+      const pretty = {
+        rank: "Rank",
+        preset_name: "Preset",
+        avg_total_pnl: "Avg PnL",
+        worst_total_pnl: "Worst PnL",
+        best_total_pnl: "Best PnL",
+        avg_total_trades: "Avg Trades",
+        avg_win_rate: "Avg Win Rate",
+        run_count: "Runs",
+        seed_count: "Seeds",
+        usd_size: "USD Size",
+        stop_loss_percent: "Stop Loss %",
+        sell_price: "Sell Price",
+      };
+
+      presetCsvTableEl.querySelector("thead").innerHTML =
+        `<tr>${columns.map(c => `<th>${pretty[c] || c}</th>`).join("")}</tr>`;
+
+      presetCsvTableEl.querySelector("tbody").innerHTML = rows.map((r) => {
+        const pnl = Number(r.avg_total_pnl || 0);
+        const worstPnl = Number(r.worst_total_pnl || 0);
+        const bestPnl = Number(r.best_total_pnl || 0);
+        const winRate = Number(r.avg_win_rate || 0);
+        const values = {
+          ...r,
+          avg_total_pnl: money(pnl),
+          worst_total_pnl: money(worstPnl),
+          best_total_pnl: money(bestPnl),
+          avg_win_rate: pct(winRate <= 1 ? winRate * 100 : winRate),
+        };
+        return `<tr>${columns.map((c) => {
+          const isPnlCol = c === "avg_total_pnl" || c === "worst_total_pnl" || c === "best_total_pnl";
+          const n = c === "avg_total_pnl" ? pnl : c === "worst_total_pnl" ? worstPnl : bestPnl;
+          const classes = [
+            c === "rank" || c === "preset_name" ? "cell-strong" : "",
+            c === "preset_name" ? "" : "cell-num",
+            isPnlCol ? `cell-pnl ${n > 0 ? "good" : n < 0 ? "bad" : ""}` : "",
+          ].filter(Boolean).join(" ");
+          return `<td class="${classes}">${values[c] ?? ""}</td>`;
+        }).join("")}</tr>`;
+      }).join("");
+
+      compareCardEl.hidden = true;
+      presetCsvCardEl.hidden = false;
+      emptyEl.hidden = true;
+      dashboardEl.hidden = false;
+      fileNameEl.textContent = label;
+      document.getElementById("raw-json").textContent = JSON.stringify({ preset_batch_csv_rows: rows }, null, 2);
     }
 
     function loadText(text, label) {
@@ -511,9 +897,55 @@
       file.text().then((text) => loadText(text, file.name));
     });
 
+    fileInputMulti.addEventListener("change", async (e) => {
+      const files = Array.from(e.target.files || []);
+      if (!files.length) return;
+      const parsed = [];
+      for (const file of files) {
+        try {
+          parsed.push({ label: file.name, payload: JSON.parse(await file.text()) });
+        } catch (err) {
+          alert(`Invalid JSON in ${file.name}: ${err.message}`);
+          return;
+        }
+      }
+      render(parsed[0].payload, parsed[0].label);
+      if (parsed.length > 1) {
+        renderCompare(parsed);
+      }
+    });
+
+    presetCsvInput.addEventListener("change", async (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      try {
+        const rows = parseCsv(await file.text());
+        if (!rows.length) {
+          alert("CSV file has no rows.");
+          return;
+        }
+        renderPresetCsv(rows, file.name);
+      } catch (err) {
+        alert(`Invalid CSV file: ${err.message}`);
+      }
+    });
+
     loadSampleBtn.addEventListener("click", () => {
       render(sample, "Built-in sample");
       fileNameEl.textContent = "Built-in sample";
+    });
+
+    runSeededRobustnessBtn.addEventListener("click", () => {
+      const seed = Math.floor(Math.random() * 2147483647);
+      robustnessSeedInput.value = String(seed);
+      const generated = makeSeededRobustnessPayloads(seed, 12);
+      render(generated[0].payload, `Seeded robustness sample (seed=${seed})`);
+      renderCompare(generated);
+      fileNameEl.textContent = `Seeded robustness set (12 generated cases, seed=${seed})`;
+    });
+
+    resetDashboardBtn.addEventListener("click", () => {
+      resetDashboardView();
     });
 
     ["dragenter", "dragover"].forEach((evt) => {

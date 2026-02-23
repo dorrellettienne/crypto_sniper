@@ -1,7 +1,7 @@
 import os
 import sqlite3
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -43,7 +43,7 @@ def _insert_closed_trade(token_address: str, amount: float, exit_price: float, e
 def test_weekly_summary_excludes_old_trades_and_calculates_metrics():
     reset_db()
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     today_iso = now.isoformat()
     three_days_ago_iso = (now - timedelta(days=3)).isoformat()
     ten_days_ago_iso = (now - timedelta(days=10)).isoformat()

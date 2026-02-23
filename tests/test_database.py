@@ -1,5 +1,5 @@
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -20,7 +20,7 @@ if __name__ == "__main__":
             "token_address": "TEST123",
             "symbol": "TEST",
             "entry_price": 0.01,
-            "entry_time": datetime.utcnow().isoformat(),
+            "entry_time": datetime.now(timezone.utc).isoformat(),
             "quantity": 1000,
             "status": "OPEN",
         }

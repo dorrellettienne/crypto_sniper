@@ -1,6 +1,6 @@
 import os
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import config.settings as settings
 from src.execution.paper_engine import simulate_time_exit
@@ -36,7 +36,7 @@ def test_time_exit_triggers_for_old_position():
     )
 
     old_created_at = (
-        datetime.utcnow() - timedelta(minutes=settings.MAX_POSITION_MINUTES + 10)
+        datetime.now(timezone.utc) - timedelta(minutes=settings.MAX_POSITION_MINUTES + 10)
     ).isoformat()
 
     conn = sqlite3.connect(DB_PATH)

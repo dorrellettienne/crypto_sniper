@@ -1,7 +1,7 @@
 import os
 import sqlite3
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.abspath("."))
 
@@ -17,7 +17,7 @@ def test_reporting_integration_flow():
         os.remove(DB_PATH)
     init_db()
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     today_iso = now.isoformat()
     three_days_ago_iso = (now - timedelta(days=3)).isoformat()
     eight_days_ago_iso = (now - timedelta(days=8)).isoformat()

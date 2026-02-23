@@ -1,0 +1,92 @@
+{
+  "presets": [
+    {
+      "name": "tp_higher_base_r2",
+      "usd_size": 100.0,
+      "stop_loss_percent": 0.12,
+      "sell_price": 0.032,
+      "p_buy": 0.28,
+      "p_stop_loss": 0.15,
+      "p_sell": 0.32,
+      "p_stop_check": 0.15,
+      "p_time_exit": 0.1
+    },
+    {
+      "name": "tp_higher_031_r2",
+      "usd_size": 100.0,
+      "stop_loss_percent": 0.12,
+      "sell_price": 0.031,
+      "p_buy": 0.28,
+      "p_stop_loss": 0.15,
+      "p_sell": 0.32,
+      "p_stop_check": 0.15,
+      "p_time_exit": 0.1
+    },
+    {
+      "name": "tp_higher_033_r2",
+      "usd_size": 100.0,
+      "stop_loss_percent": 0.12,
+      "sell_price": 0.033,
+      "p_buy": 0.28,
+      "p_stop_loss": 0.15,
+      "p_sell": 0.32,
+      "p_stop_check": 0.15,
+      "p_time_exit": 0.1
+    },
+    {
+      "name": "tp_higher_034_r2",
+      "usd_size": 100.0,
+      "stop_loss_percent": 0.12,
+      "sell_price": 0.034,
+      "p_buy": 0.28,
+      "p_stop_loss": 0.15,
+      "p_sell": 0.32,
+      "p_stop_check": 0.15,
+      "p_time_exit": 0.1
+    },
+    {
+      "name": "tp_higher_tighter_stop_r2",
+      "usd_size": 100.0,
+      "stop_loss_percent": 0.11,
+      "sell_price": 0.032,
+      "p_buy": 0.28,
+      "p_stop_loss": 0.17,
+      "p_sell": 0.31,
+      "p_stop_check": 0.14,
+      "p_time_exit": 0.1
+    },
+    {
+      "name": "tp_higher_looser_stop_r2",
+      "usd_size": 100.0,
+      "stop_loss_percent": 0.13,
+      "sell_price": 0.032,
+      "p_buy": 0.28,
+      "p_stop_loss": 0.14,
+      "p_sell": 0.33,
+      "p_stop_check": 0.15,
+      "p_time_exit": 0.1
+    },
+    {
+      "name": "tp_higher_sell_heavier_r2",
+      "usd_size": 100.0,
+      "stop_loss_percent": 0.12,
+      "sell_price": 0.032,
+      "p_buy": 0.25,
+      "p_stop_loss": 0.15,
+      "p_sell": 0.36,
+      "p_stop_check": 0.14,
+      "p_time_exit": 0.1
+    },
+    {
+      "name": "tp_higher_buy_heavier_r2",
+      "usd_size": 100.0,
+      "stop_loss_percent": 0.12,
+      "sell_price": 0.032,
+      "p_buy": 0.31,
+      "p_stop_loss": 0.15,
+      "p_sell": 0.29,
+      "p_stop_check": 0.15,
+      "p_time_exit": 0.1
+    }
+  ]
+}

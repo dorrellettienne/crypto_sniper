@@ -1373,16 +1373,209 @@ Post-v1 enhancements  configurable sizing, CSV export, experiments, and live-arc
 - Re-ran regression bundle: `python run_regression_tests.py` -> `111 passed`, `Exit Code: 0`
 - Note: regression run still emits 4 test-only `datetime.utcnow()` deprecation warnings (unchanged behavior)
 
+Post-v1 rule parameterization  sniping-rule runner knobs (exit params + branch probabilities) (verified)
+- Expanded `src/runner/paper_sim_runner.py` to better reflect configurable sniping behavior (additive only)
+- Added runner exit-rule parameters:
+- `stop_loss_percent` (default `0.1`)
+- `sell_price` (default `0.02`)
+- CLI flags:
+- `--stop-loss-percent`
+- `--sell-price`
+- Added validation for exit-rule parameters (must be `> 0`)
+- Runner stop-loss and manual-sell branches now use configured values instead of hardcoded defaults
+- Added configurable branch probabilities for runner action selection:
+- `p_buy`
+- `p_stop_loss`
+- `p_sell`
+- `p_stop_check`
+- `p_time_exit`
+- CLI flags:
+- `--p-buy`
+- `--p-stop-loss`
+- `--p-sell`
+- `--p-stop-check`
+- `--p-time-exit`
+- Added probability validation:
+- all probabilities must be `>= 0`
+- probabilities must sum to `1.0`
+- Runner now uses weighted thresholds derived from configured branch probabilities (replacing fixed 20% buckets)
+- Added deterministic pytest coverage:
+- `tests/test_paper_sim_runner_exit_params.py` (4 tests)
+- verifies `stop_loss_percent` is passed to `simulate_stop_loss()`
+- verifies `sell_price` is passed to `simulate_sell()`
+- verifies invalid non-positive exit params are rejected
+- `tests/test_paper_sim_runner_branch_probabilities.py` (4 tests)
+- rejects invalid branch-probability sums
+- rejects negative branch probabilities
+- verifies weighted routing to buy/sell branches deterministically
+- Updated `run_regression_tests.py` to include both new test files
+- Ran: `python -m pytest -q tests/test_paper_sim_runner_exit_params.py`
+- Result: `4 passed`
+- Ran: `python -m pytest -q tests/test_paper_sim_runner_branch_probabilities.py`
+- Result: `4 passed`
+- Re-ran regression bundle: `python run_regression_tests.py` -> `119 passed`, `Exit Code: 0`
+- Note: regression run still emits 4 test-only `datetime.utcnow()` deprecation warnings (unchanged behavior)
+
+Post-v1 analysis/architecture expansion  per-trade exports, compare-runs dashboard, and adapter boundaries (verified)
+- Added per-trade export support for detailed analysis (beyond summary-level metrics)
+- `src/execution/persistence.py`:
+- Added read-only helper `get_closed_trades_for_export()` (SQLite-only, CLOSED trades rows, export-ready dicts)
+- `src/runner/paper_sim_runner.py`:
+- Added `build_closed_trades_export_csv_path(...)`
+- Added `save_closed_trades_csv(output_path)` (exports CLOSED trades rows to CSV)
+- Added CLI flags:
+- `--export-trades-csv-path`
+- `--export-trades-csv-dir`
+- CLI now prints exported closed-trades CSV path when requested
+- Added deterministic pytest coverage for per-trade export:
+- `tests/test_closed_trades_export_rows.py` (2 tests)
+- `tests/test_paper_sim_runner_closed_trades_csv_export.py` (3 tests)
+- Added live-architecture code boundaries (no live execution implemented):
+- `src/live/interfaces.py`
+- `ExecutionResult` and `RiskDecision` dataclasses
+- `ExecutionAdapter` and `RiskEngine` protocols
+- `src/live/paper_execution_adapter.py`
+- `PaperExecutionAdapter` wraps existing paper execution functions (`simulate_buy`, `simulate_sell`, `simulate_stop_loss`) without business-logic rewrites
+- Added deterministic adapter-boundary tests:
+- `tests/test_paper_execution_adapter.py` (4 tests)
+- Frontend compare-runs dashboard upgrade (UI-only, no backend behavior changes):
+- `frontend/index.html` now supports multi-file JSON load via `Compare Runs`
+- renders side-by-side comparison table for multiple exported run summaries
+- retains single-run summary cards and raw normalized JSON view
+- Repo hygiene improvements:
+- Added `.gitignore`
+- Untracked generated/sensitive files from git index (local files preserved):
+- `.env`
+- `data/sniper.db`
+- `data/exports/*`
+- `__pycache__` / `*.pyc`
+- `.pytest_cache/`
+- Updated `run_regression_tests.py` to include new backend test files
+- Ran focused tests:
+- `python -m pytest -q tests/test_closed_trades_export_rows.py tests/test_paper_sim_runner_closed_trades_csv_export.py tests/test_paper_execution_adapter.py`
+- Result: `9 passed`
+- Re-ran regression bundle: `python run_regression_tests.py` -> `128 passed`, `Exit Code: 0`
+- Note: regression run still emits 4 test-only `datetime.utcnow()` deprecation warnings (unchanged behavior)
+
 Current project checkpoint (post-v1 extended paper platform)
 - Paper-mode v1 milestone remains stable and regression-green
-- Export/ops tooling now supports both JSON and CSV summary exports
-- Runner supports configurable position sizing (`--usd-size`)
+- Export/ops tooling supports JSON summary, CSV summary, and closed-trades CSV exports
+- Runner supports configurable position sizing and configurable sniping-rule exit/branch behavior
 - Seed-sweep experiment helpers exist for strategy comparison workflows
-- Live-trading architecture planning doc is in place without contaminating paper-mode execution code
-- Full regression suite passing at current checkpoint: `111 passed`, `Exit Code: 0`
+- Frontend supports single-run viewing and multi-run comparison from exported JSON files
+- Live-architecture code boundaries are now started (paper adapter + interfaces only; no live execution code)
+- Full regression suite passing at current checkpoint: `128 passed`, `Exit Code: 0`
 
-Next small step: Optional cleanup  fix test-only `datetime.utcnow()` deprecation warnings and add a tiny README usage section for runner/export/frontend workflow.
+Next small step: Freeze a paper-candidate-rules v1 checkpoint/tag and optionally add a one-command runner preset for candidate_final_v1_tp_higher_034.
 
 
 
 
+
+Cleanup/polish checkpoint  UTC test warning cleanup + README quickstart (verified)
+- Replaced deprecated `datetime.utcnow()` usages in tests with timezone-aware UTC timestamps (`datetime.now(timezone.utc)`) to remove test-only deprecation warnings
+- Updated test files:
+- `tests/test_daily_summary.py`
+- `tests/test_database.py`
+- `tests/test_reporting_integration_flow.py`
+- `tests/test_time_exit.py`
+- `tests/test_weekly_summary.py`
+- Added `README.md` quickstart covering:
+- paper simulation commands
+- JSON/CSV summary exports
+- closed-trades CSV export
+- dashboard usage (`frontend/index.html`)
+- compare-runs workflow
+- regression suite command
+- Re-ran regression bundle: `python run_regression_tests.py` -> `128 passed`, `Exit Code: 0`
+- Note: cleanup/polish only (no schema changes, no execution logic changes)
+
+Rule tuning phase starter  preset batch seed-sweep runner + comparison CSV (verified)
+- Extended `src/runner/paper_sim_experiments.py` `run_seed_sweep(...)` to accept configurable rule parameters:
+- `usd_size`
+- `stop_loss_percent`
+- `sell_price`
+- branch probabilities (`p_buy`, `p_stop_loss`, `p_sell`, `p_stop_check`, `p_time_exit`)
+- Added preset-batch experiment helpers:
+- `run_preset_seed_sweep_batch(...)` (runs multiple presets across shared seeds and returns aggregate rows)
+- `build_preset_batch_summary_csv_path(...)` (deterministic CSV path builder)
+- `save_preset_batch_summary_csv(...)` (writes preset comparison aggregate rows to CSV)
+- Added new CLI entrypoint: `src/runner/paper_sim_preset_batch_runner.py`
+- runs built-in rule presets (`balanced`, `target_heavy`, `defensive`) across a seed list
+- supports `--steps`, `--seeds`, `--export-csv-path`, `--export-csv-dir`
+- prints compact preset aggregate metrics and optional CSV export path
+- Added deterministic pytest coverage:
+- `tests/test_paper_sim_experiment_preset_batch.py` (4 tests)
+- Updated `tests/test_paper_sim_experiments.py` monkeypatch stub to support extended runner args
+- Updated `run_regression_tests.py` to include preset-batch tests
+- Ran: `python -m pytest -q tests/test_paper_sim_experiments.py tests/test_paper_sim_experiment_preset_batch.py`
+- Result: `7 passed`
+- Re-ran regression bundle: `python run_regression_tests.py` -> `132 passed`, `Exit Code: 0`
+- Note: additive rule-tuning tooling only (no schema changes, no execution logic rewrites)
+
+Rule tuning workflow upgrade  custom presets + ranked batch outputs + preset CSV dashboard view (verified)
+- `src/runner/paper_sim_preset_batch_runner.py`:
+- Added `--presets-json-path` to load custom rule presets from JSON
+- Supports both JSON shapes:
+- list of preset objects: `[{...}, {...}]`
+- wrapped object: `{ "presets": [{...}] }`
+- Missing preset names are auto-filled (`preset_#`)
+- `src/runner/paper_sim_experiments.py`:
+- Added `rank_preset_batch_rows(...)` to sort preset aggregates and assign 1-based rank
+- Ranking priority:
+- `avg_total_pnl` desc
+- `worst_total_pnl` desc (less downside ranks higher)
+- `avg_win_rate` desc
+- `preset_name` asc
+- Updated preset-batch CSV export to include `rank` column
+- Frontend dashboard (`frontend/index.html`) upgrade:
+- Added `Load Preset CSV` action for preset-batch comparison CSV files
+- Parses CSV in-browser and renders a preset comparison table (rank, avg/best/worst pnl, win rate, seeds, rule params)
+- Preserves existing JSON single-run and multi-run compare workflows
+- Added deterministic pytest coverage:
+- `tests/test_paper_sim_preset_batch_runner.py` (4 tests)
+- Expanded `tests/test_paper_sim_experiment_preset_batch.py` with ranking test
+- Updated `tests/test_paper_sim_experiments.py` for extended seed-sweep runner args
+- Updated `run_regression_tests.py` to include new preset-batch runner tests
+- Ran: `python -m pytest -q tests/test_paper_sim_experiments.py tests/test_paper_sim_experiment_preset_batch.py tests/test_paper_sim_preset_batch_runner.py`
+- Result: `12 passed`
+- Re-ran regression bundle: `python run_regression_tests.py` -> `137 passed`, `Exit Code: 0`
+- Note: additive rule-tuning workflow tooling + frontend analysis UX only (no schema changes, no execution logic rewrites)
+
+Rule tuning milestone  experiment isolation fix + R1/R2 tuning + candidate validation (verified)
+- Fixed experiment validity issue in `src/runner/paper_sim_experiments.py`:
+- Added per-seed sweep isolation by clearing `positions` before each run (`_reset_positions_for_experiment_run()`)
+- Prevents SQLite state leakage across seeds/presets during batch comparisons
+- Added deterministic pytest coverage for sweep isolation in `tests/test_paper_sim_experiments.py`
+- Re-ran regression after isolation fix: `138 passed`, `Exit Code: 0`
+- Added custom preset files for iterative tuning:
+- `config/sniping_presets.json` (starter profiles)
+- `config/sniping_presets_tuned_round1.json` (8 tuned variants around top families)
+- `config/sniping_presets_tuned_round2.json` (8 focused variants around Round 1 winner)
+- `config/sniping_presets_validation_top3.json` (top 3 Round 2 finalists)
+- `config/sniping_presets_candidates_v1.json` (promoted winner + backup)
+- Round 1 tuning (30 seeds x 100 steps) promoted `target_push` family as top region
+- Round 2 tuning (30 seeds x 100 steps) winner:
+- `tp_higher_034_r2` (best average pnl and downside floor among tested variants)
+- Validation run (50 seeds x 200 steps) confirmed top-3 ordering and promoted finalists
+- Final candidate validation (100 seeds x 200 steps, 2 presets) results:
+- Winner: `candidate_final_v1_tp_higher_034`
+- `avg_total_pnl`: `7969.08`
+- `avg_total_trades`: `49.91`
+- `avg_win_rate`: `0.6751`
+- `best_total_pnl`: `12120.0`
+- `worst_total_pnl`: `-72.0`
+- Backup: `candidate_backup_v1_tp_higher_033`
+- `avg_total_pnl`: `7629.08`
+- `avg_total_trades`: `49.91`
+- `avg_win_rate`: `0.6751`
+- `best_total_pnl`: `11610.0`
+- `worst_total_pnl`: `-72.0`
+- Key experiment artifacts exported:
+- `data/exports/paper_sim_preset_batch_summary_2026-02-23T18-18-12-905087_plus_00-00.csv` (Round 2)
+- `data/exports/paper_sim_preset_batch_summary_2026-02-23T18-56-25-702957_plus_00-00.csv` (final 100-seed validation)
+- `data/exports/tuned_round1_batch_run.log`
+- `data/exports/tuned_round2_batch_run.log`
+- `data/exports/validation_top3_50x200.log`
+- `data/exports/candidates_v1_validation_100x200.log`
+- Note: candidate presets are now ready for a dedicated paper-candidate-rule freeze checkpoint.

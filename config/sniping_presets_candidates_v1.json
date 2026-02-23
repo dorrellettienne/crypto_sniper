@@ -1,0 +1,26 @@
+{
+  "presets": [
+    {
+      "name": "candidate_final_v1_tp_higher_034",
+      "usd_size": 100.0,
+      "stop_loss_percent": 0.12,
+      "sell_price": 0.034,
+      "p_buy": 0.28,
+      "p_stop_loss": 0.15,
+      "p_sell": 0.32,
+      "p_stop_check": 0.15,
+      "p_time_exit": 0.1
+    },
+    {
+      "name": "candidate_backup_v1_tp_higher_033",
+      "usd_size": 100.0,
+      "stop_loss_percent": 0.12,
+      "sell_price": 0.033,
+      "p_buy": 0.28,
+      "p_stop_loss": 0.15,
+      "p_sell": 0.32,
+      "p_stop_check": 0.15,
+      "p_time_exit": 0.1
+    }
+  ]
+}

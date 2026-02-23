@@ -1,7 +1,7 @@
 import os
 import sqlite3
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.abspath("."))
 
@@ -21,7 +21,7 @@ def reset_db():
 def test_daily_summary_calculates_metrics_for_today():
     reset_db()
 
-    now_iso = datetime.utcnow().isoformat()
+    now_iso = datetime.now(timezone.utc).isoformat()
 
     conn = sqlite3.connect(DB_PATH)
     rows = [

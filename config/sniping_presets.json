@@ -1,0 +1,59 @@
+{
+  "presets": [
+    {
+      "name": "balanced_v1",
+      "usd_size": 75.0,
+      "stop_loss_percent": 0.1,
+      "sell_price": 0.02,
+      "p_buy": 0.25,
+      "p_stop_loss": 0.2,
+      "p_sell": 0.25,
+      "p_stop_check": 0.15,
+      "p_time_exit": 0.15
+    },
+    {
+      "name": "target_push_v1",
+      "usd_size": 100.0,
+      "stop_loss_percent": 0.12,
+      "sell_price": 0.03,
+      "p_buy": 0.3,
+      "p_stop_loss": 0.15,
+      "p_sell": 0.3,
+      "p_stop_check": 0.15,
+      "p_time_exit": 0.1
+    },
+    {
+      "name": "defensive_stop_v1",
+      "usd_size": 60.0,
+      "stop_loss_percent": 0.08,
+      "sell_price": 0.02,
+      "p_buy": 0.2,
+      "p_stop_loss": 0.3,
+      "p_sell": 0.2,
+      "p_stop_check": 0.2,
+      "p_time_exit": 0.1
+    },
+    {
+      "name": "fast_cycle_v1",
+      "usd_size": 80.0,
+      "stop_loss_percent": 0.1,
+      "sell_price": 0.018,
+      "p_buy": 0.3,
+      "p_stop_loss": 0.2,
+      "p_sell": 0.2,
+      "p_stop_check": 0.1,
+      "p_time_exit": 0.2
+    },
+    {
+      "name": "tight_risk_high_target_v1",
+      "usd_size": 90.0,
+      "stop_loss_percent": 0.07,
+      "sell_price": 0.03,
+      "p_buy": 0.22,
+      "p_stop_loss": 0.28,
+      "p_sell": 0.24,
+      "p_stop_check": 0.16,
+      "p_time_exit": 0.1
+    }
+  ]
+}

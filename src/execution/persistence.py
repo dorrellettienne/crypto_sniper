@@ -968,3 +968,36 @@ def get_upside_deviation():
         "upside_deviation": round(upside_deviation, 4),
         "win_count": win_count
     }
+
+
+def get_closed_trades_for_export() -> list[dict[str, Any]]:
+    """
+    Returns CLOSED trades as export-ready rows for analysis.
+    Read-only helper. SQLite only.
+    """
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            """
+            SELECT
+                id,
+                token_address,
+                symbol,
+                entry_price,
+                exit_price,
+                amount,
+                usd_size,
+                pnl,
+                status,
+                created_at,
+                exit_time
+            FROM positions
+            WHERE status = 'CLOSED'
+            ORDER BY id ASC
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
