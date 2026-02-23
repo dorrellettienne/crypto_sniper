@@ -1,0 +1,548 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Crypto Sniper Paper Dashboard</title>
+  <style>
+    :root {
+      --bg: #071018;
+      --panel: rgba(12, 22, 31, 0.88);
+      --panel-2: rgba(16, 30, 42, 0.95);
+      --ink: #ecf4fb;
+      --muted: #9cb3c7;
+      --line: #223646;
+      --good: #30d59b;
+      --bad: #ff6f8d;
+      --accent: #4dc3ff;
+      --accent-2: #7dd3fc;
+      --shadow: 0 24px 70px rgba(0, 0, 0, 0.42);
+      --radius: 18px;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Trebuchet MS", system-ui, sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 12% 8%, rgba(77, 195, 255, 0.22), transparent 42%),
+        radial-gradient(circle at 88% 6%, rgba(48, 213, 155, 0.14), transparent 35%),
+        radial-gradient(circle at 50% 110%, rgba(125, 211, 252, 0.08), transparent 50%),
+        linear-gradient(180deg, #060c12, #071018 38%, #09131b);
+      min-height: 100vh;
+    }
+
+    .shell {
+      width: min(1100px, calc(100% - 32px));
+      margin: 24px auto 48px;
+    }
+
+    .hero {
+      background:
+        linear-gradient(135deg, rgba(14, 26, 36, 0.96), rgba(15, 30, 42, 0.94)),
+        radial-gradient(circle at 90% 10%, rgba(77, 195, 255, 0.08), transparent 45%);
+      border: 1px solid rgba(159, 178, 194, 0.13);
+      border-radius: 24px;
+      box-shadow: var(--shadow);
+      padding: 24px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .hero::after {
+      content: "";
+      position: absolute;
+      inset: auto -10% -35% auto;
+      width: 340px;
+      height: 340px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(56, 189, 248, 0.12), transparent 70%);
+      pointer-events: none;
+    }
+
+    .eyebrow {
+      color: var(--accent);
+      font-size: 12px;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      margin: 0 0 8px;
+      font-weight: 700;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(28px, 4vw, 42px);
+      line-height: 1.05;
+      font-weight: 800;
+      font-family: Georgia, "Times New Roman", serif;
+      text-wrap: balance;
+    }
+
+    .sub {
+      margin: 10px 0 18px;
+      color: var(--muted);
+      max-width: 72ch;
+      line-height: 1.45;
+    }
+
+    .controls {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 12px;
+      align-items: stretch;
+    }
+
+    .dropzone {
+      border: 1px dashed rgba(56, 189, 248, 0.38);
+      background: linear-gradient(180deg, rgba(6, 13, 19, 0.75), rgba(7, 16, 24, 0.55));
+      border-radius: 14px;
+      padding: 14px;
+      color: var(--muted);
+      min-height: 54px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .dropzone strong { color: var(--ink); }
+
+    .btn {
+      appearance: none;
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      background: linear-gradient(180deg, rgba(56, 189, 248, 0.16), rgba(56, 189, 248, 0.08));
+      color: var(--ink);
+      padding: 12px 16px;
+      border-radius: 12px;
+      font: 700 14px/1 "Trebuchet MS", sans-serif;
+      cursor: pointer;
+      transition: transform 120ms ease, border-color 120ms ease;
+    }
+
+    .btn:hover { transform: translateY(-1px); border-color: rgba(56, 189, 248, 0.5); }
+    .btn:active { transform: translateY(0); }
+    .btn.secondary {
+      border-color: rgba(159, 178, 194, 0.2);
+      background: rgba(11, 17, 22, 0.35);
+      color: var(--muted);
+    }
+
+    input[type="file"] { display: none; }
+
+    .grid {
+      margin-top: 18px;
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 14px;
+      align-items: start;
+    }
+
+    .card {
+      background:
+        linear-gradient(180deg, rgba(12, 22, 31, 0.96), rgba(9, 16, 23, 0.96));
+      border: 1px solid rgba(159, 178, 194, 0.08);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 14px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .card::before {
+      content: "";
+      position: absolute;
+      inset: 0 0 auto 0;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(77, 195, 255, 0.28), transparent);
+      pointer-events: none;
+    }
+
+    .metric { grid-column: span 3; }
+    .summary-card { grid-column: span 7; }
+    .meta-card { grid-column: span 5; }
+    .bar-card { grid-column: span 12; }
+    .json-card { grid-column: span 12; }
+
+    .label {
+      color: var(--muted);
+      font: 600 11px/1.2 "Trebuchet MS", sans-serif;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+
+    .value {
+      font-size: clamp(22px, 3vw, 30px);
+      line-height: 1.1;
+      font-weight: 800;
+      font-family: Georgia, "Times New Roman", serif;
+    }
+
+    .value.good { color: var(--good); }
+    .value.bad { color: var(--bad); }
+    .value.accent { color: var(--accent); }
+
+    .tiny {
+      margin-top: 6px;
+      color: var(--muted);
+      font: 13px/1.3 "Trebuchet MS", sans-serif;
+    }
+
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px 18px;
+    }
+
+    .row {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 8px 0;
+      border-bottom: 1px solid rgba(159, 178, 194, 0.06);
+      font-family: "Trebuchet MS", sans-serif;
+    }
+
+    .row:last-child { border-bottom: 0; }
+    .row .k { color: var(--muted); }
+    .row .v { color: var(--ink); font-weight: 700; text-align: right; }
+
+    .bar-wrap {
+      display: grid;
+      gap: 10px;
+    }
+
+    .bar-label {
+      display: flex;
+      justify-content: space-between;
+      color: var(--muted);
+      font: 13px/1.2 "Trebuchet MS", sans-serif;
+    }
+
+    .track {
+      height: 14px;
+      background: rgba(159, 178, 194, 0.09);
+      border-radius: 999px;
+      overflow: hidden;
+      border: 1px solid rgba(159, 178, 194, 0.06);
+    }
+
+    .fill {
+      height: 100%;
+      width: 0%;
+      transition: width 250ms ease;
+    }
+
+    .fill.good { background: linear-gradient(90deg, rgba(52, 211, 153, 0.55), rgba(52, 211, 153, 0.95)); }
+    .fill.bad { background: linear-gradient(90deg, rgba(251, 113, 133, 0.55), rgba(251, 113, 133, 0.9)); }
+
+    pre {
+      margin: 0;
+      padding: 12px;
+      border-radius: 12px;
+      background: rgba(8, 16, 24, 0.9);
+      border: 1px solid rgba(159, 178, 194, 0.08);
+      color: #d7e6f2;
+      overflow: auto;
+      font: 12px/1.45 Consolas, monospace;
+      max-height: 320px;
+    }
+
+    .metric {
+      padding: 16px;
+      min-height: 122px;
+    }
+
+    .metric .label {
+      margin-bottom: 10px;
+    }
+
+    .metric::after {
+      content: "";
+      position: absolute;
+      right: -14px;
+      top: -14px;
+      width: 68px;
+      height: 68px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(77, 195, 255, 0.11), transparent 70%);
+      pointer-events: none;
+    }
+
+    .summary-card, .meta-card {
+      min-height: 210px;
+    }
+
+    .summary-card .summary-grid {
+      margin-top: 4px;
+    }
+
+    .meta-card .row .k {
+      max-width: 50%;
+    }
+
+    .bar-card .track {
+      height: 16px;
+      background: rgba(255, 255, 255, 0.03);
+    }
+
+    .json-card {
+      padding-top: 12px;
+    }
+
+    .json-card .label {
+      margin-bottom: 10px;
+    }
+
+    .empty {
+      margin-top: 14px;
+      color: var(--muted);
+      font: 14px/1.5 "Trebuchet MS", sans-serif;
+      padding: 14px;
+      border-radius: 14px;
+      border: 1px dashed rgba(159, 178, 194, 0.16);
+      background: rgba(11, 17, 22, 0.35);
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .btn, .fill { transition: none; }
+    }
+
+    @media (max-width: 900px) {
+      .metric, .summary-card, .meta-card { grid-column: span 12; }
+      .controls { grid-template-columns: 1fr; }
+      .summary-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="hero">
+      <p class="eyebrow">Paper Mode V1 Dashboard</p>
+      <h1>Simulation Summary Viewer</h1>
+      <p class="sub">
+        Load a JSON summary exported by the paper simulation runner (`--export-json-path` or `--export-json-dir`) to inspect key metrics quickly.
+        This UI is read-only and works entirely in your browser.
+      </p>
+
+      <div class="controls">
+        <div id="dropzone" class="dropzone" role="button" tabindex="0" aria-label="Load summary JSON">
+          <span><strong>Drop a JSON file here</strong> or choose one manually.</span>
+          <span id="file-name">No file loaded</span>
+        </div>
+        <div style="display:flex; gap:10px; flex-wrap:wrap;">
+          <label class="btn" for="file-input">Load JSON</label>
+          <button id="load-sample" class="btn secondary" type="button">Load Sample</button>
+        </div>
+        <input id="file-input" type="file" accept=".json,application/json">
+      </div>
+    </section>
+
+    <div id="empty" class="empty">
+      Waiting for a simulation summary JSON file. Export one from the CLI and load it here.
+    </div>
+
+    <section id="dashboard" class="grid" hidden>
+      <div class="card metric">
+        <div class="label">Net PnL</div>
+        <div id="metric-pnl" class="value">$0.00</div>
+        <div id="metric-pnl-note" class="tiny">Total realized for the run summary</div>
+      </div>
+
+      <div class="card metric">
+        <div class="label">Win Rate</div>
+        <div id="metric-win-rate" class="value accent">0.00%</div>
+        <div class="tiny">From exported summary</div>
+      </div>
+
+      <div class="card metric">
+        <div class="label">Closed Trades</div>
+        <div id="metric-trades" class="value">0</div>
+        <div class="tiny">Closed trades in summary</div>
+      </div>
+
+      <div class="card metric">
+        <div class="label">Actions Executed</div>
+        <div id="metric-actions" class="value">0</div>
+        <div class="tiny">Runner action count</div>
+      </div>
+
+      <div class="card summary-card">
+        <div class="label">Summary Breakdown</div>
+        <div class="summary-grid">
+          <div>
+            <div class="row"><span class="k">Wins</span><span id="wins-val" class="v">0</span></div>
+            <div class="row"><span class="k">Losses</span><span id="losses-val" class="v">0</span></div>
+            <div class="row"><span class="k">Total Trades</span><span id="trades-val" class="v">0</span></div>
+          </div>
+          <div>
+            <div class="row"><span class="k">Seed</span><span id="seed-val" class="v">-</span></div>
+            <div class="row"><span class="k">Steps</span><span id="steps-val" class="v">-</span></div>
+            <div class="row"><span class="k">Generated UTC</span><span id="gen-val" class="v">-</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card meta-card">
+        <div class="label">Run Metadata</div>
+        <div class="row"><span class="k">Status</span><span class="v">Paper Mode Summary</span></div>
+        <div class="row"><span class="k">Schema</span><span class="v">Runner Export JSON</span></div>
+        <div class="row"><span class="k">Data Source</span><span class="v">Local File</span></div>
+        <div class="row"><span class="k">File</span><span id="meta-file" class="v">-</span></div>
+        <div class="row"><span class="k">Interpretation</span><span id="meta-interpretation" class="v">Neutral</span></div>
+      </div>
+
+      <div class="card bar-card">
+        <div class="label">Win / Loss Distribution</div>
+        <div class="bar-wrap">
+          <div class="bar-label"><span>Wins</span><span id="wins-pct-label">0%</span></div>
+          <div class="track"><div id="wins-bar" class="fill good"></div></div>
+          <div class="bar-label"><span>Losses</span><span id="losses-pct-label">0%</span></div>
+          <div class="track"><div id="losses-bar" class="fill bad"></div></div>
+        </div>
+      </div>
+
+      <div class="card json-card">
+        <div class="label">Raw JSON (Normalized)</div>
+        <pre id="raw-json">{}</pre>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const fileInput = document.getElementById("file-input");
+    const loadSampleBtn = document.getElementById("load-sample");
+    const dropzone = document.getElementById("dropzone");
+    const fileNameEl = document.getElementById("file-name");
+    const emptyEl = document.getElementById("empty");
+    const dashboardEl = document.getElementById("dashboard");
+
+    const sample = {
+      steps: 50,
+      seed: 7,
+      actions_taken: 18,
+      generated_at_utc: "2026-02-23T15:00:00+00:00",
+      summary: {
+        total_trades: 9,
+        total_pnl: 42.5,
+        wins: 5,
+        losses: 4,
+        win_rate: 55.56,
+      },
+    };
+
+    const normalize = (payload) => {
+      const summary = payload && payload.summary ? payload.summary : {};
+      return {
+        steps: payload?.steps ?? 0,
+        seed: payload?.seed ?? 0,
+        actions_taken: payload?.actions_taken ?? 0,
+        generated_at_utc: payload?.generated_at_utc ?? "",
+        summary: {
+          total_trades: Number(summary.total_trades ?? 0),
+          total_pnl: Number(summary.total_pnl ?? 0),
+          wins: Number(summary.wins ?? 0),
+          losses: Number(summary.losses ?? 0),
+          win_rate: Number(summary.win_rate ?? 0),
+        },
+      };
+    };
+
+    const money = (n) => {
+      const val = Number(n || 0);
+      return `${val < 0 ? "-" : ""}$${Math.abs(val).toFixed(2)}`;
+    };
+
+    const pct = (n) => `${Number(n || 0).toFixed(2)}%`;
+
+    function render(payload, sourceLabel) {
+      const data = normalize(payload);
+      const s = data.summary;
+      const total = Math.max(0, s.total_trades);
+      const normalizedWinRatePercent = s.win_rate <= 1 ? s.win_rate * 100 : s.win_rate;
+      const winsPct = total > 0 ? (s.wins / total) * 100 : 0;
+      const lossesPct = total > 0 ? (s.losses / total) * 100 : 0;
+
+      document.getElementById("metric-pnl").textContent = money(s.total_pnl);
+      document.getElementById("metric-pnl").className =
+        `value ${s.total_pnl > 0 ? "good" : s.total_pnl < 0 ? "bad" : ""}`.trim();
+      document.getElementById("metric-pnl-note").textContent =
+        s.total_pnl > 0 ? "Positive run summary" : s.total_pnl < 0 ? "Negative run summary" : "Flat run summary";
+      document.getElementById("metric-win-rate").textContent = pct(normalizedWinRatePercent);
+      document.getElementById("metric-trades").textContent = String(s.total_trades);
+      document.getElementById("metric-actions").textContent = String(data.actions_taken ?? 0);
+
+      document.getElementById("wins-val").textContent = String(s.wins);
+      document.getElementById("losses-val").textContent = String(s.losses);
+      document.getElementById("trades-val").textContent = String(s.total_trades);
+      document.getElementById("seed-val").textContent = String(data.seed);
+      document.getElementById("steps-val").textContent = String(data.steps);
+      document.getElementById("gen-val").textContent = (data.generated_at_utc || "-").replace("T", " ");
+      document.getElementById("meta-file").textContent = sourceLabel;
+      document.getElementById("meta-interpretation").textContent =
+        s.total_pnl > 0 ? "Positive PnL" : s.total_pnl < 0 ? "Drawdown" : "Break-even";
+
+      document.getElementById("wins-pct-label").textContent = pct(winsPct);
+      document.getElementById("losses-pct-label").textContent = pct(lossesPct);
+      document.getElementById("wins-bar").style.width = `${winsPct}%`;
+      document.getElementById("losses-bar").style.width = `${lossesPct}%`;
+
+      document.getElementById("raw-json").textContent = JSON.stringify(data, null, 2);
+
+      emptyEl.hidden = true;
+      dashboardEl.hidden = false;
+    }
+
+    function loadText(text, label) {
+      try {
+        const payload = JSON.parse(text);
+        render(payload, label);
+        fileNameEl.textContent = label;
+      } catch (err) {
+        alert(`Invalid JSON file: ${err.message}`);
+      }
+    }
+
+    fileInput.addEventListener("change", (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      file.text().then((text) => loadText(text, file.name));
+    });
+
+    loadSampleBtn.addEventListener("click", () => {
+      render(sample, "Built-in sample");
+      fileNameEl.textContent = "Built-in sample";
+    });
+
+    ["dragenter", "dragover"].forEach((evt) => {
+      dropzone.addEventListener(evt, (e) => {
+        e.preventDefault();
+        dropzone.style.borderColor = "rgba(52, 211, 153, 0.65)";
+      });
+    });
+
+    ["dragleave", "drop"].forEach((evt) => {
+      dropzone.addEventListener(evt, (e) => {
+        e.preventDefault();
+        dropzone.style.borderColor = "rgba(56, 189, 248, 0.38)";
+      });
+    });
+
+    dropzone.addEventListener("drop", (e) => {
+      const file = e.dataTransfer?.files?.[0];
+      if (!file) return;
+      file.text().then((text) => loadText(text, file.name));
+    });
+
+    dropzone.addEventListener("click", () => fileInput.click());
+    dropzone.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        fileInput.click();
+      }
+    });
+  </script>
+</body>
+</html>
