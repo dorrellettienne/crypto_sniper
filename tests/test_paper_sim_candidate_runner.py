@@ -43,7 +43,9 @@ def test_run_candidate_preset_passes_preset_params_and_returns_paths(monkeypatch
             "p_time_exit": 0.1,
         },
     )
+    monkeypatch.setattr(paper_sim_candidate_runner, "validate_candidate_preset_config", lambda preset: preset)
     captured = {}
+    audit_events = []
 
     def fake_run_simulation(**kwargs):
         captured.update(kwargs)
@@ -59,9 +61,15 @@ def test_run_candidate_preset_passes_preset_params_and_returns_paths(monkeypatch
     monkeypatch.setattr(paper_sim_candidate_runner, "build_simulation_summary_export_path", lambda *a, **k: "a.json")
     monkeypatch.setattr(paper_sim_candidate_runner, "build_simulation_summary_export_csv_path", lambda *a, **k: "a.csv")
     monkeypatch.setattr(paper_sim_candidate_runner, "build_closed_trades_export_csv_path", lambda *a, **k: "a_trades.csv")
+    monkeypatch.setattr(paper_sim_candidate_runner, "build_audit_log_path", lambda *a, **k: "audit.jsonl")
     monkeypatch.setattr(paper_sim_candidate_runner, "save_simulation_summary_json", lambda result, path: path)
     monkeypatch.setattr(paper_sim_candidate_runner, "save_simulation_summary_csv", lambda result, path: path)
     monkeypatch.setattr(paper_sim_candidate_runner, "save_closed_trades_csv", lambda path: path)
+    monkeypatch.setattr(
+        paper_sim_candidate_runner,
+        "append_audit_event",
+        lambda output_path, event_type, payload: audit_events.append((output_path, event_type, payload)) or output_path,
+    )
 
     out = paper_sim_candidate_runner.run_candidate_preset(
         preset_name="candidate_x",
@@ -78,6 +86,9 @@ def test_run_candidate_preset_passes_preset_params_and_returns_paths(monkeypatch
     assert out["export_json_path"] == "a.json"
     assert out["export_csv_path"] == "a.csv"
     assert out["export_trades_csv_path"] == "a_trades.csv"
+    assert out["audit_log_path"] == "audit.jsonl"
+    assert audit_events[0][1] == "run_started"
+    assert audit_events[-1][1] == "run_completed"
 
 
 def test_run_candidate_preset_can_skip_exports(monkeypatch):
@@ -96,6 +107,7 @@ def test_run_candidate_preset_can_skip_exports(monkeypatch):
             "p_time_exit": 0.1,
         },
     )
+    monkeypatch.setattr(paper_sim_candidate_runner, "validate_candidate_preset_config", lambda preset: preset)
     monkeypatch.setattr(
         paper_sim_candidate_runner,
         "run_simulation",
@@ -107,9 +119,51 @@ def test_run_candidate_preset_can_skip_exports(monkeypatch):
             "summary": {},
         },
     )
+    monkeypatch.setattr(paper_sim_candidate_runner, "append_audit_event", lambda *a, **k: None)
+    monkeypatch.setattr(paper_sim_candidate_runner, "build_audit_log_path", lambda *a, **k: "audit.jsonl")
 
     out = paper_sim_candidate_runner.run_candidate_preset(steps=1, seed=1)
 
     assert out["export_json_path"] is None
     assert out["export_csv_path"] is None
     assert out["export_trades_csv_path"] is None
+    assert out["audit_log_path"] == "audit.jsonl"
+
+
+def test_run_candidate_preset_logs_failure_and_reraises(monkeypatch):
+    monkeypatch.setattr(
+        paper_sim_candidate_runner,
+        "get_candidate_preset",
+        lambda preset_name, presets_path: {
+            "name": "candidate_x",
+            "usd_size": 100.0,
+            "stop_loss_percent": 0.12,
+            "sell_price": 0.034,
+            "p_buy": 0.28,
+            "p_stop_loss": 0.15,
+            "p_sell": 0.32,
+            "p_stop_check": 0.15,
+            "p_time_exit": 0.1,
+        },
+    )
+    monkeypatch.setattr(paper_sim_candidate_runner, "validate_candidate_preset_config", lambda preset: preset)
+    monkeypatch.setattr(paper_sim_candidate_runner, "build_audit_log_path", lambda *a, **k: "audit.jsonl")
+    events = []
+    monkeypatch.setattr(
+        paper_sim_candidate_runner,
+        "append_audit_event",
+        lambda output_path, event_type, payload: events.append(event_type) or output_path,
+    )
+
+    def fail_run(**kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(paper_sim_candidate_runner, "run_simulation", fail_run)
+
+    try:
+        paper_sim_candidate_runner.run_candidate_preset(steps=1, seed=1)
+        assert False, "Expected RuntimeError"
+    except RuntimeError as exc:
+        assert str(exc) == "boom"
+
+    assert events == ["run_started", "run_failed"]

@@ -449,6 +449,7 @@
             <label class="btn" for="file-input">Load JSON</label>
             <label class="btn secondary" for="file-input-multi">Compare Runs</label>
             <label class="btn secondary" for="preset-csv-input">Load Preset CSV</label>
+            <label class="btn secondary" for="audit-jsonl-input">Load Audit JSONL</label>
           </div>
         </div>
         <div class="tool-row">
@@ -463,6 +464,7 @@
         <input id="file-input" type="file" accept=".json,application/json">
         <input id="file-input-multi" type="file" accept=".json,application/json" multiple>
         <input id="preset-csv-input" type="file" accept=".csv,text/csv">
+        <input id="audit-jsonl-input" type="file" accept=".jsonl,.txt,application/json">
       </div>
     </section>
 
@@ -556,6 +558,29 @@
           </table>
         </div>
       </div>
+
+      <div id="audit-log-card" class="card json-card" hidden>
+        <div class="label">Audit Log (JSONL)</div>
+        <div class="section-hint">Load candidate-run or dry-run audit JSONL files to inspect event flow and failures.</div>
+        <div class="summary-grid" style="margin-bottom:12px;">
+          <div>
+            <div class="row"><span class="k">Total Events</span><span id="audit-total-events" class="v">0</span></div>
+            <div class="row"><span class="k">Failed Events</span><span id="audit-failed-events" class="v">0</span></div>
+            <div class="row"><span class="k">Retry Events</span><span id="audit-retry-events" class="v">0</span></div>
+          </div>
+          <div>
+            <div class="row"><span class="k">Export Events</span><span id="audit-export-events" class="v">0</span></div>
+            <div class="row"><span class="k">Run Completed</span><span id="audit-run-completed" class="v">0</span></div>
+            <div class="row"><span class="k">Max Sell Retry</span><span id="audit-max-sell-retry" class="v">0</span></div>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table id="audit-log-table" class="dash-table">
+            <thead></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
     </section>
   </div>
 
@@ -567,6 +592,7 @@
     const resetDashboardBtn = document.getElementById("reset-dashboard");
     const fileInputMulti = document.getElementById("file-input-multi");
     const presetCsvInput = document.getElementById("preset-csv-input");
+    const auditJsonlInput = document.getElementById("audit-jsonl-input");
     const dropzone = document.getElementById("dropzone");
     const fileNameEl = document.getElementById("file-name");
     const emptyEl = document.getElementById("empty");
@@ -575,6 +601,8 @@
     const compareTableEl = document.getElementById("compare-table");
     const presetCsvCardEl = document.getElementById("preset-csv-card");
     const presetCsvTableEl = document.getElementById("preset-csv-table");
+    const auditLogCardEl = document.getElementById("audit-log-card");
+    const auditLogTableEl = document.getElementById("audit-log-table");
     const defaultDropzoneText = "No file loaded";
 
     const sample = {
@@ -700,6 +728,7 @@
       document.getElementById("raw-json").textContent = JSON.stringify(data, null, 2);
       compareCardEl.hidden = true;
       presetCsvCardEl.hidden = true;
+      auditLogCardEl.hidden = true;
 
       emptyEl.hidden = true;
       dashboardEl.hidden = false;
@@ -710,6 +739,7 @@
       dashboardEl.hidden = true;
       compareCardEl.hidden = true;
       presetCsvCardEl.hidden = true;
+      auditLogCardEl.hidden = true;
       fileNameEl.textContent = defaultDropzoneText;
       fileInput.value = "";
       fileInputMulti.value = "";
@@ -719,6 +749,8 @@
       compareTableEl.querySelector("tbody").innerHTML = "";
       presetCsvTableEl.querySelector("thead").innerHTML = "";
       presetCsvTableEl.querySelector("tbody").innerHTML = "";
+      auditLogTableEl.querySelector("thead").innerHTML = "";
+      auditLogTableEl.querySelector("tbody").innerHTML = "";
       document.getElementById("metric-pnl").textContent = "$0.00";
       document.getElementById("metric-pnl").className = "value";
       document.getElementById("metric-pnl-note").textContent = "Total realized for the run summary";
@@ -738,6 +770,12 @@
       document.getElementById("wins-bar").style.width = "0%";
       document.getElementById("losses-bar").style.width = "0%";
       document.getElementById("raw-json").textContent = "{}";
+      document.getElementById("audit-total-events").textContent = "0";
+      document.getElementById("audit-failed-events").textContent = "0";
+      document.getElementById("audit-retry-events").textContent = "0";
+      document.getElementById("audit-export-events").textContent = "0";
+      document.getElementById("audit-run-completed").textContent = "0";
+      document.getElementById("audit-max-sell-retry").textContent = "0";
     }
 
     function renderCompare(files) {
@@ -774,6 +812,7 @@
 
       compareCardEl.hidden = false;
       presetCsvCardEl.hidden = true;
+      auditLogCardEl.hidden = true;
       emptyEl.hidden = true;
       dashboardEl.hidden = false;
       fileNameEl.textContent = `${rows.length} files loaded`;
@@ -875,10 +914,81 @@
 
       compareCardEl.hidden = true;
       presetCsvCardEl.hidden = false;
+      auditLogCardEl.hidden = true;
       emptyEl.hidden = true;
       dashboardEl.hidden = false;
       fileNameEl.textContent = label;
       document.getElementById("raw-json").textContent = JSON.stringify({ preset_batch_csv_rows: rows }, null, 2);
+    }
+
+    function parseJsonl(text) {
+      return text
+        .replace(/\r\n/g, "\n")
+        .replace(/\r/g, "\n")
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .map((line) => JSON.parse(line));
+    }
+
+    function renderAuditLog(events, label) {
+      const failedEvents = events.filter((evt) => {
+        if (String(evt.event_type || "").includes("failed")) return true;
+        return evt.event_type === "sell_retry_result" && evt.payload && evt.payload.ok === false;
+      }).length;
+      const retryEvents = events.filter((evt) => evt.event_type === "sell_retry_result").length;
+      const exportEvents = events.filter((evt) => evt.event_type === "export_written").length;
+      const runCompletedEvents = events.filter((evt) => evt.event_type === "run_completed" || evt.event_type === "loop_completed").length;
+      const maxSellRetry = events
+        .filter((evt) => evt.event_type === "sell_retry_result")
+        .reduce((m, evt) => Math.max(m, Number(evt.payload?.attempts || 0)), 0);
+
+      const rows = events.map((evt, idx) => ({
+        idx: idx + 1,
+        event_type: String(evt.event_type || ""),
+        timestamp_utc: String(evt.timestamp_utc || ""),
+        payload_preview: (() => {
+          const payload = evt.payload || {};
+          if (evt.event_type === "run_started") return `preset=${payload.preset_name ?? "-"} seed=${payload.seed ?? "-"} steps=${payload.steps ?? "-"}`;
+          if (evt.event_type === "export_written") return `${payload.type ?? "-"} -> ${payload.path ?? "-"}`;
+          if (evt.event_type === "run_completed") return `actions=${payload.actions_taken ?? "-"} trades=${payload.summary?.total_trades ?? "-"}`;
+          if (evt.event_type === "run_failed") return `error=${payload.error ?? "-"}`;
+          if (evt.event_type === "sell_retry_result") return `ok=${payload.ok} attempts=${payload.attempts}`;
+          if (evt.event_type === "risk_decision") return `${payload.action ?? "-"} allowed=${payload.allowed}`;
+          return JSON.stringify(payload);
+        })(),
+        status: (() => {
+          if (evt.event_type?.includes("failed")) return "failed";
+          if (evt.event_type === "sell_retry_result" && evt.payload && evt.payload.ok === false) return "failed";
+          if (evt.event_type === "run_completed") return "ok";
+          return "info";
+        })(),
+      }));
+
+      auditLogTableEl.querySelector("thead").innerHTML =
+        "<tr><th>#</th><th>Event</th><th>Timestamp UTC</th><th>Details</th></tr>";
+      auditLogTableEl.querySelector("tbody").innerHTML = rows.map((r) => `
+        <tr>
+          <td class="cell-num">${r.idx}</td>
+          <td class="cell-strong ${r.status === "failed" ? "cell-pnl bad" : r.status === "ok" ? "cell-pnl good" : ""}">${r.event_type}</td>
+          <td>${r.timestamp_utc.replace("T", " ")}</td>
+          <td>${String(r.payload_preview).replace(/</g, "&lt;")}</td>
+        </tr>
+      `).join("");
+
+      compareCardEl.hidden = true;
+      presetCsvCardEl.hidden = true;
+      auditLogCardEl.hidden = false;
+      emptyEl.hidden = true;
+      dashboardEl.hidden = false;
+      document.getElementById("audit-total-events").textContent = String(events.length);
+      document.getElementById("audit-failed-events").textContent = String(failedEvents);
+      document.getElementById("audit-retry-events").textContent = String(retryEvents);
+      document.getElementById("audit-export-events").textContent = String(exportEvents);
+      document.getElementById("audit-run-completed").textContent = String(runCompletedEvents);
+      document.getElementById("audit-max-sell-retry").textContent = String(maxSellRetry);
+      fileNameEl.textContent = label;
+      document.getElementById("raw-json").textContent = JSON.stringify({ audit_events: events }, null, 2);
     }
 
     function loadText(text, label) {
@@ -927,6 +1037,21 @@
         renderPresetCsv(rows, file.name);
       } catch (err) {
         alert(`Invalid CSV file: ${err.message}`);
+      }
+    });
+
+    auditJsonlInput.addEventListener("change", async (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      try {
+        const events = parseJsonl(await file.text());
+        if (!events.length) {
+          alert("Audit JSONL has no events.");
+          return;
+        }
+        renderAuditLog(events, file.name);
+      } catch (err) {
+        alert(`Invalid JSONL file: ${err.message}`);
       }
     });
 

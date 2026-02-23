@@ -31,6 +31,8 @@ test_files = [
     "tests/test_live_audit_logger.py",
     "tests/test_live_config_validation.py",
     "tests/test_live_retry_simulator.py",
+    "tests/test_prelive_orchestrator.py",
+    "tests/test_dry_run_flow_demo.py",
     "tests/test_paper_engine_execution.py",
     "tests/test_time_exit.py",
     "tests/test_max_daily_loss.py",

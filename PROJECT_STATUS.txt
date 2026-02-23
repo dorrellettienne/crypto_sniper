@@ -1466,7 +1466,7 @@ Current project checkpoint (post-v1 extended paper platform)
 - Live-architecture code boundaries are now started (paper adapter + interfaces only; no live execution code)
 - Full regression suite passing at current checkpoint: `128 passed`, `Exit Code: 0`
 
-Next small step: Freeze a new checkpoint/tag for candidate ops + pre-live utilities, then optionally integrate automatic JSONL audit logging into the candidate runner.
+Next small step: Commit/tag this pre-live audit UX + candidate-preset loop milestone (if desired), then start a dry-run orchestration service loop that schedules repeated candidate runs and aggregates audit health summaries.
 
 
 
@@ -1620,3 +1620,78 @@ Candidate ops + pre-live utility milestone  candidate-run workflow, per-trade an
 - GrossLoss: 269.0
 - ProfitFactor: 34.9071
 - Note: candidate-run and pre-live utilities are additive only (paper mode unchanged, no schema changes).
+
+Pre-live orchestration hardening milestone  candidate auto-audit/validation + dry-run flow demo + orchestration skeleton (verified)
+- Created local freeze checkpoint before this batch:
+- Commit: `9ec56ec`  `candidate ops and pre-live utilities milestone`
+- Tag: `candidate-ops-prelive-v1`
+- Hardened candidate runner (`src/runner/paper_sim_candidate_runner.py`):
+- Validates loaded presets with `src/live/config_validation.py`
+- Auto-writes JSONL audit events using `src/live/audit_logger.py`
+- events include: `run_started`, `export_written`, `run_completed`, `run_failed`
+- Added `--audit-log-dir` CLI flag (default `data/exports`)
+- Returns/prints audit log path
+- Added pre-live orchestration skeleton (`src/live/prelive_orchestrator.py`):
+- `execute_buy_with_controls(...)` (risk decision + execution + audit)
+- `execute_sell_with_retry(...)` (structured retry + audit)
+- stub risk engines: `AllowAllRiskEngine`, `BlockAllRiskEngine`
+- Added dry-run flow demo CLI (`src/live/dry_run_flow_demo.py`):
+- uses `DryRunExecutionAdapter` + orchestrator + retry + audit log path builder
+- provides a dry-run/live-like execution flow without real trading
+- Added deterministic pytest coverage:
+- `tests/test_paper_sim_candidate_runner.py` expanded for validation + audit logging + failure logging
+- `tests/test_prelive_orchestrator.py` (3 tests)
+- `tests/test_dry_run_flow_demo.py` (2 tests)
+- Updated `run_regression_tests.py` to include new pre-live tests
+- Ran targeted tests (candidate/pre-live batch): `19 passed`
+- Re-ran regression bundle: `python run_regression_tests.py` -> `157 passed`, `Exit Code: 0`
+- Note: additive operational hardening only (paper mode execution logic unchanged, no schema changes)
+
+Pre-live UX + orchestration loop expansion  audit JSONL dashboard view and richer dry-run loop (verified)
+- Frontend dashboard (`frontend/index.html`) upgraded with Audit JSONL support:
+- Added `Load Audit JSONL` action/button
+- Parses JSONL audit files in-browser and renders an audit event table (event type, timestamp, details)
+- Supports candidate-run audit logs and dry-run orchestration audit logs
+- Preserves existing JSON summary, compare-runs, preset CSV, and robustness-test workflows
+- Expanded dry-run flow demo (`src/live/dry_run_flow_demo.py`):
+- Added `ToggleFailSellAdapter` for temporary sell-failure injection
+- Added `run_dry_run_orchestration_loop(...)` for repeated dry-run cycles with audit events
+- Added loop audit events: `loop_started`, `loop_cycle_completed`, `loop_completed`
+- Added CLI flags:
+- `--loop`
+- `--iterations`
+- `--fail-sell-attempts`
+- Candidate runner hardening remains active from prior milestone:
+- preset validation + automatic JSONL audit logging (`run_started`, `export_written`, `run_completed`, `run_failed`)
+- Added/expanded deterministic failure-path tests:
+- `tests/test_dry_run_flow_demo.py` expanded for loop mode + validation
+- `tests/test_prelive_orchestrator.py` expanded for sell retry failure after max attempts
+- Re-ran targeted tests (pre-live/candidate/audit batch): `20 passed`
+- Re-ran regression bundle: `python run_regression_tests.py` -> `160 passed`, `Exit Code: 0`
+- Note: additive pre-live tooling and frontend analysis UX only (paper trading logic/schema unchanged)
+
+Pre-live audit UX + candidate-preset loop milestone  audit summary cards and candidate-driven dry-run loop (verified)
+- Frontend audit JSONL view (`frontend/index.html`) expanded with audit health summary metrics:
+- Total Events
+- Failed Events
+- Retry Events
+- Export Events
+- Run Completed count
+- Max Sell Retry attempts
+- Audit JSONL table view remains in-browser and works for candidate-run + dry-run loop audit logs
+- Expanded dry-run demo (`src/live/dry_run_flow_demo.py`) with candidate-preset-driven loop:
+- Added `run_candidate_preset_dry_run_loop(...)`
+- Reads candidate presets directly via `src.runner.paper_sim_candidate_runner.get_candidate_preset(...)`
+- Uses promoted candidate preset params (`usd_size`, `sell_price`, etc.) in dry-run cycles
+- Adds candidate loop audit events: `candidate_loop_started`, `candidate_loop_cycle_completed`, `candidate_loop_completed`
+- Added CLI flags:
+- `--candidate-preset-loop`
+- `--candidate-preset-name`
+- `--candidate-presets-json-path`
+- Added `ToggleFailSellAdapter` behavior coverage (temporary sell failures then success)
+- Expanded deterministic tests:
+- `tests/test_dry_run_flow_demo.py` (candidate preset loop + adapter fail/succeed sequence)
+- `tests/test_prelive_orchestrator.py` (sell retry failure after max attempts)
+- Re-ran targeted tests (audit/pre-live/candidate batch): `22 passed`
+- Re-ran regression bundle: `python run_regression_tests.py` -> `162 passed`, `Exit Code: 0`
+- Note: additive pre-live UX/orchestration only (paper trading logic/schema unchanged)
