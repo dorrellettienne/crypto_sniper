@@ -1466,7 +1466,7 @@ Current project checkpoint (post-v1 extended paper platform)
 - Live-architecture code boundaries are now started (paper adapter + interfaces only; no live execution code)
 - Full regression suite passing at current checkpoint: `128 passed`, `Exit Code: 0`
 
-Next small step: Freeze a paper-candidate-rules v1 checkpoint/tag and optionally add a one-command runner preset for candidate_final_v1_tp_higher_034.
+Next small step: Freeze a new checkpoint/tag for candidate ops + pre-live utilities, then optionally integrate automatic JSONL audit logging into the candidate runner.
 
 
 
@@ -1579,3 +1579,44 @@ Rule tuning milestone  experiment isolation fix + R1/R2 tuning + candidate valid
 - `data/exports/validation_top3_50x200.log`
 - `data/exports/candidates_v1_validation_100x200.log`
 - Note: candidate presets are now ready for a dedicated paper-candidate-rule freeze checkpoint.
+
+Candidate ops + pre-live utility milestone  candidate-run workflow, per-trade analysis, and dry-run live helpers (verified)
+- Added dedicated candidate runner: `src/runner/paper_sim_candidate_runner.py`
+- Loads named presets from `config/sniping_presets_candidates_v1.json`
+- Defaults to promoted winner `candidate_final_v1_tp_higher_034`
+- Runs candidate preset and exports summary JSON/CSV + closed-trades CSV
+- Added Windows workflow shortcuts:
+- `run_candidate_v1.bat`
+- `run_candidate_v1_and_open_dashboard.bat`
+- Added minimal pre-live engineering utilities in `src/live/` (no live execution):
+- `dry_run_execution_adapter.py` (simulated execution adapter with optional failures)
+- `audit_logger.py` (JSONL audit event logging)
+- `config_validation.py` (candidate preset validation / normalization)
+- `retry_simulator.py` (structured retry helper for dry-run/live-path simulation)
+- Added deterministic pytest coverage:
+- `tests/test_paper_sim_candidate_runner.py` (4 tests)
+- `tests/test_dry_run_execution_adapter.py` (2 tests)
+- `tests/test_live_audit_logger.py` (2 tests)
+- `tests/test_live_config_validation.py` (3 tests)
+- `tests/test_live_retry_simulator.py` (2 tests)
+- Updated `run_regression_tests.py` to include all new test files
+- Ran targeted tests for new candidate/pre-live utilities:
+- Result: `13 passed`
+- Re-ran regression bundle: `python run_regression_tests.py` -> `151 passed`, `Exit Code: 0`
+- Ran real winner candidate export for per-trade analysis (`candidate_final_v1_tp_higher_034`, steps=200, seed=42)
+- Exported artifacts:
+- `candidate_final_v1_tp_higher_034_summary_*.json`
+- `candidate_final_v1_tp_higher_034_summary_*.csv`
+- `candidate_final_v1_tp_higher_034_closed_trades_*.csv`
+- Per-trade snapshot (winner run seed 42):
+- Trades: 64
+- Wins: 41
+- Losses: 23
+- AvgWin: 229.0244
+- AvgLoss: -11.6957
+- Best: 240.0
+- Worst: -12.0
+- GrossProfit: 9390.0
+- GrossLoss: 269.0
+- ProfitFactor: 34.9071
+- Note: candidate-run and pre-live utilities are additive only (paper mode unchanged, no schema changes).

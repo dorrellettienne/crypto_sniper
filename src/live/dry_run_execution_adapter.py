@@ -1,0 +1,51 @@
+from src.live.interfaces import ExecutionAdapter, ExecutionResult
+
+
+class DryRunExecutionAdapter(ExecutionAdapter):
+    """
+    Simulated execution adapter for pre-live testing.
+    Produces structured execution results without touching exchanges.
+    """
+
+    def __init__(self, fail_actions: set[str] | None = None):
+        self._fail_actions = set(fail_actions or set())
+
+    def buy(self, token_address: str, symbol: str, entry_price: float, usd_size: float) -> ExecutionResult:
+        if "buy" in self._fail_actions:
+            return ExecutionResult(ok=False, action="buy", message="dry-run simulated failure")
+        return ExecutionResult(
+            ok=True,
+            action="buy",
+            position_id=1,
+            message="dry-run buy accepted",
+            metadata={
+                "token_address": token_address,
+                "symbol": symbol,
+                "entry_price": entry_price,
+                "usd_size": usd_size,
+            },
+        )
+
+    def sell(self, position_id: int, exit_price: float) -> ExecutionResult:
+        if "sell" in self._fail_actions:
+            return ExecutionResult(ok=False, action="sell", position_id=position_id, message="dry-run simulated failure")
+        return ExecutionResult(
+            ok=True,
+            action="sell",
+            position_id=position_id,
+            pnl=0.0,
+            message="dry-run sell accepted",
+            metadata={"exit_price": exit_price},
+        )
+
+    def stop_loss(self, position_id: int, stop_percent: float) -> ExecutionResult:
+        if "stop_loss" in self._fail_actions:
+            return ExecutionResult(ok=False, action="stop_loss", position_id=position_id, message="dry-run simulated failure")
+        return ExecutionResult(
+            ok=True,
+            action="stop_loss",
+            position_id=position_id,
+            pnl=0.0,
+            message="dry-run stop loss accepted",
+            metadata={"stop_percent": stop_percent},
+        )
