@@ -1466,7 +1466,7 @@ Current project checkpoint (post-v1 extended paper platform)
 - Live-architecture code boundaries are now started (paper adapter + interfaces only; no live execution code)
 - Full regression suite passing at current checkpoint: `128 passed`, `Exit Code: 0`
 
-Next small step: Commit/tag this pre-live audit UX + candidate-preset loop milestone (if desired), then start a dry-run orchestration service loop that schedules repeated candidate runs and aggregates audit health summaries.
+Next small step: Freeze/push a `prelive-service-v1` checkpoint/tag, then extend the pre-live service loop with candidate-preset loading and periodic audit rollup summaries.
 
 
 
@@ -1695,3 +1695,39 @@ Pre-live audit UX + candidate-preset loop milestone  audit summary cards and can
 - Re-ran targeted tests (audit/pre-live/candidate batch): `22 passed`
 - Re-ran regression bundle: `python run_regression_tests.py` -> `162 passed`, `Exit Code: 0`
 - Note: additive pre-live UX/orchestration only (paper trading logic/schema unchanged)
+
+Pre-Live Service Loop V1 milestone  signal provider + real pre-live risk engine + dry-run service loop (verified)
+- `src/live/interfaces.py`:
+- Added `TradeSignal` dataclass
+- Added `SignalProvider` protocol
+- Added deterministic signal source: `src/live/signal_provider_stub.py` (`StubSignalProvider`)
+- Added real pre-live risk engine: `src/live/prelive_risk_engine.py` (`PreLiveRiskEngine`)
+- Mirrors paper-mode buy risk gates using current settings + persistence helpers
+- Enforces:
+- `invalid_usd_size`
+- `max_daily_loss_reached`
+- `max_concurrent_positions_reached`
+- Added dry-run pre-live service loop V1: `src/live/prelive_service.py`
+- Testable `max_iterations` loop (dry-run only)
+- Flow: signal -> risk -> dry-run buy -> sell retry -> audit
+- Emits audit events:
+- `service_started`
+- `service_no_signal`
+- `service_signal_received`
+- `service_cycle_completed`
+- `service_completed`
+- Returns rollup metrics:
+- signals seen/missing
+- risk allowed/blocked
+- buy ok/failed
+- sell ok/failed
+- retry counts/max sell attempts
+- CLI supports stub signals (`--use-stub-signals`) for deterministic pre-live runs
+- Added deterministic pytest coverage:
+- `tests/test_signal_provider_stub.py` (1 test)
+- `tests/test_prelive_risk_engine.py` (4 tests)
+- `tests/test_prelive_service.py` (4 tests)
+- Updated `run_regression_tests.py` to include new pre-live service tests
+- Ran targeted milestone tests: `9 passed`
+- Re-ran regression bundle: `python run_regression_tests.py` -> `171 passed`, `Exit Code: 0`
+- Note: dry-run/pre-live milestone only (no live execution, no schema changes, no paper logic rewrites)

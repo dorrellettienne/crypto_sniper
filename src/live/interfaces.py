@@ -18,6 +18,15 @@ class RiskDecision:
     reason: str = ""
 
 
+@dataclass
+class TradeSignal:
+    token_address: str
+    symbol: str
+    entry_price: float
+    usd_size: float
+    metadata: dict[str, Any] | None = None
+
+
 @runtime_checkable
 class ExecutionAdapter(Protocol):
     def buy(self, token_address: str, symbol: str, entry_price: float, usd_size: float) -> ExecutionResult: ...
@@ -28,3 +37,8 @@ class ExecutionAdapter(Protocol):
 @runtime_checkable
 class RiskEngine(Protocol):
     def can_buy(self, token_address: str, symbol: str, usd_size: float) -> RiskDecision: ...
+
+
+@runtime_checkable
+class SignalProvider(Protocol):
+    def get_next_signal(self) -> TradeSignal | None: ...
