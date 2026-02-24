@@ -4,6 +4,7 @@ from pathlib import Path
 
 from src.live.audit_logger import append_audit_event, build_audit_log_path
 from src.live.config_validation import validate_candidate_preset_config
+from src.live.path_security import ensure_dir_within_base
 from src.runner.paper_sim_runner import (
     build_closed_trades_export_csv_path,
     build_simulation_summary_export_csv_path,
@@ -142,7 +143,13 @@ if __name__ == "__main__":
     parser.add_argument("--export-csv-dir", type=str, default="data/exports")
     parser.add_argument("--export-trades-csv-dir", type=str, default="data/exports")
     parser.add_argument("--audit-log-dir", type=str, default="data/exports")
+    parser.add_argument("--allow-unsafe-paths", action="store_true")
     args = parser.parse_args()
+
+    if not args.allow_unsafe_paths:
+        for dir_path in [args.export_json_dir, args.export_csv_dir, args.export_trades_csv_dir, args.audit_log_dir]:
+            if dir_path:
+                ensure_dir_within_base(dir_path)
 
     output = run_candidate_preset(
         preset_name=args.preset_name,

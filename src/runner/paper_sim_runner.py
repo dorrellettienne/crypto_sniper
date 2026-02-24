@@ -15,6 +15,8 @@ from src.execution.paper_engine import simulate_sell
 from src.execution.paper_engine import simulate_time_exit
 from src.execution.paper_engine import simulate_check_stop_trigger
 from src.execution.persistence import get_today_trade_summary, get_closed_trades_for_export
+from src.live.cost_model import estimate_net_pnl_from_gross
+from src.live.path_security import ensure_dir_within_base, ensure_path_within_base
 
 
 def format_simulation_summary(result: dict) -> dict:
@@ -30,14 +32,25 @@ def format_simulation_summary(result: dict) -> dict:
         "losses": int(source_summary.get("losses", 0) or 0),
         "win_rate": float(source_summary.get("win_rate", 0.0) or 0.0),
     }
+    source_cost = result.get("cost_estimate") or {}
+    if source_cost:
+        normalized_summary["estimated_total_cost_usd"] = float(source_cost.get("estimated_total_cost_usd", 0.0) or 0.0)
+        normalized_summary["estimated_net_pnl"] = float(source_cost.get("estimated_net_pnl", normalized_summary["total_pnl"]) or 0.0)
 
-    return {
+    normalized = {
         "steps": result.get("steps"),
         "seed": result.get("seed"),
         "actions_taken": result.get("actions_taken"),
         "generated_at_utc": result.get("generated_at_utc"),
         "summary": normalized_summary,
     }
+    if source_cost:
+        normalized["cost_model"] = {
+            "fee_bps_per_leg": float(source_cost.get("fee_bps_per_leg", 0.0) or 0.0),
+            "slippage_bps_per_leg": float(source_cost.get("slippage_bps_per_leg", 0.0) or 0.0),
+            "network_fee_usd_per_leg": float(source_cost.get("network_fee_usd_per_leg", 0.0) or 0.0),
+        }
+    return normalized
 
 
 def format_simulation_summary_json(result: dict) -> str:
@@ -56,7 +69,7 @@ def format_simulation_summary_csv_row(result: dict) -> dict:
     """
     normalized = format_simulation_summary(result)
     summary = normalized["summary"]
-    return {
+    row = {
         "steps": normalized["steps"],
         "seed": normalized["seed"],
         "actions_taken": normalized["actions_taken"],
@@ -67,6 +80,43 @@ def format_simulation_summary_csv_row(result: dict) -> dict:
         "losses": summary["losses"],
         "win_rate": summary["win_rate"],
     }
+    if "estimated_total_cost_usd" in summary:
+        row["estimated_total_cost_usd"] = float(summary["estimated_total_cost_usd"])
+        row["estimated_net_pnl"] = float(summary.get("estimated_net_pnl", summary["total_pnl"]))
+    return row
+
+
+def add_cost_estimate_to_result(
+    result: dict,
+    entry_notional_usd: float,
+    fee_bps_per_leg: float = 0.0,
+    slippage_bps_per_leg: float = 0.0,
+    network_fee_usd_per_leg: float = 0.0,
+) -> dict:
+    """
+    Returns a copy of a simulation result enriched with estimated cost/net PnL fields.
+    Read-only transform only.
+    """
+    enriched = dict(result)
+    gross_pnl = float((result.get("summary") or {}).get("total_pnl", 0.0) or 0.0)
+    # Approximate exit notional as entry notional plus gross pnl, clamped at zero.
+    exit_notional_usd = max(0.0, float(entry_notional_usd) + gross_pnl)
+    estimated = estimate_net_pnl_from_gross(
+        gross_pnl=gross_pnl,
+        entry_notional_usd=float(entry_notional_usd),
+        exit_notional_usd=exit_notional_usd,
+        fee_bps_per_leg=float(fee_bps_per_leg),
+        slippage_bps_per_leg=float(slippage_bps_per_leg),
+        network_fee_usd_per_leg=float(network_fee_usd_per_leg),
+    )
+    enriched["cost_estimate"] = {
+        "fee_bps_per_leg": float(fee_bps_per_leg),
+        "slippage_bps_per_leg": float(slippage_bps_per_leg),
+        "network_fee_usd_per_leg": float(network_fee_usd_per_leg),
+        "estimated_total_cost_usd": float(estimated["estimated_total_cost_usd"]),
+        "estimated_net_pnl": float(estimated["estimated_net_pnl"]),
+    }
+    return enriched
 
 
 def build_simulation_summary_export_path(
@@ -315,8 +365,20 @@ if __name__ == "__main__":
     parser.add_argument("--export-csv-dir", type=str, default=None)
     parser.add_argument("--export-trades-csv-path", type=str, default=None)
     parser.add_argument("--export-trades-csv-dir", type=str, default=None)
+    parser.add_argument("--allow-unsafe-paths", action="store_true")
+    parser.add_argument("--estimate-fee-bps", type=float, default=0.0)
+    parser.add_argument("--estimate-slippage-bps", type=float, default=0.0)
+    parser.add_argument("--estimate-network-fee-usd", type=float, default=0.0)
 
     args = parser.parse_args()
+
+    if not args.allow_unsafe_paths:
+        for file_path in [args.export_json_path, args.export_csv_path, args.export_trades_csv_path]:
+            if file_path:
+                ensure_path_within_base(file_path)
+        for dir_path in [args.export_json_dir, args.export_csv_dir, args.export_trades_csv_dir]:
+            if dir_path:
+                ensure_dir_within_base(dir_path)
 
     result = run_simulation(
         args.steps,
@@ -330,6 +392,14 @@ if __name__ == "__main__":
         p_stop_check=args.p_stop_check,
         p_time_exit=args.p_time_exit,
     )
+    if args.estimate_fee_bps or args.estimate_slippage_bps or args.estimate_network_fee_usd:
+        result = add_cost_estimate_to_result(
+            result,
+            entry_notional_usd=args.usd_size,
+            fee_bps_per_leg=args.estimate_fee_bps,
+            slippage_bps_per_leg=args.estimate_slippage_bps,
+            network_fee_usd_per_leg=args.estimate_network_fee_usd,
+        )
     export_path = None
     export_csv_path = None
     export_trades_csv_path = None
@@ -367,6 +437,8 @@ if __name__ == "__main__":
     )
     print(f"Actions Taken: {result['actions_taken']}")
     print("Daily Summary:", format_simulation_summary(result)["summary"])
+    if result.get("cost_estimate"):
+        print("Estimated Cost Model:", result["cost_estimate"])
     if export_path:
         print(f"Exported JSON: {export_path}")
     if export_csv_path:

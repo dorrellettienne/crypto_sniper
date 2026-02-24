@@ -1,0 +1,22 @@
+{
+  "profiles": [
+    {
+      "name": "default_open",
+      "token_allowlist": [],
+      "token_blocklist": [],
+      "symbol_allowlist": [],
+      "min_usd_size": null,
+      "max_usd_size": null,
+      "token_cooldown_calls": 0
+    },
+    {
+      "name": "strict_candidate_ops",
+      "token_allowlist": [],
+      "token_blocklist": [],
+      "symbol_allowlist": [],
+      "min_usd_size": 50,
+      "max_usd_size": 200,
+      "token_cooldown_calls": 1
+    }
+  ]
+}

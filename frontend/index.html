@@ -567,11 +567,23 @@
             <div class="row"><span class="k">Total Events</span><span id="audit-total-events" class="v">0</span></div>
             <div class="row"><span class="k">Failed Events</span><span id="audit-failed-events" class="v">0</span></div>
             <div class="row"><span class="k">Retry Events</span><span id="audit-retry-events" class="v">0</span></div>
+            <div class="row"><span class="k">Service Errors</span><span id="audit-service-errors" class="v">0</span></div>
           </div>
           <div>
             <div class="row"><span class="k">Export Events</span><span id="audit-export-events" class="v">0</span></div>
             <div class="row"><span class="k">Run Completed</span><span id="audit-run-completed" class="v">0</span></div>
             <div class="row"><span class="k">Max Sell Retry</span><span id="audit-max-sell-retry" class="v">0</span></div>
+            <div class="row"><span class="k">Service Rollups</span><span id="audit-service-rollups" class="v">0</span></div>
+          </div>
+        </div>
+        <div class="summary-grid" style="margin-bottom:12px;">
+          <div>
+            <div class="row"><span class="k">Service Cycles</span><span id="audit-service-cycles" class="v">0</span></div>
+            <div class="row"><span class="k">Last Rollup Iteration</span><span id="audit-last-rollup-iteration" class="v">-</span></div>
+          </div>
+          <div>
+            <div class="row"><span class="k">Last Rollup Risk Blocked</span><span id="audit-last-rollup-risk-blocked" class="v">-</span></div>
+            <div class="row"><span class="k">Last Rollup Sell Failed</span><span id="audit-last-rollup-sell-failed" class="v">-</span></div>
           </div>
         </div>
         <div class="table-wrap">
@@ -682,7 +694,14 @@
           wins: Number(summary.wins ?? 0),
           losses: Number(summary.losses ?? 0),
           win_rate: Number(summary.win_rate ?? 0),
+          estimated_total_cost_usd: summary.estimated_total_cost_usd == null
+            ? null
+            : Number(summary.estimated_total_cost_usd),
+          estimated_net_pnl: summary.estimated_net_pnl == null
+            ? null
+            : Number(summary.estimated_net_pnl),
         },
+        cost_model: payload?.cost_model ?? null,
       };
     };
 
@@ -692,20 +711,29 @@
     };
 
     const pct = (n) => `${Number(n || 0).toFixed(2)}%`;
+    const escapeHtml = (value) => String(value ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
 
     function render(payload, sourceLabel) {
       const data = normalize(payload);
       const s = data.summary;
+      const hasCostEstimate = s.estimated_net_pnl != null;
+      const displayPnl = hasCostEstimate ? s.estimated_net_pnl : s.total_pnl;
       const total = Math.max(0, s.total_trades);
       const normalizedWinRatePercent = s.win_rate <= 1 ? s.win_rate * 100 : s.win_rate;
       const winsPct = total > 0 ? (s.wins / total) * 100 : 0;
       const lossesPct = total > 0 ? (s.losses / total) * 100 : 0;
 
-      document.getElementById("metric-pnl").textContent = money(s.total_pnl);
+      document.getElementById("metric-pnl").textContent = money(displayPnl);
       document.getElementById("metric-pnl").className =
-        `value ${s.total_pnl > 0 ? "good" : s.total_pnl < 0 ? "bad" : ""}`.trim();
-      document.getElementById("metric-pnl-note").textContent =
-        s.total_pnl > 0 ? "Positive run summary" : s.total_pnl < 0 ? "Negative run summary" : "Flat run summary";
+        `value ${displayPnl > 0 ? "good" : displayPnl < 0 ? "bad" : ""}`.trim();
+      document.getElementById("metric-pnl-note").textContent = hasCostEstimate
+        ? `Estimated net (gross ${money(s.total_pnl)} - costs ${money(s.estimated_total_cost_usd)})`
+        : (s.total_pnl > 0 ? "Positive run summary" : s.total_pnl < 0 ? "Negative run summary" : "Flat run summary");
       document.getElementById("metric-win-rate").textContent = pct(normalizedWinRatePercent);
       document.getElementById("metric-trades").textContent = String(s.total_trades);
       document.getElementById("metric-actions").textContent = String(data.actions_taken ?? 0);
@@ -718,7 +746,7 @@
       document.getElementById("gen-val").textContent = (data.generated_at_utc || "-").replace("T", " ");
       document.getElementById("meta-file").textContent = sourceLabel;
       document.getElementById("meta-interpretation").textContent =
-        s.total_pnl > 0 ? "Positive PnL" : s.total_pnl < 0 ? "Drawdown" : "Break-even";
+        displayPnl > 0 ? "Positive PnL" : displayPnl < 0 ? "Drawdown" : "Break-even";
 
       document.getElementById("wins-pct-label").textContent = pct(winsPct);
       document.getElementById("losses-pct-label").textContent = pct(lossesPct);
@@ -773,9 +801,15 @@
       document.getElementById("audit-total-events").textContent = "0";
       document.getElementById("audit-failed-events").textContent = "0";
       document.getElementById("audit-retry-events").textContent = "0";
+      document.getElementById("audit-service-errors").textContent = "0";
       document.getElementById("audit-export-events").textContent = "0";
       document.getElementById("audit-run-completed").textContent = "0";
       document.getElementById("audit-max-sell-retry").textContent = "0";
+      document.getElementById("audit-service-rollups").textContent = "0";
+      document.getElementById("audit-service-cycles").textContent = "0";
+      document.getElementById("audit-last-rollup-iteration").textContent = "-";
+      document.getElementById("audit-last-rollup-risk-blocked").textContent = "-";
+      document.getElementById("audit-last-rollup-sell-failed").textContent = "-";
     }
 
     function renderCompare(files) {
@@ -786,7 +820,7 @@
         steps: data.steps,
         actions: data.actions_taken,
         trades: data.summary.total_trades,
-        pnl: data.summary.total_pnl,
+        pnl: data.summary.estimated_net_pnl != null ? data.summary.estimated_net_pnl : data.summary.total_pnl,
         win_rate_pct: data.summary.win_rate <= 1 ? data.summary.win_rate * 100 : data.summary.win_rate,
         wins: data.summary.wins,
         losses: data.summary.losses,
@@ -794,19 +828,19 @@
 
       const headers = ["File", "Seed", "Steps", "Actions", "Trades", "PnL", "Win Rate", "Wins", "Losses"];
       compareTableEl.querySelector("thead").innerHTML =
-        `<tr>${headers.map(h => `<th>${h}</th>`).join("")}</tr>`;
+        `<tr>${headers.map(h => `<th>${escapeHtml(h)}</th>`).join("")}</tr>`;
 
       compareTableEl.querySelector("tbody").innerHTML = rows.map((r) => `
         <tr>
-          <td class="cell-strong">${r.file}</td>
-          <td class="cell-num">${r.seed}</td>
-          <td class="cell-num">${r.steps}</td>
-          <td class="cell-num">${r.actions}</td>
-          <td class="cell-num">${r.trades}</td>
-          <td class="cell-num cell-pnl ${r.pnl > 0 ? "good" : r.pnl < 0 ? "bad" : ""}">${money(r.pnl)}</td>
-          <td class="cell-num">${pct(r.win_rate_pct)}</td>
-          <td class="cell-num">${r.wins}</td>
-          <td class="cell-num">${r.losses}</td>
+          <td class="cell-strong">${escapeHtml(r.file)}</td>
+          <td class="cell-num">${escapeHtml(r.seed)}</td>
+          <td class="cell-num">${escapeHtml(r.steps)}</td>
+          <td class="cell-num">${escapeHtml(r.actions)}</td>
+          <td class="cell-num">${escapeHtml(r.trades)}</td>
+          <td class="cell-num cell-pnl ${r.pnl > 0 ? "good" : r.pnl < 0 ? "bad" : ""}">${escapeHtml(money(r.pnl))}</td>
+          <td class="cell-num">${escapeHtml(pct(r.win_rate_pct))}</td>
+          <td class="cell-num">${escapeHtml(r.wins)}</td>
+          <td class="cell-num">${escapeHtml(r.losses)}</td>
         </tr>
       `).join("");
 
@@ -886,7 +920,7 @@
       };
 
       presetCsvTableEl.querySelector("thead").innerHTML =
-        `<tr>${columns.map(c => `<th>${pretty[c] || c}</th>`).join("")}</tr>`;
+        `<tr>${columns.map(c => `<th>${escapeHtml(pretty[c] || c)}</th>`).join("")}</tr>`;
 
       presetCsvTableEl.querySelector("tbody").innerHTML = rows.map((r) => {
         const pnl = Number(r.avg_total_pnl || 0);
@@ -908,7 +942,7 @@
             c === "preset_name" ? "" : "cell-num",
             isPnlCol ? `cell-pnl ${n > 0 ? "good" : n < 0 ? "bad" : ""}` : "",
           ].filter(Boolean).join(" ");
-          return `<td class="${classes}">${values[c] ?? ""}</td>`;
+          return `<td class="${classes}">${escapeHtml(values[c] ?? "")}</td>`;
         }).join("")}</tr>`;
       }).join("");
 
@@ -939,9 +973,13 @@
       const retryEvents = events.filter((evt) => evt.event_type === "sell_retry_result").length;
       const exportEvents = events.filter((evt) => evt.event_type === "export_written").length;
       const runCompletedEvents = events.filter((evt) => evt.event_type === "run_completed" || evt.event_type === "loop_completed").length;
+      const serviceErrorEvents = events.filter((evt) => evt.event_type === "service_error").length;
+      const serviceRollupEvents = events.filter((evt) => evt.event_type === "service_rollup");
+      const serviceCycleEvents = events.filter((evt) => evt.event_type === "service_cycle_completed").length;
       const maxSellRetry = events
         .filter((evt) => evt.event_type === "sell_retry_result")
         .reduce((m, evt) => Math.max(m, Number(evt.payload?.attempts || 0)), 0);
+      const lastServiceRollup = serviceRollupEvents.length ? serviceRollupEvents[serviceRollupEvents.length - 1] : null;
 
       const rows = events.map((evt, idx) => ({
         idx: idx + 1,
@@ -955,6 +993,10 @@
           if (evt.event_type === "run_failed") return `error=${payload.error ?? "-"}`;
           if (evt.event_type === "sell_retry_result") return `ok=${payload.ok} attempts=${payload.attempts}`;
           if (evt.event_type === "risk_decision") return `${payload.action ?? "-"} allowed=${payload.allowed}`;
+          if (evt.event_type === "service_rollup") {
+            return `iter=${payload.iteration ?? "-"} signals=${payload.rollup?.signals_seen ?? "-"} risk_blocked=${payload.rollup?.risk_blocked ?? "-"}`;
+          }
+          if (evt.event_type === "service_error") return `error=${payload.error ?? "-"}`;
           return JSON.stringify(payload);
         })(),
         status: (() => {
@@ -969,10 +1011,10 @@
         "<tr><th>#</th><th>Event</th><th>Timestamp UTC</th><th>Details</th></tr>";
       auditLogTableEl.querySelector("tbody").innerHTML = rows.map((r) => `
         <tr>
-          <td class="cell-num">${r.idx}</td>
-          <td class="cell-strong ${r.status === "failed" ? "cell-pnl bad" : r.status === "ok" ? "cell-pnl good" : ""}">${r.event_type}</td>
-          <td>${r.timestamp_utc.replace("T", " ")}</td>
-          <td>${String(r.payload_preview).replace(/</g, "&lt;")}</td>
+          <td class="cell-num">${escapeHtml(r.idx)}</td>
+          <td class="cell-strong ${r.status === "failed" ? "cell-pnl bad" : r.status === "ok" ? "cell-pnl good" : ""}">${escapeHtml(r.event_type)}</td>
+          <td>${escapeHtml(r.timestamp_utc.replace("T", " "))}</td>
+          <td>${escapeHtml(r.payload_preview)}</td>
         </tr>
       `).join("");
 
@@ -984,9 +1026,15 @@
       document.getElementById("audit-total-events").textContent = String(events.length);
       document.getElementById("audit-failed-events").textContent = String(failedEvents);
       document.getElementById("audit-retry-events").textContent = String(retryEvents);
+      document.getElementById("audit-service-errors").textContent = String(serviceErrorEvents);
       document.getElementById("audit-export-events").textContent = String(exportEvents);
       document.getElementById("audit-run-completed").textContent = String(runCompletedEvents);
       document.getElementById("audit-max-sell-retry").textContent = String(maxSellRetry);
+      document.getElementById("audit-service-rollups").textContent = String(serviceRollupEvents.length);
+      document.getElementById("audit-service-cycles").textContent = String(serviceCycleEvents);
+      document.getElementById("audit-last-rollup-iteration").textContent = String(lastServiceRollup?.payload?.iteration ?? "-");
+      document.getElementById("audit-last-rollup-risk-blocked").textContent = String(lastServiceRollup?.payload?.rollup?.risk_blocked ?? "-");
+      document.getElementById("audit-last-rollup-sell-failed").textContent = String(lastServiceRollup?.payload?.rollup?.sell_failed ?? "-");
       fileNameEl.textContent = label;
       document.getElementById("raw-json").textContent = JSON.stringify({ audit_events: events }, null, 2);
     }

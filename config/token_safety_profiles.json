@@ -1,0 +1,18 @@
+{
+  "profiles": [
+    {
+      "name": "default_open",
+      "token_allowlist": [],
+      "token_blocklist": [],
+      "min_token_age_seconds": null,
+      "min_liquidity_usd": null
+    },
+    {
+      "name": "strict_launch_filter",
+      "token_allowlist": [],
+      "token_blocklist": [],
+      "min_token_age_seconds": 30,
+      "min_liquidity_usd": 5000
+    }
+  ]
+}

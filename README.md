@@ -96,3 +96,4 @@ Current expected checkpoint (latest verified):
 - Paper mode only (no live trading).
 - Results are deterministic for the same seed and starting DB state.
 - Avoid running DB-writing tests in parallel on Windows (`data/sniper.db` can lock).
+- Before live integration work, read `LIVE_READINESS_NOTES.md` (fees/slippage realism, signal quality, safety gates, and rollout cautions).

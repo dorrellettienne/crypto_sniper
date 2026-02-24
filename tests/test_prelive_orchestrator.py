@@ -35,11 +35,12 @@ def test_execute_buy_with_controls_allows_and_executes(monkeypatch):
         symbol="S",
         entry_price=0.01,
         usd_size=100.0,
+        client_order_id="coid_buy_test",
     )
     assert out["ok"] is True
     assert out["risk_allowed"] is True
     assert out["execution"].position_id == 7
-    assert events == ["risk_decision", "execution_result"]
+    assert events == ["risk_decision", "execution_result", "order_lifecycle_event"]
 
 
 def test_execute_buy_with_controls_blocks(monkeypatch):
@@ -53,21 +54,29 @@ def test_execute_buy_with_controls_blocks(monkeypatch):
         symbol="S",
         entry_price=0.01,
         usd_size=100.0,
+        client_order_id="coid_buy_blocked",
     )
     assert out["ok"] is False
     assert out["risk_allowed"] is False
     assert out["execution"] is None
-    assert events == ["risk_decision"]
+    assert events == ["risk_decision", "order_lifecycle_event"]
 
 
 def test_execute_sell_with_retry_retries_and_logs(monkeypatch):
     events = []
     monkeypatch.setattr("src.live.prelive_orchestrator.append_audit_event", lambda *args, **kwargs: events.append(args[1]))
     adapter = _Adapter()
-    out = execute_sell_with_retry(adapter=adapter, audit_log_path="audit.jsonl", position_id=1, exit_price=0.02, max_attempts=3)
+    out = execute_sell_with_retry(
+        adapter=adapter,
+        audit_log_path="audit.jsonl",
+        position_id=1,
+        exit_price=0.02,
+        max_attempts=3,
+        client_order_id="coid_sell_test",
+    )
     assert out["ok"] is True
     assert out["attempts"] == 2
-    assert events == ["sell_retry_result"]
+    assert events == ["order_lifecycle_event", "order_lifecycle_event", "sell_retry_result"]
 
 
 def test_execute_sell_with_retry_returns_failure_after_max_attempts(monkeypatch):
@@ -79,9 +88,16 @@ def test_execute_sell_with_retry_returns_failure_after_max_attempts(monkeypatch)
             self.sell_calls += 1
             return ExecutionResult(ok=False, action="sell", position_id=position_id, message="still failing")
 
-    out = execute_sell_with_retry(adapter=FailAdapter(), audit_log_path="audit.jsonl", position_id=1, exit_price=0.02, max_attempts=2)
+    out = execute_sell_with_retry(
+        adapter=FailAdapter(),
+        audit_log_path="audit.jsonl",
+        position_id=1,
+        exit_price=0.02,
+        max_attempts=2,
+        client_order_id="coid_sell_fail",
+    )
 
     assert out["ok"] is False
     assert out["attempts"] == 2
     assert out["errors"] == ["still failing", "still failing"]
-    assert events == ["sell_retry_result"]
+    assert events == ["order_lifecycle_event", "order_lifecycle_event", "sell_retry_result"]
