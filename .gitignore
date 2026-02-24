@@ -4,3 +4,5 @@ __pycache__/
 .env
 data/sniper.db
 data/exports/
+audit.jsonl
+PROJECT_STATUS.txt
