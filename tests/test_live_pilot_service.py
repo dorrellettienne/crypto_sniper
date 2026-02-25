@@ -2,6 +2,8 @@ import json
 
 from src.live.live_pilot_service import (
     aggregate_live_pilot_campaign_reports,
+    adaptive_reorder_fallback_candidates,
+    adaptive_reorder_provider_order,
     _apply_live_pilot_mode_preset,
     _evaluate_live_pilot_promotion_gates,
     _extract_live_submit_economics,
@@ -11,6 +13,7 @@ from src.live.live_pilot_service import (
     _build_live_pilot_volatility_guard_from_config,
     _format_human_live_pilot_summary,
     _extract_campaign_report_summary,
+    load_adaptive_reliability_state,
     _validate_live_auto_window_guardrails,
     probe_fallback_candidates_preflight,
     run_live_pilot_auto_window,
@@ -18,6 +21,8 @@ from src.live.live_pilot_service import (
     run_live_pilot_auto_window_from_signal_provider,
     run_live_pilot_campaign,
     sanitize_fallback_candidates,
+    save_adaptive_reliability_state,
+    update_adaptive_reliability_state_from_campaign_report,
     write_campaign_trend_report,
     run_live_pilot_service_loop,
     run_live_pilot_service_once,
@@ -1732,3 +1737,86 @@ def test_extract_campaign_report_summary_includes_fallback_probe_fields():
     assert s["fallback_candidates_total"] == 10
     assert s["fallback_candidates_probe_ok"] == 3
     assert s["fallback_candidates_probe_failed"] == 2
+
+
+def test_adaptive_reorder_fallback_candidates_scores_and_quarantines():
+    state = {
+        "candidate_stats": {
+            "GOOD": {"probe_ok": 3, "probe_failed": 0},
+            "BAD": {"probe_ok": 0, "probe_failed": 4},
+        }
+    }
+    candidates = [
+        {"token_address": "BAD", "symbol": "BAD", "entry_price": 1, "usd_size": 1, "metadata": {}},
+        {"token_address": "GOOD", "symbol": "GOOD", "entry_price": 1, "usd_size": 1, "metadata": {}},
+        {"token_address": "MID", "symbol": "MID", "entry_price": 1, "usd_size": 1, "metadata": {"confidence_hint": 1}},
+    ]
+    out = adaptive_reorder_fallback_candidates(candidates, reliability_state=state, enabled=True, quarantine_failure_threshold=3)
+    ordered = [c["token_address"] for c in out["candidates"]]
+    assert ordered == ["GOOD", "MID"]
+    s = out["summary"]
+    assert s["adaptive_candidate_reordering_applied"] is True
+    assert s["adaptive_candidate_quarantined_count"] == 1
+    assert "BAD" in s["adaptive_candidate_quarantined_tokens"]
+
+
+def test_adaptive_reorder_provider_order_uses_reliability_state():
+    state = {
+        "provider_stats": {
+            "dexscreener": {"transport_errors": 3, "hard_stops": 1, "successful_runs": 0},
+            "candidate_file": {"transport_errors": 0, "hard_stops": 0, "successful_runs": 2},
+        }
+    }
+    out = adaptive_reorder_provider_order(["dexscreener", "candidate_file"], reliability_state=state, enabled=True)
+    assert out["provider_order"] == ["candidate_file", "dexscreener"]
+    assert out["summary"]["adaptive_provider_order_applied"] is True
+
+
+def test_update_adaptive_reliability_state_from_campaign_report_tracks_probe_and_provider_stats(tmp_path):
+    state = {"candidate_stats": {}, "provider_stats": {}, "meta": {}}
+    report = {
+        "campaign_summary": {
+            "fallback_candidate_probe_summary": {
+                "fallback_candidates_probe_successes": [{"token_address": "A"}],
+                "fallback_candidates_probe_failures": [{"token_address": "B", "reason": "quote_400"}],
+            }
+        },
+        "runs": [
+            {"campaign_provider": {"executed_provider": "dexscreener"}, "rollup": {"signal_provider_metrics": {"fetch_transport_errors": 1, "fetch_endpoint_failure_events": 2}}},
+            {"campaign_provider": {"executed_provider": "candidate_file", "execution_error": True}, "rollup": {}},
+        ],
+    }
+    out = update_adaptive_reliability_state_from_campaign_report(state, report)
+    assert out["candidate_stats"]["A"]["probe_ok"] == 1
+    assert out["candidate_stats"]["B"]["probe_failed"] == 1
+    assert out["provider_stats"]["dexscreener"]["transport_errors"] == 1
+    assert out["provider_stats"]["candidate_file"]["hard_stops"] == 1
+
+    p = tmp_path / "adaptive_state.json"
+    save_adaptive_reliability_state(str(p), out)
+    loaded = load_adaptive_reliability_state(str(p))
+    assert loaded["candidate_stats"]["A"]["probe_ok"] == 1
+
+
+def test_extract_campaign_report_summary_includes_adaptive_fields():
+    s = _extract_campaign_report_summary(
+        {
+            "campaign_summary": {
+                "aggregate_rollup": {},
+                "promotion_gate_summary": {},
+                "alert_summary": {},
+                "discovery_provider_summary": {},
+                "fallback_candidate_probe_summary": {},
+                "adaptive_fallback_candidate_summary": {
+                    "adaptive_candidate_reordering_applied": True,
+                    "adaptive_candidate_quarantined_count": 2,
+                },
+                "adaptive_provider_order_summary": {
+                    "adaptive_provider_order_applied": True,
+                },
+            }
+        }
+    )
+    assert s["adaptive_candidate_reordering_applied"] is True
+    assert s["adaptive_candidate_quarantined_count"] == 2
+    assert s["adaptive_provider_order_applied"] is True

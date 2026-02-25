@@ -422,6 +422,7 @@ def probe_fallback_candidates_preflight(
 
     kept: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
+    successes: list[dict[str, Any]] = []
     probe_ok = 0
     probe_failed = 0
     for idx, cand in enumerate(candidates):
@@ -432,6 +433,13 @@ def probe_fallback_candidates_preflight(
         if bool((res or {}).get("ok", False)):
             probe_ok += 1
             kept.append(cand)
+            successes.append(
+                {
+                    "candidate_index": idx,
+                    "token_address": str(cand.get("token_address") or ""),
+                    "symbol": str(cand.get("symbol") or ""),
+                }
+            )
         else:
             probe_failed += 1
             failures.append(
@@ -459,8 +467,187 @@ def probe_fallback_candidates_preflight(
             "fallback_candidates_probe_min_pass_rate": float(quote_probe_min_pass_rate),
             "fallback_candidates_probe_warn_failure_rate": float(quote_probe_warn_failure_rate),
             "fallback_candidates_probe_failures": failures,
+            "fallback_candidates_probe_successes": successes,
         },
     }
+
+
+def load_adaptive_reliability_state(path_str: str) -> dict[str, Any]:
+    if not str(path_str or "").strip():
+        return {"candidate_stats": {}, "provider_stats": {}, "meta": {}}
+    p = Path(path_str)
+    if not p.exists():
+        return {"candidate_stats": {}, "provider_stats": {}, "meta": {}}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {"candidate_stats": {}, "provider_stats": {}, "meta": {"load_error": True}}
+    if not isinstance(data, dict):
+        return {"candidate_stats": {}, "provider_stats": {}, "meta": {"load_error": True}}
+    data.setdefault("candidate_stats", {})
+    data.setdefault("provider_stats", {})
+    data.setdefault("meta", {})
+    return data
+
+
+def save_adaptive_reliability_state(path_str: str, state: dict[str, Any]) -> None:
+    if not str(path_str or "").strip():
+        return
+    p = Path(path_str)
+    p.write_text(json.dumps(dict(state or {}), sort_keys=True, indent=2), encoding="utf-8")
+
+
+def _candidate_quality_score(candidate: dict[str, Any], state: dict[str, Any], *, quarantine_failure_threshold: int = 3) -> dict[str, Any]:
+    tok = str((candidate or {}).get("token_address") or "")
+    cs = dict(((state or {}).get("candidate_stats") or {}).get(tok) or {})
+    md = dict((candidate or {}).get("metadata") or {})
+    confidence_hint = _to_float_or_none(md.get("confidence_hint")) or 0.0
+    probe_ok = int(cs.get("probe_ok", 0) or 0)
+    probe_failed = int(cs.get("probe_failed", 0) or 0)
+    exec_errors = int(cs.get("execution_error", 0) or 0)
+    submitted = int(cs.get("submitted", 0) or 0)
+    score = round(confidence_hint + (probe_ok * 2.0) + (submitted * 1.0) - (probe_failed * 3.0) - (exec_errors * 4.0), 6)
+    quarantined = (probe_failed + exec_errors) >= int(quarantine_failure_threshold)
+    return {
+        "token_address": tok,
+        "symbol": str((candidate or {}).get("symbol") or ""),
+        "score": score,
+        "probe_ok": probe_ok,
+        "probe_failed": probe_failed,
+        "execution_error": exec_errors,
+        "submitted": submitted,
+        "confidence_hint": confidence_hint,
+        "quarantined": quarantined,
+    }
+
+
+def adaptive_reorder_fallback_candidates(
+    candidates: list[dict[str, Any]],
+    *,
+    reliability_state: dict[str, Any] | None = None,
+    enabled: bool = False,
+    quarantine_failure_threshold: int = 3,
+) -> dict[str, Any]:
+    candidates = list(candidates or [])
+    if not enabled or not candidates:
+        return {
+            "candidates": candidates,
+            "summary": {
+                "adaptive_candidate_reordering_applied": False,
+                "adaptive_candidate_reordering_enabled": bool(enabled),
+                "adaptive_candidate_quarantined_count": 0,
+                "adaptive_candidate_top_scores": [],
+                "adaptive_candidate_bottom_scores": [],
+            },
+        }
+    scored = []
+    for c in candidates:
+        scored.append({"candidate": dict(c or {}), "scorecard": _candidate_quality_score(c, reliability_state or {}, quarantine_failure_threshold=quarantine_failure_threshold)})
+    kept = [x for x in scored if not bool((x.get("scorecard") or {}).get("quarantined", False))]
+    quarantined = [x for x in scored if bool((x.get("scorecard") or {}).get("quarantined", False))]
+    kept_sorted = sorted(kept, key=lambda x: (-(x["scorecard"]["score"]), str(x["scorecard"]["token_address"])))
+    out_candidates = [x["candidate"] for x in kept_sorted]
+    top_scores = [dict(x["scorecard"]) for x in kept_sorted[:5]]
+    bottom_pool = sorted(kept, key=lambda x: (x["scorecard"]["score"], str(x["scorecard"]["token_address"])))
+    bottom_scores = [dict(x["scorecard"]) for x in bottom_pool[:5]]
+    return {
+        "candidates": out_candidates,
+        "summary": {
+            "adaptive_candidate_reordering_applied": True,
+            "adaptive_candidate_reordering_enabled": True,
+            "adaptive_candidate_quarantined_count": len(quarantined),
+            "adaptive_candidate_quarantine_threshold": int(quarantine_failure_threshold),
+            "adaptive_candidate_top_scores": top_scores,
+            "adaptive_candidate_bottom_scores": bottom_scores,
+            "adaptive_candidate_quarantined_tokens": [x["scorecard"]["token_address"] for x in quarantined],
+        },
+    }
+
+
+def adaptive_reorder_provider_order(
+    provider_order: list[str],
+    *,
+    reliability_state: dict[str, Any] | None = None,
+    enabled: bool = False,
+) -> dict[str, Any]:
+    provider_order = [str(x).strip().lower() for x in list(provider_order or []) if str(x).strip()]
+    if not enabled or len(provider_order) <= 1:
+        return {
+            "provider_order": provider_order,
+            "summary": {
+                "adaptive_provider_order_applied": False,
+                "adaptive_provider_order_enabled": bool(enabled),
+                "adaptive_provider_scores": {},
+            },
+        }
+    ps = dict((reliability_state or {}).get("provider_stats") or {})
+    def _score(p: str) -> float:
+        st = dict(ps.get(p) or {})
+        return round((int(st.get("successful_runs", 0) or 0) * 2.0) - (int(st.get("transport_errors", 0) or 0) * 3.0) - (int(st.get("hard_stops", 0) or 0) * 4.0), 6)
+    scores = {p: _score(p) for p in provider_order}
+    reordered = sorted(provider_order, key=lambda p: (-scores[p], provider_order.index(p)))
+    return {
+        "provider_order": reordered,
+        "summary": {
+            "adaptive_provider_order_applied": reordered != provider_order,
+            "adaptive_provider_order_enabled": True,
+            "adaptive_provider_order_before": provider_order,
+            "adaptive_provider_order_after": reordered,
+            "adaptive_provider_scores": scores,
+        },
+    }
+
+
+def update_adaptive_reliability_state_from_campaign_report(state: dict[str, Any], campaign_report: dict[str, Any]) -> dict[str, Any]:
+    out = dict(state or {})
+    cstats = dict(out.get("candidate_stats") or {})
+    pstats = dict(out.get("provider_stats") or {})
+    summary = dict((campaign_report or {}).get("campaign_summary") or {})
+    fb = dict(summary.get("fallback_candidate_probe_summary") or {})
+    for row in list(fb.get("fallback_candidates_probe_successes") or []):
+        if not isinstance(row, dict):
+            continue
+        tok = str(row.get("token_address") or "")
+        if not tok:
+            continue
+        cs = dict(cstats.get(tok) or {})
+        cs["probe_ok"] = int(cs.get("probe_ok", 0)) + 1
+        cstats[tok] = cs
+    for row in list(fb.get("fallback_candidates_probe_failures") or []):
+        if not isinstance(row, dict):
+            continue
+        tok = str(row.get("token_address") or "")
+        if not tok:
+            continue
+        cs = dict(cstats.get(tok) or {})
+        cs["probe_failed"] = int(cs.get("probe_failed", 0)) + 1
+        cs["last_error"] = str(row.get("reason") or "")
+        cstats[tok] = cs
+    runs = list((campaign_report or {}).get("runs") or [])
+    for rec in runs:
+        if not isinstance(rec, dict):
+            continue
+        cp = dict(rec.get("campaign_provider") or {})
+        provider = str(cp.get("executed_provider") or cp.get("provider") or "")
+        if not provider:
+            continue
+        psr = dict(pstats.get(provider) or {})
+        psr["runs"] = int(psr.get("runs", 0)) + 1
+        rr = dict(rec.get("rollup") or {})
+        spm = dict(rr.get("signal_provider_metrics") or {})
+        psr["transport_errors"] = int(psr.get("transport_errors", 0)) + int(spm.get("fetch_transport_errors", 0) or 0)
+        psr["endpoint_failures"] = int(psr.get("endpoint_failures", 0)) + int(spm.get("fetch_endpoint_failure_events", 0) or 0)
+        if bool(cp.get("execution_error", False)):
+            psr["hard_stops"] = int(psr.get("hard_stops", 0)) + 1
+        else:
+            psr["successful_runs"] = int(psr.get("successful_runs", 0)) + 1
+        pstats[provider] = psr
+    out["candidate_stats"] = cstats
+    out["provider_stats"] = pstats
+    meta = dict(out.get("meta") or {})
+    meta["updated_at_unix_ms"] = int(time.time() * 1000)
+    out["meta"] = meta
+    return out
 
 
 def _build_campaign_alert_emitter(
@@ -675,6 +862,8 @@ def _render_campaign_report_markdown(report: dict[str, Any]) -> str:
     alerts = dict(summary.get("alert_summary") or {})
     discovery = dict(summary.get("discovery_provider_summary") or {})
     fallback_probe = dict(summary.get("fallback_candidate_probe_summary") or {})
+    adaptive_fallback = dict(summary.get("adaptive_fallback_candidate_summary") or {})
+    adaptive_provider = dict(summary.get("adaptive_provider_order_summary") or {})
     lines = [
         "# Live Pilot Campaign Report",
         "",
@@ -733,6 +922,27 @@ def _render_campaign_report_markdown(report: dict[str, Any]) -> str:
                 f"- fallback_candidates_probe_fail_closed_triggered: `{bool(fallback_probe.get('fallback_candidates_probe_fail_closed_triggered', False))}`",
             ]
         )
+    if adaptive_fallback:
+        lines.extend(
+            [
+                "",
+                "## Adaptive Candidate Ordering",
+                "",
+                f"- adaptive_candidate_reordering_applied: `{bool(adaptive_fallback.get('adaptive_candidate_reordering_applied', False))}`",
+                f"- adaptive_candidate_quarantined_count: `{adaptive_fallback.get('adaptive_candidate_quarantined_count', 0)}`",
+            ]
+        )
+    if adaptive_provider:
+        lines.extend(
+            [
+                "",
+                "## Adaptive Provider Ordering",
+                "",
+                f"- adaptive_provider_order_applied: `{bool(adaptive_provider.get('adaptive_provider_order_applied', False))}`",
+                f"- adaptive_provider_order_before: `{json.dumps(adaptive_provider.get('adaptive_provider_order_before', []))}`",
+                f"- adaptive_provider_order_after: `{json.dumps(adaptive_provider.get('adaptive_provider_order_after', []))}`",
+            ]
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -743,6 +953,8 @@ def _extract_campaign_report_summary(report: dict[str, Any]) -> dict[str, Any]:
     alerts = dict(summary.get("alert_summary") or {})
     discovery = dict(summary.get("discovery_provider_summary") or {})
     fallback_probe = dict(summary.get("fallback_candidate_probe_summary") or {})
+    adaptive_fallback = dict(summary.get("adaptive_fallback_candidate_summary") or {})
+    adaptive_provider = dict(summary.get("adaptive_provider_order_summary") or {})
     return {
         "campaign_id": str(summary.get("campaign_id") or ""),
         "completed_runs": int(summary.get("completed_runs", 0) or 0),
@@ -767,6 +979,9 @@ def _extract_campaign_report_summary(report: dict[str, Any]) -> dict[str, Any]:
         "fallback_candidates_total": int(fallback_probe.get("fallback_candidates_total", 0) or 0),
         "fallback_candidates_probe_ok": int(fallback_probe.get("fallback_candidates_probe_ok", 0) or 0),
         "fallback_candidates_probe_failed": int(fallback_probe.get("fallback_candidates_probe_failed", 0) or 0),
+        "adaptive_candidate_quarantined_count": int(adaptive_fallback.get("adaptive_candidate_quarantined_count", 0) or 0),
+        "adaptive_candidate_reordering_applied": bool(adaptive_fallback.get("adaptive_candidate_reordering_applied", False)),
+        "adaptive_provider_order_applied": bool(adaptive_provider.get("adaptive_provider_order_applied", False)),
     }
 
 
@@ -800,6 +1015,9 @@ def aggregate_live_pilot_campaign_reports(
         "fallback_candidates_total": sum(int(s.get("fallback_candidates_total", 0) or 0) for s in summaries),
         "fallback_candidates_probe_ok_total": sum(int(s.get("fallback_candidates_probe_ok", 0) or 0) for s in summaries),
         "fallback_candidates_probe_failed_total": sum(int(s.get("fallback_candidates_probe_failed", 0) or 0) for s in summaries),
+        "adaptive_candidate_quarantined_count_total": sum(int(s.get("adaptive_candidate_quarantined_count", 0) or 0) for s in summaries),
+        "adaptive_candidate_reordering_applied_count": sum(1 for s in summaries if bool(s.get("adaptive_candidate_reordering_applied", False))),
+        "adaptive_provider_order_applied_count": sum(1 for s in summaries if bool(s.get("adaptive_provider_order_applied", False))),
         "stop_reason_by_reason": {},
         "alert_level_by_level": {},
         "provider_usage_by_provider": {},
@@ -831,6 +1049,7 @@ def aggregate_live_pilot_campaign_reports(
         "provider_failover_count_sequence": [int(s.get("provider_failover_count", 0) or 0) for s in summaries],
         "provider_usage_sequence": [dict(s.get("provider_usage_by_provider", {}) or {}) for s in summaries],
         "fallback_probe_failed_sequence": [int(s.get("fallback_candidates_probe_failed", 0) or 0) for s in summaries],
+        "adaptive_candidate_quarantined_count_sequence": [int(s.get("adaptive_candidate_quarantined_count", 0) or 0) for s in summaries],
         "stop_reason_sequence": [s["stop_reason"] for s in summaries],
     }
     if count >= 2:
@@ -928,6 +1147,7 @@ def _render_campaign_trend_report_markdown(report: dict[str, Any]) -> str:
         f"- dexscreener_transport_errors_total: `{agg.get('dexscreener_transport_errors_total', 0)}`",
         f"- provider_failover_count_total: `{agg.get('provider_failover_count_total', 0)}`",
         f"- fallback_candidates_probe_failed_total: `{agg.get('fallback_candidates_probe_failed_total', 0)}`",
+        f"- adaptive_candidate_quarantined_count_total: `{agg.get('adaptive_candidate_quarantined_count_total', 0)}`",
         f"- worst_realized_slippage_bps_across_campaigns: `{agg.get('worst_realized_slippage_bps_across_campaigns')}`",
         "",
         "## Recommendation",
@@ -943,6 +1163,7 @@ def _render_campaign_trend_report_markdown(report: dict[str, Any]) -> str:
         f"- provider_transport_errors_sequence: `{json.dumps(trends.get('provider_transport_errors_sequence', []))}`",
         f"- provider_failover_count_sequence: `{json.dumps(trends.get('provider_failover_count_sequence', []))}`",
         f"- fallback_probe_failed_sequence: `{json.dumps(trends.get('fallback_probe_failed_sequence', []))}`",
+        f"- adaptive_candidate_quarantined_count_sequence: `{json.dumps(trends.get('adaptive_candidate_quarantined_count_sequence', []))}`",
         f"- stop_reason_sequence: `{json.dumps(trends.get('stop_reason_sequence', []))}`",
         f"- provider_usage_by_provider_total: `{json.dumps(agg.get('provider_usage_by_provider', {}), sort_keys=True)}`",
     ]
@@ -2428,6 +2649,11 @@ def _main() -> int:
     p.add_argument("--fallback-candidate-probe-fail-closed", action="store_true")
     p.add_argument("--fallback-candidate-probe-min-pass-rate", type=float, default=0.5)
     p.add_argument("--fallback-candidate-probe-warn-failure-rate", type=float, default=0.5)
+    p.add_argument("--adaptive-reliability-state-json-path", default="")
+    p.add_argument("--adaptive-fallback-candidate-ordering", action="store_true")
+    p.add_argument("--adaptive-provider-ordering", action="store_true")
+    p.add_argument("--adaptive-candidate-quarantine-threshold", type=int, default=3)
+    p.add_argument("--alert-on-fallback-pool-quality-degraded", action="store_true")
     p.add_argument("--candidate-list-json", default="")
     p.add_argument("--candidate-list-json-path", default="")
     p.add_argument("--signal-provider-json-path", default="")
@@ -2462,6 +2688,8 @@ def _main() -> int:
             ensure_dir_within_base(str(Path(args.alerts_jsonl_path).parent))
         if args.campaign_trend_report_path:
             ensure_dir_within_base(str(Path(args.campaign_trend_report_path).parent))
+        if args.adaptive_reliability_state_json_path:
+            ensure_dir_within_base(str(Path(args.adaptive_reliability_state_json_path).parent))
 
     adapter_config = None
     if args.adapter_config_json and args.adapter_config_json_path:
@@ -2503,6 +2731,9 @@ def _main() -> int:
     elif args.candidate_list_json:
         candidate_list = json.loads(args.candidate_list_json)
     fallback_candidate_list = None
+    adaptive_reliability_state = load_adaptive_reliability_state(str(args.adaptive_reliability_state_json_path or ""))
+    adaptive_fallback_summary: dict[str, Any] = {}
+    adaptive_provider_order_summary: dict[str, Any] = {}
     if args.fallback_candidate_list_json_path:
         fallback_candidate_list = json.loads(Path(args.fallback_candidate_list_json_path).read_text(encoding="utf-8"))
     fallback_candidate_preflight_summary: dict[str, Any] = {}
@@ -2511,6 +2742,14 @@ def _main() -> int:
         sanitized = sanitize_fallback_candidates(fallback_candidate_list)
         fallback_candidate_list = list(sanitized.get("candidates") or [])
         fallback_candidate_preflight_summary.update(dict(sanitized.get("summary") or {}))
+        reordered = adaptive_reorder_fallback_candidates(
+            fallback_candidate_list,
+            reliability_state=adaptive_reliability_state,
+            enabled=bool(args.adaptive_fallback_candidate_ordering),
+            quarantine_failure_threshold=int(args.adaptive_candidate_quarantine_threshold or 3),
+        )
+        fallback_candidate_list = list(reordered.get("candidates") or [])
+        adaptive_fallback_summary.update(dict(reordered.get("summary") or {}))
         probe_count = int(args.fallback_candidate_probe_count or 0)
         if probe_count > 0:
             probed = probe_fallback_candidates_preflight(
@@ -2551,6 +2790,23 @@ def _main() -> int:
                         },
                     }
                 )
+        if (
+            bool(args.alert_on_fallback_pool_quality_degraded)
+            and int(fallback_candidate_preflight_summary.get("fallback_candidates_total", 0) or 0) > 0
+            and int(fallback_candidate_preflight_summary.get("fallback_candidates_probe_ok", 0) or 0)
+            < int(fallback_candidate_preflight_summary.get("fallback_candidates_probe_failed", 0) or 0)
+        ):
+            campaign_initial_alerts.append(
+                {
+                    "alert_type": "fallback_pool_quality_degraded",
+                    "level": "warning",
+                    "message": "Fallback candidate pool quality degraded (probe failures exceed probe successes).",
+                    "details": {
+                        "probe_ok": fallback_candidate_preflight_summary.get("fallback_candidates_probe_ok"),
+                        "probe_failed": fallback_candidate_preflight_summary.get("fallback_candidates_probe_failed"),
+                    },
+                }
+            )
     def _execute_single_run():
         signal_provider = _build_live_pilot_signal_provider_from_args(args)
         if float(args.auto_pilot_window_seconds or 0.0) > 0:
@@ -2628,6 +2884,13 @@ def _main() -> int:
         provider_order = [s.strip().lower() for s in str(args.discovery_provider_order or "").split(",") if s.strip()]
         if not provider_order:
             provider_order = ["dexscreener" if bool(args.use_dexscreener_signals) else ("candidate_file" if isinstance(candidate_list, list) else "direct")]
+        provider_reordered = adaptive_reorder_provider_order(
+            provider_order,
+            reliability_state=adaptive_reliability_state,
+            enabled=bool(args.adaptive_provider_ordering),
+        )
+        provider_order = list(provider_reordered.get("provider_order") or provider_order)
+        adaptive_provider_order_summary = dict(provider_reordered.get("summary") or {})
         provider_state = {"index": 0, "current": (provider_order[0] if provider_order else "direct")}
 
         def _run_campaign_with_provider_failover():
@@ -2724,6 +2987,8 @@ def _main() -> int:
                     "alert_summary": _summarize_campaign_alerts(campaign_initial_alerts),
                     "discovery_provider_summary": _summarize_campaign_discovery_providers([]),
                     "fallback_candidate_probe_summary": dict(fallback_candidate_preflight_summary),
+                    "adaptive_fallback_candidate_summary": dict(adaptive_fallback_summary),
+                    "adaptive_provider_order_summary": dict(adaptive_provider_order_summary),
                 },
                 "runs": [],
                 "alerts": list(campaign_initial_alerts),
@@ -2759,11 +3024,16 @@ def _main() -> int:
             alert_on_campaign_stop=bool(args.alert_on_campaign_stop),
             initial_alerts=campaign_initial_alerts,
             campaign_extra_summary=(
-                {"fallback_candidate_probe_summary": dict(fallback_candidate_preflight_summary)}
-                if fallback_candidate_preflight_summary
-                else None
+                {
+                    **({"fallback_candidate_probe_summary": dict(fallback_candidate_preflight_summary)} if fallback_candidate_preflight_summary else {}),
+                    **({"adaptive_fallback_candidate_summary": dict(adaptive_fallback_summary)} if adaptive_fallback_summary else {}),
+                    **({"adaptive_provider_order_summary": dict(adaptive_provider_order_summary)} if adaptive_provider_order_summary else {}),
+                }
             ),
         )
+        if str(args.adaptive_reliability_state_json_path or "").strip():
+            adaptive_reliability_state = update_adaptive_reliability_state_from_campaign_report(adaptive_reliability_state, campaign)
+            save_adaptive_reliability_state(str(args.adaptive_reliability_state_json_path), adaptive_reliability_state)
         cli_out = {
             "campaign_summary": campaign.get("campaign_summary"),
             "report_path": campaign.get("report_path", ""),
