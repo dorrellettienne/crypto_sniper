@@ -286,6 +286,52 @@ def _summarize_campaign_alerts(alerts: list[dict[str, Any]]) -> dict[str, Any]:
     return out
 
 
+def _summarize_campaign_discovery_providers(run_records: list[dict[str, Any]]) -> dict[str, Any]:
+    summary = {
+        "provider_usage_by_provider": {},
+        "provider_failover_count": 0,
+        "active_provider_by_run": [],
+        "per_provider_metrics": {},
+    }
+    for rec in list(run_records or []):
+        if not isinstance(rec, dict):
+            continue
+        cp = dict(rec.get("campaign_provider") or {})
+        provider = str(cp.get("executed_provider") or cp.get("provider") or "")
+        if not provider:
+            continue
+        summary["active_provider_by_run"].append({"run_index": rec.get("run_index"), "provider": provider})
+        usage = summary.setdefault("provider_usage_by_provider", {})
+        usage[provider] = int(usage.get(provider, 0)) + 1
+        if bool(cp.get("failover_applied", False)):
+            summary["provider_failover_count"] = int(summary.get("provider_failover_count", 0)) + 1
+
+        ppm = summary.setdefault("per_provider_metrics", {}).setdefault(
+            provider,
+            {
+                "runs": 0,
+                "signals_seen": 0,
+                "signals_accepted": 0,
+                "signals_rejected": 0,
+                "candidates_seen": 0,
+                "candidates_attempted": 0,
+                "candidates_submitted": 0,
+                "fetch_transport_errors": 0,
+                "fetch_endpoint_failure_events": 0,
+            },
+        )
+        ppm["runs"] = int(ppm.get("runs", 0)) + 1
+        rr = dict(rec.get("rollup") or {})
+        for key in ("signals_seen", "signals_accepted", "signals_rejected", "candidates_seen", "candidates_attempted", "candidates_submitted"):
+            ppm[key] = int(ppm.get(key, 0)) + int(rr.get(key, 0) or 0)
+        spm = dict(rr.get("signal_provider_metrics") or {})
+        ppm["fetch_transport_errors"] = int(ppm.get("fetch_transport_errors", 0)) + int(spm.get("fetch_transport_errors", 0) or 0)
+        ppm["fetch_endpoint_failure_events"] = int(ppm.get("fetch_endpoint_failure_events", 0)) + int(
+            spm.get("fetch_endpoint_failure_events", 0) or 0
+        )
+    return summary
+
+
 def _build_campaign_alert_emitter(
     *,
     campaign_id: str,
@@ -496,6 +542,7 @@ def _render_campaign_report_markdown(report: dict[str, Any]) -> str:
     agg = dict(summary.get("aggregate_rollup") or {})
     gate = dict(summary.get("promotion_gate_summary") or {})
     alerts = dict(summary.get("alert_summary") or {})
+    discovery = dict(summary.get("discovery_provider_summary") or {})
     lines = [
         "# Live Pilot Campaign Report",
         "",
@@ -530,6 +577,16 @@ def _render_campaign_report_markdown(report: dict[str, Any]) -> str:
                 f"- by_type: `{json.dumps(alerts.get('by_type', {}), sort_keys=True)}`",
             ]
         )
+    if discovery:
+        lines.extend(
+            [
+                "",
+                "## Discovery Providers",
+                "",
+                f"- provider_failover_count: `{discovery.get('provider_failover_count', 0)}`",
+                f"- provider_usage_by_provider: `{json.dumps(discovery.get('provider_usage_by_provider', {}), sort_keys=True)}`",
+            ]
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -538,6 +595,7 @@ def _extract_campaign_report_summary(report: dict[str, Any]) -> dict[str, Any]:
     agg = dict(summary.get("aggregate_rollup") or {})
     gate = dict(summary.get("promotion_gate_summary") or {})
     alerts = dict(summary.get("alert_summary") or {})
+    discovery = dict(summary.get("discovery_provider_summary") or {})
     return {
         "campaign_id": str(summary.get("campaign_id") or ""),
         "completed_runs": int(summary.get("completed_runs", 0) or 0),
@@ -556,6 +614,9 @@ def _extract_campaign_report_summary(report: dict[str, Any]) -> dict[str, Any]:
         "promotion_gate_failed_checks": list(gate.get("failed_checks", []) or []),
         "alert_count": int(alerts.get("count", 0) or 0),
         "alert_levels": dict(alerts.get("by_level", {}) or {}),
+        "provider_failover_count": int(discovery.get("provider_failover_count", 0) or 0),
+        "provider_usage_by_provider": dict(discovery.get("provider_usage_by_provider", {}) or {}),
+        "discovery_per_provider_metrics": dict(discovery.get("per_provider_metrics", {}) or {}),
     }
 
 
@@ -585,8 +646,10 @@ def aggregate_live_pilot_campaign_reports(
         "dexscreener_endpoint_failures_total": sum(int(s["dexscreener_endpoint_failures"]) for s in summaries),
         "promotion_gate_pass_count": sum(1 for s in summaries if s["promotion_gate_status"] == "pass"),
         "promotion_gate_fail_count": sum(1 for s in summaries if s["promotion_gate_status"] == "fail"),
+        "provider_failover_count_total": sum(int(s.get("provider_failover_count", 0) or 0) for s in summaries),
         "stop_reason_by_reason": {},
         "alert_level_by_level": {},
+        "provider_usage_by_provider": {},
     }
     slippage_avgs = [float(s["avg_realized_slippage_bps"]) for s in summaries if s["avg_realized_slippage_bps"] is not None]
     slippage_worsts = [float(s["worst_realized_slippage_bps"]) for s in summaries if s["worst_realized_slippage_bps"] is not None]
@@ -602,6 +665,9 @@ def aggregate_live_pilot_campaign_reports(
         for lvl, n in dict(s.get("alert_levels") or {}).items():
             m = aggregate.setdefault("alert_level_by_level", {})
             m[str(lvl)] = int(m.get(str(lvl), 0)) + int(n or 0)
+        for p, n in dict(s.get("provider_usage_by_provider") or {}).items():
+            m = aggregate.setdefault("provider_usage_by_provider", {})
+            m[str(p)] = int(m.get(str(p), 0)) + int(n or 0)
 
     trends = {
         "campaign_ids": [s["campaign_id"] for s in summaries],
@@ -609,6 +675,8 @@ def aggregate_live_pilot_campaign_reports(
         "finalized_count_sequence": [int(s["live_finalized_count"]) for s in summaries],
         "avg_slippage_bps_sequence": [s["avg_realized_slippage_bps"] for s in summaries],
         "provider_transport_errors_sequence": [int(s["dexscreener_transport_errors"]) for s in summaries],
+        "provider_failover_count_sequence": [int(s.get("provider_failover_count", 0) or 0) for s in summaries],
+        "provider_usage_sequence": [dict(s.get("provider_usage_by_provider", {}) or {}) for s in summaries],
         "stop_reason_sequence": [s["stop_reason"] for s in summaries],
     }
     if count >= 2:
@@ -640,6 +708,7 @@ def _recommend_live_pilot_promotion_from_campaign_trends(summary: dict[str, Any]
     max_worst_slippage = float(cfg.get("max_worst_slippage_bps", 120.0))
     max_warning_alerts = int(cfg.get("max_warning_alerts", 9999))
     require_recent_gate_passes = int(cfg.get("require_recent_gate_passes", 2))
+    allow_fallback_continue_on_provider_issues = bool(cfg.get("allow_fallback_continue_on_provider_issues", True))
 
     if len(campaigns) < min_campaigns:
         reasons.append("insufficient_campaign_count")
@@ -662,11 +731,23 @@ def _recommend_live_pilot_promotion_from_campaign_trends(summary: dict[str, Any]
     elif require_recent_gate_passes > 0 and any(s != "pass" for s in recent_statuses):
         reasons.append("recent_campaign_gate_not_all_pass")
 
+    fallback_usage_total = int((aggregate.get("provider_usage_by_provider") or {}).get("candidate_file", 0) or 0)
+    provider_failovers_total = int(aggregate.get("provider_failover_count_total", 0) or 0)
+
     if not reasons:
         action = "increase_cap_small_step"
         confidence = "medium"
     elif reasons == ["insufficient_campaign_count"] or reasons == ["insufficient_total_finalized"]:
         action = "continue_tiny_pilots"
+        confidence = "medium"
+    elif (
+        allow_fallback_continue_on_provider_issues
+        and "provider_transport_errors_total_exceeded" in reasons
+        and "reconciliation_mismatch_total_exceeded" not in reasons
+        and fallback_usage_total > 0
+        and provider_failovers_total > 0
+    ):
+        action = "continue_tiny_pilots_with_fallback_source"
         confidence = "medium"
     elif any(r in reasons for r in ("provider_transport_errors_total_exceeded", "reconciliation_mismatch_total_exceeded")):
         action = "hold"
@@ -688,6 +769,7 @@ def _render_campaign_trend_report_markdown(report: dict[str, Any]) -> str:
         f"- live_finalized_count_total: `{agg.get('live_finalized_count_total', 0)}`",
         f"- live_reconciliation_mismatch_count_total: `{agg.get('live_reconciliation_mismatch_count_total', 0)}`",
         f"- dexscreener_transport_errors_total: `{agg.get('dexscreener_transport_errors_total', 0)}`",
+        f"- provider_failover_count_total: `{agg.get('provider_failover_count_total', 0)}`",
         f"- worst_realized_slippage_bps_across_campaigns: `{agg.get('worst_realized_slippage_bps_across_campaigns')}`",
         "",
         "## Recommendation",
@@ -701,7 +783,9 @@ def _render_campaign_trend_report_markdown(report: dict[str, Any]) -> str:
         f"- promotion_gate_status_sequence: `{json.dumps(trends.get('promotion_gate_status_sequence', []))}`",
         f"- finalized_count_sequence: `{json.dumps(trends.get('finalized_count_sequence', []))}`",
         f"- provider_transport_errors_sequence: `{json.dumps(trends.get('provider_transport_errors_sequence', []))}`",
+        f"- provider_failover_count_sequence: `{json.dumps(trends.get('provider_failover_count_sequence', []))}`",
         f"- stop_reason_sequence: `{json.dumps(trends.get('stop_reason_sequence', []))}`",
+        f"- provider_usage_by_provider_total: `{json.dumps(agg.get('provider_usage_by_provider', {}), sort_keys=True)}`",
     ]
     return "\n".join(lines) + "\n"
 
@@ -781,6 +865,7 @@ def run_live_pilot_campaign(
         run_rollup = dict((out or {}).get("rollup") or {})
         run_summary = dict((out or {}).get("live_pilot_summary") or {})
         run_gate = dict((out or {}).get("promotion_gate_summary") or {})
+        campaign_provider = dict((out or {}).get("campaign_provider") or {})
         sig = str(run_summary.get("submitted_signature") or "")
         completed_runs.append(
             {
@@ -789,10 +874,37 @@ def run_live_pilot_campaign(
                 "rollup": run_rollup,
                 "live_pilot_summary": run_summary,
                 "promotion_gate_summary": run_gate,
+                "campaign_provider": campaign_provider,
                 "submitted_signature": sig,
             }
         )
         _accumulate_campaign_rollup(aggregate_rollup, run_rollup)
+        if bool(campaign_provider.get("failover_applied", False)):
+            row = {
+                "run_index": run_index,
+                "alert_type": "discovery_provider_failover",
+                "level": "warning",
+                "message": f"Discovery provider failover applied: {campaign_provider.get('from_provider')} -> {campaign_provider.get('next_provider') or campaign_provider.get('provider')}",
+                "details": {
+                    "from_provider": campaign_provider.get("from_provider"),
+                    "to_provider": campaign_provider.get("next_provider") or campaign_provider.get("provider"),
+                    "reason": campaign_provider.get("failover_reason"),
+                },
+            }
+            alerts_emitted.append(row)
+            if alert_emitter is not None:
+                alert_emitter(row)
+        if bool(campaign_provider.get("execution_error", False)):
+            row = {
+                "run_index": run_index,
+                "alert_type": "discovery_provider_execution_error",
+                "level": "critical",
+                "message": f"Discovery provider execution error ({campaign_provider.get('provider')}): {campaign_provider.get('error')}",
+                "details": {"provider": campaign_provider.get("provider"), "error": campaign_provider.get("error")},
+            }
+            alerts_emitted.append(row)
+            if alert_emitter is not None:
+                alert_emitter(row)
         for alert in _campaign_alert_policy_eval(run_out=out, aggregate_rollup=aggregate_rollup, policy=alert_policy):
             row = {"run_index": run_index, **dict(alert or {})}
             alerts_emitted.append(row)
@@ -832,6 +944,7 @@ def run_live_pilot_campaign(
         "aggregate_rollup": aggregate_clean,
         "promotion_gate_summary": campaign_gate,
         "alert_summary": _summarize_campaign_alerts(alerts_emitted),
+        "discovery_provider_summary": _summarize_campaign_discovery_providers(completed_runs),
     }
     if bool(alert_on_promotion_gate_fail) and new_runs_executed > 0 and str(campaign_gate.get("status") or "") == "fail":
         row = {
@@ -2145,6 +2258,9 @@ def _main() -> int:
     p.add_argument("--alert-on-campaign-stop", action="store_true")
     p.add_argument("--campaign-report-glob", default="")
     p.add_argument("--campaign-trend-report-path", default="")
+    p.add_argument("--discovery-provider-order", default="")
+    p.add_argument("--fallback-candidate-list-json-path", default="")
+    p.add_argument("--provider-failover-on-transport-error", action="store_true")
     p.add_argument("--candidate-list-json", default="")
     p.add_argument("--candidate-list-json-path", default="")
     p.add_argument("--signal-provider-json-path", default="")
@@ -2219,6 +2335,9 @@ def _main() -> int:
         candidate_list = json.loads(Path(args.candidate_list_json_path).read_text(encoding="utf-8"))
     elif args.candidate_list_json:
         candidate_list = json.loads(args.candidate_list_json)
+    fallback_candidate_list = None
+    if args.fallback_candidate_list_json_path:
+        fallback_candidate_list = json.loads(Path(args.fallback_candidate_list_json_path).read_text(encoding="utf-8"))
     def _execute_single_run():
         signal_provider = _build_live_pilot_signal_provider_from_args(args)
         if float(args.auto_pilot_window_seconds or 0.0) > 0:
@@ -2293,6 +2412,82 @@ def _main() -> int:
 
     if int(args.campaign_runs or 0) > 0:
         resolved_campaign_id = str(args.campaign_id or f"pilot_campaign_{int(time.time())}")
+        provider_order = [s.strip().lower() for s in str(args.discovery_provider_order or "").split(",") if s.strip()]
+        if not provider_order:
+            provider_order = ["dexscreener" if bool(args.use_dexscreener_signals) else ("candidate_file" if isinstance(candidate_list, list) else "direct")]
+        provider_state = {"index": 0, "current": (provider_order[0] if provider_order else "direct")}
+
+        def _run_campaign_with_provider_failover():
+            provider = str(provider_state.get("current") or "direct")
+            out = None
+            cp_meta = {"provider": provider, "executed_provider": provider}
+            try:
+                if provider == "dexscreener":
+                    out = _execute_single_run()
+                elif provider == "candidate_file":
+                    if not isinstance(fallback_candidate_list, list):
+                        raise ValueError("candidate_file provider selected but --fallback-candidate-list-json-path not provided")
+                    mechanical_safety_filter = _build_live_pilot_mechanical_safety_filter_from_config(adapter_config or {})
+                    volatility_guard = _build_live_pilot_volatility_guard_from_config(adapter_config or {})
+                    out = run_live_pilot_auto_window_candidates(
+                        candidates=fallback_candidate_list,
+                        window_seconds=float(args.auto_pilot_window_seconds or 30.0),
+                        max_auto_trades=int(args.auto_pilot_max_trades or 1),
+                        poll_interval_seconds=float(args.auto_pilot_poll_interval_seconds or 0.0),
+                        stop_on_reconciliation_mismatch=bool(args.auto_pilot_stop_on_reconciliation_mismatch),
+                        stop_on_reconciliation_inconclusive=bool(args.auto_pilot_stop_on_reconciliation_inconclusive),
+                        audit_log_dir=args.audit_log_dir,
+                        adapter_config=adapter_config,
+                        mechanical_safety_filter=mechanical_safety_filter,
+                        volatility_guard=volatility_guard,
+                    )
+                else:
+                    out = _execute_single_run()
+            except Exception as exc:
+                out = {
+                    "audit_log_path": "",
+                    "rollup": {"runs": 0, "submit_dispatch_by_reason": {"campaign_provider_execution_error": 1}},
+                    "live_pilot_summary": {},
+                    "promotion_gate_summary": {},
+                }
+                cp_meta.update({"execution_error": True, "error": str(exc)})
+
+            rr = dict((out or {}).get("rollup") or {})
+            transport_errors = int(((rr.get("signal_provider_metrics") or {}).get("fetch_transport_errors", 0) or 0))
+            if (
+                bool(args.provider_failover_on_transport_error)
+                and provider == "dexscreener"
+                and transport_errors > 0
+                and provider_state["index"] + 1 < len(provider_order)
+            ):
+                next_provider = str(provider_order[provider_state["index"] + 1] or "")
+                if next_provider:
+                    provider_state["index"] += 1
+                    provider_state["current"] = next_provider
+                    cp_meta.update(
+                        {
+                            "failover_applied": True,
+                            "failover_reason": "signal_provider_transport_error",
+                            "from_provider": provider,
+                            "next_provider": next_provider,
+                        }
+                    )
+            out["campaign_provider"] = cp_meta
+            return out
+
+        def _campaign_stop_evaluator_with_failover(run_out):
+            cp = dict((run_out or {}).get("campaign_provider") or {})
+            if bool(cp.get("execution_error", False)):
+                return {"stop": True, "reason": "campaign_provider_execution_error"}
+            d = _default_campaign_stop_evaluator(run_out)
+            if (
+                str(d.get("reason") or "") == "signal_provider_transport_error"
+                and bool(args.provider_failover_on_transport_error)
+                and bool(cp.get("failover_applied", False))
+            ):
+                return {"stop": False, "reason": ""}
+            return d
+
         campaign_alert_emitter = None
         if str(args.alerts_jsonl_path or "").strip() or bool(args.alert_console) or str(args.alert_webhook_url or "").strip():
             campaign_alert_emitter = _build_campaign_alert_emitter(
@@ -2303,12 +2498,13 @@ def _main() -> int:
             )
         campaign = run_live_pilot_campaign(
             campaign_runs=int(args.campaign_runs),
-            run_once_fn=_execute_single_run,
+            run_once_fn=_run_campaign_with_provider_failover,
             campaign_id=resolved_campaign_id,
             campaign_state_json_path=str(args.campaign_state_json_path or ""),
             campaign_report_path=str(args.campaign_report_path or ""),
             resume_campaign=bool(args.resume_campaign),
             promotion_gate_config=((adapter_config or {}).get("live_pilot_promotion_gates") if isinstance(adapter_config, dict) else None),
+            stop_evaluator=_campaign_stop_evaluator_with_failover,
             alert_emitter=campaign_alert_emitter,
             alert_policy=((adapter_config or {}).get("live_pilot_campaign_alerts") if isinstance(adapter_config, dict) else None),
             alert_on_promotion_gate_fail=bool(args.alert_on_promotion_gate_fail),

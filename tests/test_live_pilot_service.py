@@ -1538,3 +1538,110 @@ def test_aggregate_live_pilot_campaign_reports_produces_recommendation_and_trend
     md = md_path.read_text(encoding="utf-8")
     assert "# Live Pilot Campaign Trend Report" in md
     assert "increase_cap_small_step" in md
+
+
+def test_run_live_pilot_campaign_tracks_discovery_provider_failover_and_alert(tmp_path):
+    alerts = []
+    calls = {"n": 0}
+
+    def runner():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {
+                "audit_log_path": "r1.jsonl",
+                "rollup": {"signal_provider_metrics": {"fetch_transport_errors": 1, "fetch_endpoint_failure_events": 2}},
+                "live_pilot_summary": {},
+                "promotion_gate_summary": {"status": "fail"},
+                "campaign_provider": {
+                    "provider": "candidate_file",
+                    "from_provider": "dexscreener",
+                    "failover_applied": True,
+                    "failover_reason": "signal_provider_transport_error",
+                },
+            }
+        return {
+            "audit_log_path": "r2.jsonl",
+            "rollup": {"candidates_seen": 1, "candidates_attempted": 1, "signal_provider_metrics": {"fetch_transport_errors": 0, "fetch_endpoint_failure_events": 0}},
+            "live_pilot_summary": {},
+            "promotion_gate_summary": {"status": "fail"},
+            "campaign_provider": {"provider": "candidate_file"},
+        }
+
+    out = run_live_pilot_campaign(
+        campaign_runs=2,
+        run_once_fn=runner,
+        campaign_id="camp_failover",
+        stop_evaluator=lambda out: {"stop": False, "reason": ""},
+        alert_emitter=lambda a: alerts.append(dict(a)),
+    )
+    dps = out["campaign_summary"]["discovery_provider_summary"]
+    assert dps["provider_failover_count"] == 1
+    assert dps["provider_usage_by_provider"]["candidate_file"] == 2
+    assert dps["per_provider_metrics"]["candidate_file"]["candidates_attempted"] == 1
+    assert any(a["alert_type"] == "discovery_provider_failover" for a in alerts)
+
+
+def test_aggregate_live_pilot_campaign_reports_recommends_fallback_source_when_provider_issues_but_failovers_present():
+    reports = [
+        {
+            "campaign_summary": {
+                "campaign_id": "c1",
+                "target_runs": 2,
+                "completed_runs": 2,
+                "stop_reason": "",
+                "aggregate_rollup": {
+                    "live_finalized_count": 1,
+                    "live_reconciliation_mismatch_count": 0,
+                    "economics_samples_count": 1,
+                    "fee_lamports_total": 5000,
+                    "avg_realized_slippage_bps": 30.0,
+                    "worst_realized_slippage_bps": 30.0,
+                    "signal_provider_metrics": {"fetch_transport_errors": 1, "fetch_endpoint_failure_events": 2},
+                },
+                "promotion_gate_summary": {"status": "pass", "ready_to_promote": True, "failed_checks": []},
+                "alert_summary": {"count": 1, "by_level": {"warning": 1}},
+                "discovery_provider_summary": {
+                    "provider_failover_count": 1,
+                    "provider_usage_by_provider": {"dexscreener": 1, "candidate_file": 1},
+                    "per_provider_metrics": {},
+                },
+            }
+        },
+        {
+            "campaign_summary": {
+                "campaign_id": "c2",
+                "target_runs": 2,
+                "completed_runs": 2,
+                "stop_reason": "",
+                "aggregate_rollup": {
+                    "live_finalized_count": 2,
+                    "live_reconciliation_mismatch_count": 0,
+                    "economics_samples_count": 2,
+                    "fee_lamports_total": 10000,
+                    "avg_realized_slippage_bps": 25.0,
+                    "worst_realized_slippage_bps": 40.0,
+                    "signal_provider_metrics": {"fetch_transport_errors": 1, "fetch_endpoint_failure_events": 2},
+                },
+                "promotion_gate_summary": {"status": "pass", "ready_to_promote": True, "failed_checks": []},
+                "alert_summary": {"count": 1, "by_level": {"warning": 1}},
+                "discovery_provider_summary": {
+                    "provider_failover_count": 1,
+                    "provider_usage_by_provider": {"dexscreener": 1, "candidate_file": 1},
+                    "per_provider_metrics": {},
+                },
+            }
+        },
+    ]
+    trend = aggregate_live_pilot_campaign_reports(
+        reports,
+        recommendation_config={
+            "min_campaigns": 2,
+            "min_total_finalized": 2,
+            "max_total_dexscreener_transport_errors": 0,
+            "max_total_reconciliation_mismatches": 0,
+            "require_recent_gate_passes": 2,
+        },
+    )
+    assert trend["aggregate"]["provider_failover_count_total"] == 2
+    assert trend["aggregate"]["provider_usage_by_provider"]["candidate_file"] == 2
+    assert trend["recommendation"]["action"] == "continue_tiny_pilots_with_fallback_source"
