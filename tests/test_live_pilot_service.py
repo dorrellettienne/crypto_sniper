@@ -10,11 +10,14 @@ from src.live.live_pilot_service import (
     _build_live_pilot_signal_provider_from_args,
     _build_live_pilot_volatility_guard_from_config,
     _format_human_live_pilot_summary,
+    _extract_campaign_report_summary,
     _validate_live_auto_window_guardrails,
+    probe_fallback_candidates_preflight,
     run_live_pilot_auto_window,
     run_live_pilot_auto_window_candidates,
     run_live_pilot_auto_window_from_signal_provider,
     run_live_pilot_campaign,
+    sanitize_fallback_candidates,
     write_campaign_trend_report,
     run_live_pilot_service_loop,
     run_live_pilot_service_once,
@@ -1645,3 +1648,87 @@ def test_aggregate_live_pilot_campaign_reports_recommends_fallback_source_when_p
     assert trend["aggregate"]["provider_failover_count_total"] == 2
     assert trend["aggregate"]["provider_usage_by_provider"]["candidate_file"] == 2
     assert trend["recommendation"]["action"] == "continue_tiny_pilots_with_fallback_source"
+
+
+def test_sanitize_fallback_candidates_normalizes_and_drops_invalid():
+    out = sanitize_fallback_candidates(
+        [
+            {"token_address": "A", "symbol": "", "entry_price": 0, "usd_size": -1},
+            {"symbol": "NOADDR"},
+            "bad",
+        ]
+    )
+    assert len(out["candidates"]) == 1
+    c = out["candidates"][0]
+    assert c["symbol"] == "A"
+    assert c["entry_price"] == 1.0
+    assert c["usd_size"] == 1.0
+    s = out["summary"]
+    assert s["fallback_candidates_total"] == 3
+    assert s["fallback_candidates_sanitized_count"] == 1
+    assert s["fallback_candidates_dropped_count"] == 2
+
+
+def test_probe_fallback_candidates_preflight_filters_failed_probes_and_can_fail_closed():
+    candidates = [
+        {"token_address": "A", "symbol": "A", "entry_price": 1.0, "usd_size": 1.0},
+        {"token_address": "B", "symbol": "B", "entry_price": 1.0, "usd_size": 1.0},
+        {"token_address": "C", "symbol": "C", "entry_price": 1.0, "usd_size": 1.0},
+    ]
+    seen = []
+
+    def probe_fn(c):
+        seen.append(c["token_address"])
+        return {"ok": c["token_address"] != "B", "reason": "quote_400" if c["token_address"] == "B" else ""}
+
+    out = probe_fallback_candidates_preflight(
+        candidates,
+        probe_count=2,
+        quote_probe_fail_closed=True,
+        quote_probe_min_pass_rate=0.75,
+        probe_fn=probe_fn,
+    )
+    assert seen == ["A", "B"]
+    kept = out["candidates"]
+    assert [c["token_address"] for c in kept] == ["A", "C"]
+    s = out["summary"]
+    assert s["fallback_candidates_probe_ok"] == 1
+    assert s["fallback_candidates_probe_failed"] == 1
+    assert s["fallback_candidates_probe_skipped"] == 1
+    assert s["fallback_candidates_probe_pass_rate"] == 0.5
+    assert s["fallback_candidates_probe_fail_closed_triggered"] is True
+
+
+def test_run_live_pilot_campaign_accepts_initial_alerts_and_extra_summary():
+    out = run_live_pilot_campaign(
+        campaign_runs=1,
+        run_once_fn=lambda: {"audit_log_path": "x", "rollup": {}, "live_pilot_summary": {}, "promotion_gate_summary": {}},
+        campaign_id="camp_extra",
+        stop_evaluator=lambda out: {"stop": False, "reason": ""},
+        initial_alerts=[{"alert_type": "fallback_candidate_probe_failure_rate_high", "level": "warning", "message": "x"}],
+        campaign_extra_summary={"fallback_candidate_probe_summary": {"fallback_candidates_probe_failed": 2, "fallback_candidates_probe_ok": 1}},
+    )
+    assert out["campaign_summary"]["alert_summary"]["count"] >= 1
+    assert out["campaign_summary"]["fallback_candidate_probe_summary"]["fallback_candidates_probe_failed"] == 2
+
+
+def test_extract_campaign_report_summary_includes_fallback_probe_fields():
+    s = _extract_campaign_report_summary(
+        {
+            "campaign_summary": {
+                "campaign_id": "c1",
+                "aggregate_rollup": {},
+                "promotion_gate_summary": {},
+                "alert_summary": {},
+                "discovery_provider_summary": {},
+                "fallback_candidate_probe_summary": {
+                    "fallback_candidates_total": 10,
+                    "fallback_candidates_probe_ok": 3,
+                    "fallback_candidates_probe_failed": 2,
+                },
+            }
+        }
+    )
+    assert s["fallback_candidates_total"] == 10
+    assert s["fallback_candidates_probe_ok"] == 3
+    assert s["fallback_candidates_probe_failed"] == 2

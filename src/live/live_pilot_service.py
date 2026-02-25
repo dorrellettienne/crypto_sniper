@@ -332,6 +332,137 @@ def _summarize_campaign_discovery_providers(run_records: list[dict[str, Any]]) -
     return summary
 
 
+def sanitize_fallback_candidates(candidates: list[Any]) -> dict[str, Any]:
+    if not isinstance(candidates, list):
+        raise ValueError("fallback candidates must be a list")
+    sanitized: list[dict[str, Any]] = []
+    dropped_by_reason: dict[str, int] = {}
+    for row in candidates:
+        if not isinstance(row, dict):
+            dropped_by_reason["invalid_type"] = int(dropped_by_reason.get("invalid_type", 0)) + 1
+            continue
+        token_address = str(row.get("token_address") or "").strip()
+        if not token_address:
+            dropped_by_reason["missing_token_address"] = int(dropped_by_reason.get("missing_token_address", 0)) + 1
+            continue
+        symbol = str(row.get("symbol") or "").strip() or token_address[:6] or "UNK"
+        entry_price = _to_float_or_none(row.get("entry_price"))
+        if entry_price is None or entry_price <= 0:
+            entry_price = 1.0
+        usd_size = _to_float_or_none(row.get("usd_size"))
+        if usd_size is None or usd_size <= 0:
+            usd_size = 1.0
+        sanitized.append(
+            {
+                "token_address": token_address,
+                "symbol": symbol,
+                "entry_price": float(entry_price),
+                "usd_size": float(usd_size),
+                "metadata": dict(row.get("metadata") or {}),
+            }
+        )
+    return {
+        "candidates": sanitized,
+        "summary": {
+            "fallback_candidates_total": len(candidates),
+            "fallback_candidates_sanitized_count": len(sanitized),
+            "fallback_candidates_dropped_count": int(sum(dropped_by_reason.values())),
+            "fallback_candidates_dropped_by_reason": dropped_by_reason,
+        },
+    }
+
+
+def probe_fallback_candidates_preflight(
+    candidates: list[dict[str, Any]],
+    *,
+    probe_count: int,
+    adapter_config: dict[str, Any] | None = None,
+    quote_probe_fail_closed: bool = False,
+    quote_probe_min_pass_rate: float = 0.5,
+    quote_probe_warn_failure_rate: float = 0.5,
+    probe_fn=None,
+) -> dict[str, Any]:
+    candidates = list(candidates or [])
+    probe_count = max(0, int(probe_count))
+    if probe_count <= 0 or not candidates:
+        return {
+            "candidates": candidates,
+            "summary": {
+                "fallback_candidates_total": len(candidates),
+                "fallback_candidates_probe_count": 0,
+                "fallback_candidates_probe_ok": 0,
+                "fallback_candidates_probe_failed": 0,
+                "fallback_candidates_probe_skipped": len(candidates),
+                "fallback_candidates_probe_pass_rate": None,
+                "fallback_candidates_probe_fail_closed_triggered": False,
+                "fallback_candidates_probe_fail_closed_enabled": bool(quote_probe_fail_closed),
+                "fallback_candidates_probe_min_pass_rate": float(quote_probe_min_pass_rate),
+                "fallback_candidates_probe_warn_failure_rate": float(quote_probe_warn_failure_rate),
+                "fallback_candidates_probe_failures": [],
+            },
+        }
+
+    if probe_fn is None:
+        cfg = dict(adapter_config or {})
+        cfg["live_send_network_enabled"] = False
+        cfg.setdefault("audit_log_path", "data/exports/fallback_candidate_probe_preflight.jsonl")
+        adapter = LiveExecutionAdapter(cfg)
+
+        def probe_fn(candidate: dict[str, Any]) -> dict[str, Any]:
+            try:
+                adapter.buy(
+                    str(candidate.get("token_address")),
+                    str(candidate.get("symbol")),
+                    float(candidate.get("entry_price", 1.0) or 1.0),
+                    float(candidate.get("usd_size", 1.0) or 1.0),
+                )
+                return {"ok": True, "reason": ""}
+            except Exception as exc:
+                return {"ok": False, "reason": str(exc)}
+
+    kept: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    probe_ok = 0
+    probe_failed = 0
+    for idx, cand in enumerate(candidates):
+        if idx >= probe_count:
+            kept.append(cand)
+            continue
+        res = probe_fn(cand)
+        if bool((res or {}).get("ok", False)):
+            probe_ok += 1
+            kept.append(cand)
+        else:
+            probe_failed += 1
+            failures.append(
+                {
+                    "candidate_index": idx,
+                    "token_address": str(cand.get("token_address") or ""),
+                    "symbol": str(cand.get("symbol") or ""),
+                    "reason": str((res or {}).get("reason") or "probe_failed"),
+                }
+            )
+    probed = min(len(candidates), probe_count)
+    pass_rate = (float(probe_ok) / float(probed)) if probed > 0 else None
+    fail_closed_triggered = bool(quote_probe_fail_closed and pass_rate is not None and pass_rate < float(quote_probe_min_pass_rate))
+    return {
+        "candidates": kept,
+        "summary": {
+            "fallback_candidates_total": len(candidates),
+            "fallback_candidates_probe_count": probed,
+            "fallback_candidates_probe_ok": probe_ok,
+            "fallback_candidates_probe_failed": probe_failed,
+            "fallback_candidates_probe_skipped": max(0, len(candidates) - probed),
+            "fallback_candidates_probe_pass_rate": (None if pass_rate is None else round(pass_rate, 6)),
+            "fallback_candidates_probe_fail_closed_triggered": fail_closed_triggered,
+            "fallback_candidates_probe_fail_closed_enabled": bool(quote_probe_fail_closed),
+            "fallback_candidates_probe_min_pass_rate": float(quote_probe_min_pass_rate),
+            "fallback_candidates_probe_warn_failure_rate": float(quote_probe_warn_failure_rate),
+            "fallback_candidates_probe_failures": failures,
+        },
+    }
+
+
 def _build_campaign_alert_emitter(
     *,
     campaign_id: str,
@@ -543,6 +674,7 @@ def _render_campaign_report_markdown(report: dict[str, Any]) -> str:
     gate = dict(summary.get("promotion_gate_summary") or {})
     alerts = dict(summary.get("alert_summary") or {})
     discovery = dict(summary.get("discovery_provider_summary") or {})
+    fallback_probe = dict(summary.get("fallback_candidate_probe_summary") or {})
     lines = [
         "# Live Pilot Campaign Report",
         "",
@@ -587,6 +719,20 @@ def _render_campaign_report_markdown(report: dict[str, Any]) -> str:
                 f"- provider_usage_by_provider: `{json.dumps(discovery.get('provider_usage_by_provider', {}), sort_keys=True)}`",
             ]
         )
+    if fallback_probe:
+        lines.extend(
+            [
+                "",
+                "## Fallback Candidate Probe",
+                "",
+                f"- fallback_candidates_total: `{fallback_probe.get('fallback_candidates_total', 0)}`",
+                f"- fallback_candidates_sanitized_count: `{fallback_probe.get('fallback_candidates_sanitized_count', 0)}`",
+                f"- fallback_candidates_probe_ok: `{fallback_probe.get('fallback_candidates_probe_ok', 0)}`",
+                f"- fallback_candidates_probe_failed: `{fallback_probe.get('fallback_candidates_probe_failed', 0)}`",
+                f"- fallback_candidates_probe_pass_rate: `{fallback_probe.get('fallback_candidates_probe_pass_rate')}`",
+                f"- fallback_candidates_probe_fail_closed_triggered: `{bool(fallback_probe.get('fallback_candidates_probe_fail_closed_triggered', False))}`",
+            ]
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -596,6 +742,7 @@ def _extract_campaign_report_summary(report: dict[str, Any]) -> dict[str, Any]:
     gate = dict(summary.get("promotion_gate_summary") or {})
     alerts = dict(summary.get("alert_summary") or {})
     discovery = dict(summary.get("discovery_provider_summary") or {})
+    fallback_probe = dict(summary.get("fallback_candidate_probe_summary") or {})
     return {
         "campaign_id": str(summary.get("campaign_id") or ""),
         "completed_runs": int(summary.get("completed_runs", 0) or 0),
@@ -617,6 +764,9 @@ def _extract_campaign_report_summary(report: dict[str, Any]) -> dict[str, Any]:
         "provider_failover_count": int(discovery.get("provider_failover_count", 0) or 0),
         "provider_usage_by_provider": dict(discovery.get("provider_usage_by_provider", {}) or {}),
         "discovery_per_provider_metrics": dict(discovery.get("per_provider_metrics", {}) or {}),
+        "fallback_candidates_total": int(fallback_probe.get("fallback_candidates_total", 0) or 0),
+        "fallback_candidates_probe_ok": int(fallback_probe.get("fallback_candidates_probe_ok", 0) or 0),
+        "fallback_candidates_probe_failed": int(fallback_probe.get("fallback_candidates_probe_failed", 0) or 0),
     }
 
 
@@ -647,6 +797,9 @@ def aggregate_live_pilot_campaign_reports(
         "promotion_gate_pass_count": sum(1 for s in summaries if s["promotion_gate_status"] == "pass"),
         "promotion_gate_fail_count": sum(1 for s in summaries if s["promotion_gate_status"] == "fail"),
         "provider_failover_count_total": sum(int(s.get("provider_failover_count", 0) or 0) for s in summaries),
+        "fallback_candidates_total": sum(int(s.get("fallback_candidates_total", 0) or 0) for s in summaries),
+        "fallback_candidates_probe_ok_total": sum(int(s.get("fallback_candidates_probe_ok", 0) or 0) for s in summaries),
+        "fallback_candidates_probe_failed_total": sum(int(s.get("fallback_candidates_probe_failed", 0) or 0) for s in summaries),
         "stop_reason_by_reason": {},
         "alert_level_by_level": {},
         "provider_usage_by_provider": {},
@@ -677,6 +830,7 @@ def aggregate_live_pilot_campaign_reports(
         "provider_transport_errors_sequence": [int(s["dexscreener_transport_errors"]) for s in summaries],
         "provider_failover_count_sequence": [int(s.get("provider_failover_count", 0) or 0) for s in summaries],
         "provider_usage_sequence": [dict(s.get("provider_usage_by_provider", {}) or {}) for s in summaries],
+        "fallback_probe_failed_sequence": [int(s.get("fallback_candidates_probe_failed", 0) or 0) for s in summaries],
         "stop_reason_sequence": [s["stop_reason"] for s in summaries],
     }
     if count >= 2:
@@ -733,6 +887,8 @@ def _recommend_live_pilot_promotion_from_campaign_trends(summary: dict[str, Any]
 
     fallback_usage_total = int((aggregate.get("provider_usage_by_provider") or {}).get("candidate_file", 0) or 0)
     provider_failovers_total = int(aggregate.get("provider_failover_count_total", 0) or 0)
+    fallback_probe_ok_total = int(aggregate.get("fallback_candidates_probe_ok_total", 0) or 0)
+    fallback_probe_failed_total = int(aggregate.get("fallback_candidates_probe_failed_total", 0) or 0)
 
     if not reasons:
         action = "increase_cap_small_step"
@@ -746,6 +902,7 @@ def _recommend_live_pilot_promotion_from_campaign_trends(summary: dict[str, Any]
         and "reconciliation_mismatch_total_exceeded" not in reasons
         and fallback_usage_total > 0
         and provider_failovers_total > 0
+        and fallback_probe_ok_total >= fallback_probe_failed_total
     ):
         action = "continue_tiny_pilots_with_fallback_source"
         confidence = "medium"
@@ -770,6 +927,7 @@ def _render_campaign_trend_report_markdown(report: dict[str, Any]) -> str:
         f"- live_reconciliation_mismatch_count_total: `{agg.get('live_reconciliation_mismatch_count_total', 0)}`",
         f"- dexscreener_transport_errors_total: `{agg.get('dexscreener_transport_errors_total', 0)}`",
         f"- provider_failover_count_total: `{agg.get('provider_failover_count_total', 0)}`",
+        f"- fallback_candidates_probe_failed_total: `{agg.get('fallback_candidates_probe_failed_total', 0)}`",
         f"- worst_realized_slippage_bps_across_campaigns: `{agg.get('worst_realized_slippage_bps_across_campaigns')}`",
         "",
         "## Recommendation",
@@ -784,6 +942,7 @@ def _render_campaign_trend_report_markdown(report: dict[str, Any]) -> str:
         f"- finalized_count_sequence: `{json.dumps(trends.get('finalized_count_sequence', []))}`",
         f"- provider_transport_errors_sequence: `{json.dumps(trends.get('provider_transport_errors_sequence', []))}`",
         f"- provider_failover_count_sequence: `{json.dumps(trends.get('provider_failover_count_sequence', []))}`",
+        f"- fallback_probe_failed_sequence: `{json.dumps(trends.get('fallback_probe_failed_sequence', []))}`",
         f"- stop_reason_sequence: `{json.dumps(trends.get('stop_reason_sequence', []))}`",
         f"- provider_usage_by_provider_total: `{json.dumps(agg.get('provider_usage_by_provider', {}), sort_keys=True)}`",
     ]
@@ -820,6 +979,8 @@ def run_live_pilot_campaign(
     alert_policy: dict[str, Any] | None = None,
     alert_on_promotion_gate_fail: bool = False,
     alert_on_campaign_stop: bool = False,
+    initial_alerts: list[dict[str, Any]] | None = None,
+    campaign_extra_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     campaign_runs = int(campaign_runs)
     if campaign_runs <= 0:
@@ -827,7 +988,7 @@ def run_live_pilot_campaign(
     stop_evaluator = stop_evaluator or _default_campaign_stop_evaluator
     campaign_id = str(campaign_id or f"pilot_campaign_{int(time.time())}")
     alert_policy = dict(alert_policy or {})
-    alerts_emitted: list[dict[str, Any]] = []
+    alerts_emitted: list[dict[str, Any]] = [dict(x) for x in list(initial_alerts or []) if isinstance(x, dict)]
 
     state_path = Path(campaign_state_json_path) if str(campaign_state_json_path or "").strip() else None
     state: dict[str, Any] = {"campaign_id": campaign_id, "target_runs": campaign_runs, "runs": [], "stop_reason": ""}
@@ -946,6 +1107,8 @@ def run_live_pilot_campaign(
         "alert_summary": _summarize_campaign_alerts(alerts_emitted),
         "discovery_provider_summary": _summarize_campaign_discovery_providers(completed_runs),
     }
+    if isinstance(campaign_extra_summary, dict):
+        campaign_summary.update(dict(campaign_extra_summary))
     if bool(alert_on_promotion_gate_fail) and new_runs_executed > 0 and str(campaign_gate.get("status") or "") == "fail":
         row = {
             "alert_type": "promotion_gate_failed",
@@ -2261,6 +2424,10 @@ def _main() -> int:
     p.add_argument("--discovery-provider-order", default="")
     p.add_argument("--fallback-candidate-list-json-path", default="")
     p.add_argument("--provider-failover-on-transport-error", action="store_true")
+    p.add_argument("--fallback-candidate-probe-count", type=int, default=0)
+    p.add_argument("--fallback-candidate-probe-fail-closed", action="store_true")
+    p.add_argument("--fallback-candidate-probe-min-pass-rate", type=float, default=0.5)
+    p.add_argument("--fallback-candidate-probe-warn-failure-rate", type=float, default=0.5)
     p.add_argument("--candidate-list-json", default="")
     p.add_argument("--candidate-list-json-path", default="")
     p.add_argument("--signal-provider-json-path", default="")
@@ -2338,6 +2505,52 @@ def _main() -> int:
     fallback_candidate_list = None
     if args.fallback_candidate_list_json_path:
         fallback_candidate_list = json.loads(Path(args.fallback_candidate_list_json_path).read_text(encoding="utf-8"))
+    fallback_candidate_preflight_summary: dict[str, Any] = {}
+    campaign_initial_alerts: list[dict[str, Any]] = []
+    if isinstance(fallback_candidate_list, list):
+        sanitized = sanitize_fallback_candidates(fallback_candidate_list)
+        fallback_candidate_list = list(sanitized.get("candidates") or [])
+        fallback_candidate_preflight_summary.update(dict(sanitized.get("summary") or {}))
+        probe_count = int(args.fallback_candidate_probe_count or 0)
+        if probe_count > 0:
+            probed = probe_fallback_candidates_preflight(
+                fallback_candidate_list,
+                probe_count=probe_count,
+                adapter_config=adapter_config,
+                quote_probe_fail_closed=bool(args.fallback_candidate_probe_fail_closed),
+                quote_probe_min_pass_rate=float(args.fallback_candidate_probe_min_pass_rate or 0.5),
+                quote_probe_warn_failure_rate=float(args.fallback_candidate_probe_warn_failure_rate or 0.5),
+            )
+            fallback_candidate_list = list(probed.get("candidates") or [])
+            fallback_candidate_preflight_summary.update(dict(probed.get("summary") or {}))
+            pass_rate = _to_float_or_none(fallback_candidate_preflight_summary.get("fallback_candidates_probe_pass_rate"))
+            if pass_rate is not None:
+                fail_rate = max(0.0, 1.0 - float(pass_rate))
+                if fail_rate >= float(args.fallback_candidate_probe_warn_failure_rate or 0.5):
+                    campaign_initial_alerts.append(
+                        {
+                            "alert_type": "fallback_candidate_probe_failure_rate_high",
+                            "level": "warning",
+                            "message": f"Fallback candidate probe failure rate is high ({round(fail_rate, 4)}).",
+                            "details": {
+                                "probe_pass_rate": pass_rate,
+                                "probe_failed": fallback_candidate_preflight_summary.get("fallback_candidates_probe_failed"),
+                                "probe_count": fallback_candidate_preflight_summary.get("fallback_candidates_probe_count"),
+                            },
+                        }
+                    )
+            if bool(fallback_candidate_preflight_summary.get("fallback_candidates_probe_fail_closed_triggered", False)):
+                campaign_initial_alerts.append(
+                    {
+                        "alert_type": "fallback_candidate_probe_fail_closed_abort",
+                        "level": "critical",
+                        "message": "Fallback candidate probe fail-closed threshold triggered.",
+                        "details": {
+                            "probe_pass_rate": fallback_candidate_preflight_summary.get("fallback_candidates_probe_pass_rate"),
+                            "min_pass_rate": fallback_candidate_preflight_summary.get("fallback_candidates_probe_min_pass_rate"),
+                        },
+                    }
+                )
     def _execute_single_run():
         signal_provider = _build_live_pilot_signal_provider_from_args(args)
         if float(args.auto_pilot_window_seconds or 0.0) > 0:
@@ -2496,6 +2709,41 @@ def _main() -> int:
                 console=bool(args.alert_console),
                 webhook_url=str(args.alert_webhook_url or ""),
             )
+        if bool(fallback_candidate_preflight_summary.get("fallback_candidates_probe_fail_closed_triggered", False)):
+            for row in campaign_initial_alerts:
+                if campaign_alert_emitter is not None:
+                    campaign_alert_emitter(row)
+            fail_closed_out = {
+                "campaign_summary": {
+                    "campaign_id": resolved_campaign_id,
+                    "target_runs": int(args.campaign_runs),
+                    "completed_runs": 0,
+                    "stop_reason": "fallback_candidate_probe_fail_closed_abort",
+                    "aggregate_rollup": {},
+                    "promotion_gate_summary": _evaluate_live_pilot_promotion_gates({}, ((adapter_config or {}).get("live_pilot_promotion_gates") if isinstance(adapter_config, dict) else None)),
+                    "alert_summary": _summarize_campaign_alerts(campaign_initial_alerts),
+                    "discovery_provider_summary": _summarize_campaign_discovery_providers([]),
+                    "fallback_candidate_probe_summary": dict(fallback_candidate_preflight_summary),
+                },
+                "runs": [],
+                "alerts": list(campaign_initial_alerts),
+                "resume_used": bool(args.resume_campaign),
+                "state_path": str(args.campaign_state_json_path or ""),
+            }
+            if str(args.campaign_report_path or "").strip():
+                _write_campaign_report(fail_closed_out, str(args.campaign_report_path))
+                fail_closed_out["report_path"] = str(args.campaign_report_path)
+            print(
+                json.dumps(
+                    {
+                        "campaign_summary": fail_closed_out["campaign_summary"],
+                        "report_path": fail_closed_out.get("report_path", ""),
+                        "state_path": fail_closed_out.get("state_path", ""),
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 2
         campaign = run_live_pilot_campaign(
             campaign_runs=int(args.campaign_runs),
             run_once_fn=_run_campaign_with_provider_failover,
@@ -2509,6 +2757,12 @@ def _main() -> int:
             alert_policy=((adapter_config or {}).get("live_pilot_campaign_alerts") if isinstance(adapter_config, dict) else None),
             alert_on_promotion_gate_fail=bool(args.alert_on_promotion_gate_fail),
             alert_on_campaign_stop=bool(args.alert_on_campaign_stop),
+            initial_alerts=campaign_initial_alerts,
+            campaign_extra_summary=(
+                {"fallback_candidate_probe_summary": dict(fallback_candidate_preflight_summary)}
+                if fallback_candidate_preflight_summary
+                else None
+            ),
         )
         cli_out = {
             "campaign_summary": campaign.get("campaign_summary"),
