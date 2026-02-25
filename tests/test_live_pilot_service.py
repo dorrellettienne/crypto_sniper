@@ -21,9 +21,12 @@ from src.live.live_pilot_service import (
     run_live_pilot_auto_window_candidates,
     run_live_pilot_auto_window_from_signal_provider,
     run_live_pilot_campaign,
+    run_live_pilot_campaign_schedule,
     sanitize_fallback_candidates,
     save_adaptive_reliability_state,
     update_adaptive_reliability_state_from_campaign_report,
+    build_live_pilot_daily_operator_report,
+    write_live_pilot_daily_operator_report,
     write_campaign_trend_report,
     run_live_pilot_service_loop,
     run_live_pilot_service_once,
@@ -1883,3 +1886,135 @@ def test_promotion_gate_can_fail_on_adaptive_quarantine_metrics():
     assert gate["status"] == "fail"
     assert "max_adaptive_candidate_quarantined_count" in gate["failed_checks"]
     assert "max_adaptive_fallback_quality_degraded_events" in gate["failed_checks"]
+
+
+def test_run_live_pilot_campaign_schedule_timebox_and_resume(tmp_path):
+    calls = []
+    fake_now = {"t": 1000.0}
+
+    def _now():
+        return fake_now["t"]
+
+    def _sleep(seconds):
+        fake_now["t"] += float(seconds)
+
+    def _run_campaign(session_index):
+        calls.append(session_index)
+        fake_now["t"] += 5.0
+        return {
+            "campaign_summary": {
+                "campaign_id": f"c{session_index}",
+                "completed_runs": 1,
+                "stop_reason": "",
+                "aggregate_rollup": {
+                    "live_finalized_count": 0,
+                    "live_reconciliation_mismatch_count": 0,
+                    "economics_samples_count": 0,
+                    "signal_provider_metrics": {"fetch_transport_errors": 0, "fetch_endpoint_failure_events": 0},
+                },
+                "promotion_gate_summary": {"status": "fail", "ready_to_promote": False, "failed_checks": ["min_finalized_pilots"]},
+                "alert_summary": {},
+                "discovery_provider_summary": {},
+            },
+            "report_path": "",
+            "state_path": "",
+        }
+
+    schedule_state = tmp_path / "sched_state.json"
+    out = run_live_pilot_campaign_schedule(
+        target_sessions=3,
+        run_campaign_fn=_run_campaign,
+        schedule_id="sched1",
+        session_interval_seconds=10.0,
+        schedule_max_duration_seconds=15.0,
+        schedule_state_json_path=str(schedule_state),
+        now_fn=_now,
+        sleep_fn=_sleep,
+    )
+    assert out["schedule_summary"]["completed_sessions"] == 1
+    assert out["schedule_summary"]["stop_reason"] == "schedule_timebox_elapsed"
+    assert calls == [0]
+
+    fake_now["t"] = 2000.0
+    out2 = run_live_pilot_campaign_schedule(
+        target_sessions=3,
+        run_campaign_fn=_run_campaign,
+        schedule_id="sched1",
+        schedule_state_json_path=str(schedule_state),
+        resume_schedule=True,
+        now_fn=_now,
+        sleep_fn=_sleep,
+    )
+    assert out2["schedule_summary"]["completed_sessions"] == 3
+    assert calls == [0, 1, 2]
+
+
+def test_build_live_pilot_daily_operator_report_and_write_markdown(tmp_path):
+    reports = [
+        {
+            "campaign_summary": {
+                "campaign_id": "a",
+                "completed_runs": 1,
+                "stop_reason": "",
+                "aggregate_rollup": {
+                    "live_finalized_count": 1,
+                    "live_reconciliation_mismatch_count": 0,
+                    "economics_samples_count": 1,
+                    "worst_realized_slippage_bps": 5.0,
+                    "signal_provider_metrics": {"fetch_transport_errors": 0, "fetch_endpoint_failure_events": 0},
+                },
+                "promotion_gate_summary": {"status": "pass", "ready_to_promote": True, "failed_checks": []},
+                "alert_summary": {"by_level": {}},
+                "discovery_provider_summary": {"provider_usage_by_provider": {"candidate_file": 1}, "provider_failover_count": 0},
+                "fallback_candidate_probe_summary": {"fallback_candidates_probe_ok": 1, "fallback_candidates_probe_failed": 0},
+            }
+        },
+        {
+            "campaign_summary": {
+                "campaign_id": "b",
+                "completed_runs": 1,
+                "stop_reason": "",
+                "aggregate_rollup": {
+                    "live_finalized_count": 2,
+                    "live_reconciliation_mismatch_count": 0,
+                    "economics_samples_count": 1,
+                    "worst_realized_slippage_bps": 6.0,
+                    "signal_provider_metrics": {"fetch_transport_errors": 0, "fetch_endpoint_failure_events": 0},
+                },
+                "promotion_gate_summary": {"status": "pass", "ready_to_promote": True, "failed_checks": []},
+                "alert_summary": {"by_level": {}},
+                "discovery_provider_summary": {"provider_usage_by_provider": {"candidate_file": 1}, "provider_failover_count": 0},
+                "fallback_candidate_probe_summary": {"fallback_candidates_probe_ok": 1, "fallback_candidates_probe_failed": 0},
+            }
+        },
+        {
+            "campaign_summary": {
+                "campaign_id": "c",
+                "completed_runs": 1,
+                "stop_reason": "",
+                "aggregate_rollup": {
+                    "live_finalized_count": 3,
+                    "live_reconciliation_mismatch_count": 0,
+                    "economics_samples_count": 1,
+                    "worst_realized_slippage_bps": 7.0,
+                    "signal_provider_metrics": {"fetch_transport_errors": 0, "fetch_endpoint_failure_events": 0},
+                },
+                "promotion_gate_summary": {"status": "pass", "ready_to_promote": True, "failed_checks": []},
+                "alert_summary": {"by_level": {}},
+                "discovery_provider_summary": {"provider_usage_by_provider": {"candidate_file": 1}, "provider_failover_count": 0},
+                "fallback_candidate_probe_summary": {"fallback_candidates_probe_ok": 1, "fallback_candidates_probe_failed": 0},
+            }
+        },
+    ]
+    out = build_live_pilot_daily_operator_report(reports, date_label="2026-02-25")
+    assert out["operator_decision_summary"]["recommended_action"] in {"increase_cap_small_step", "continue_tiny_pilots", "hold"}
+    assert out["operator_decision_summary"]["decision_status"] in {
+        "eligible_for_operator_promotion_review",
+        "continue_supervised_validation",
+        "manual_review_required",
+    }
+    path = tmp_path / "daily_report.md"
+    write_live_pilot_daily_operator_report(out, str(path))
+    txt = path.read_text(encoding="utf-8")
+    assert "Live Pilot Daily Operator Report" in txt
+    assert "Operator Checklist" in txt

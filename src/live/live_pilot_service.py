@@ -1310,6 +1310,238 @@ def write_campaign_trend_report(report: dict[str, Any], path_str: str) -> None:
         path.write_text(json.dumps(report, sort_keys=True, indent=2), encoding="utf-8")
 
 
+def build_live_pilot_daily_operator_report(
+    campaign_reports: list[dict[str, Any]],
+    *,
+    date_label: str = "",
+    recommendation_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    reports = [dict(r) for r in list(campaign_reports or []) if isinstance(r, dict)]
+    trend = aggregate_live_pilot_campaign_reports(reports, recommendation_config=recommendation_config)
+    latest_campaign_summary = dict((((reports[-1] if reports else {}) or {}).get("campaign_summary") or {}))
+    latest_gate = dict(latest_campaign_summary.get("promotion_gate_summary") or {})
+    rec = dict(trend.get("recommendation") or {})
+    reasons = [str(x) for x in list(rec.get("reasons") or []) if str(x)]
+    checklist = [
+        {"item": "Review latest campaign alerts and stop reason", "done": False},
+        {"item": "Review reconciliation mismatches and pause latch events", "done": False},
+        {"item": "Review provider reliability and fallback probe quality", "done": False},
+        {"item": "Review economics/slippage summary for finalized pilots", "done": False},
+        {"item": "Approve next cap/frequency step or keep tiny supervised mode", "done": False},
+    ]
+    recommended_action = str(rec.get("action") or "hold")
+    promotion_ready_today = bool(recommended_action == "increase_cap_small_step" and latest_gate.get("status") == "pass")
+    decision_status = "manual_review_required"
+    if promotion_ready_today:
+        decision_status = "eligible_for_operator_promotion_review"
+    elif recommended_action in {"hold", "continue_tiny_pilots", "continue_tiny_pilots_with_fallback_source"}:
+        decision_status = "continue_supervised_validation"
+    operator_decision_summary = {
+        "recommended_action": recommended_action,
+        "recommendation_confidence": str(rec.get("confidence") or "low"),
+        "promotion_ready_today": promotion_ready_today,
+        "decision_status": decision_status,
+        "blocking_reasons": reasons,
+        "latest_campaign_gate_status": str(latest_gate.get("status") or ""),
+    }
+    return {
+        "date_label": str(date_label or ""),
+        "campaign_count": len(reports),
+        "latest_campaign_summary": latest_campaign_summary,
+        "trend_report": trend,
+        "operator_decision_summary": operator_decision_summary,
+        "operator_checklist": checklist,
+    }
+
+
+def _render_live_pilot_daily_operator_report_markdown(report: dict[str, Any]) -> str:
+    trend = dict(report.get("trend_report") or {})
+    agg = dict(trend.get("aggregate") or {})
+    rec = dict(trend.get("recommendation") or {})
+    op = dict(report.get("operator_decision_summary") or {})
+    latest = dict(report.get("latest_campaign_summary") or {})
+    latest_gate = dict(latest.get("promotion_gate_summary") or {})
+    checklist = [dict(x) for x in list(report.get("operator_checklist") or []) if isinstance(x, dict)]
+    lines = [
+        "# Live Pilot Daily Operator Report",
+        "",
+        f"- date_label: `{report.get('date_label', '')}`",
+        f"- campaign_count: `{report.get('campaign_count', 0)}`",
+        f"- recommended_action: `{op.get('recommended_action', '')}`",
+        f"- decision_status: `{op.get('decision_status', '')}`",
+        f"- promotion_ready_today: `{bool(op.get('promotion_ready_today', False))}`",
+        f"- recommendation_confidence: `{op.get('recommendation_confidence', '')}`",
+        "",
+        "## Latest Campaign",
+        "",
+        f"- campaign_id: `{latest.get('campaign_id', '')}`",
+        f"- completed_runs: `{latest.get('completed_runs', 0)}`",
+        f"- stop_reason: `{latest.get('stop_reason', '') or '-'}`",
+        f"- promotion_gate_status: `{latest_gate.get('status', '')}`",
+        "",
+        "## Trend Summary",
+        "",
+        f"- live_finalized_count_total: `{agg.get('live_finalized_count_total', 0)}`",
+        f"- live_reconciliation_mismatch_count_total: `{agg.get('live_reconciliation_mismatch_count_total', 0)}`",
+        f"- dexscreener_transport_errors_total: `{agg.get('dexscreener_transport_errors_total', 0)}`",
+        f"- provider_failover_count_total: `{agg.get('provider_failover_count_total', 0)}`",
+        f"- adaptive_candidate_quarantined_count_total: `{agg.get('adaptive_candidate_quarantined_count_total', 0)}`",
+        "",
+        "## Recommendation",
+        "",
+        f"- action: `{rec.get('action', '')}`",
+        f"- confidence: `{rec.get('confidence', '')}`",
+        f"- reasons: `{', '.join(list(rec.get('reasons', []) or [])) or '-'}`",
+        "",
+        "## Operator Checklist",
+        "",
+    ]
+    for row in checklist:
+        lines.append(f"- [{'x' if bool(row.get('done', False)) else ' '}] {row.get('item', '')}")
+    return "\n".join(lines) + "\n"
+
+
+def write_live_pilot_daily_operator_report(report: dict[str, Any], path_str: str) -> None:
+    path = Path(path_str)
+    if path.suffix.lower() in {".md", ".markdown"}:
+        path.write_text(_render_live_pilot_daily_operator_report_markdown(report), encoding="utf-8")
+    else:
+        path.write_text(json.dumps(report, sort_keys=True, indent=2), encoding="utf-8")
+
+
+def _path_with_inserted_suffix(path_str: str, suffix: str) -> str:
+    if not str(path_str or "").strip():
+        return ""
+    p = Path(path_str)
+    if p.suffix:
+        return str(p.with_name(f"{p.stem}{suffix}{p.suffix}"))
+    return str(p.with_name(f"{p.name}{suffix}"))
+
+
+def _write_campaign_schedule_report(report: dict[str, Any], path_str: str) -> None:
+    path = Path(path_str)
+    if path.suffix.lower() in {".md", ".markdown"}:
+        summary = dict(report.get("schedule_summary") or {})
+        daily = dict(report.get("daily_operator_report") or {})
+        op = dict(daily.get("operator_decision_summary") or {})
+        lines = [
+            "# Live Pilot Campaign Schedule Report",
+            "",
+            f"- schedule_id: `{summary.get('schedule_id', '')}`",
+            f"- target_sessions: `{summary.get('target_sessions', 0)}`",
+            f"- completed_sessions: `{summary.get('completed_sessions', 0)}`",
+            f"- stop_reason: `{summary.get('stop_reason', '') or '-'}`",
+            f"- timebox_elapsed: `{bool(summary.get('timebox_elapsed', False))}`",
+            "",
+            "## Daily Operator Decision",
+            "",
+            f"- recommended_action: `{op.get('recommended_action', '')}`",
+            f"- decision_status: `{op.get('decision_status', '')}`",
+            f"- promotion_ready_today: `{bool(op.get('promotion_ready_today', False))}`",
+        ]
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    else:
+        path.write_text(json.dumps(report, sort_keys=True, indent=2), encoding="utf-8")
+
+
+def run_live_pilot_campaign_schedule(
+    *,
+    target_sessions: int,
+    run_campaign_fn,
+    schedule_id: str | None = None,
+    session_interval_seconds: float = 0.0,
+    schedule_max_duration_seconds: float = 0.0,
+    schedule_state_json_path: str = "",
+    schedule_report_path: str = "",
+    resume_schedule: bool = False,
+    stop_on_campaign_stop_reason: bool = False,
+    daily_operator_report_path: str = "",
+    daily_operator_date_label: str = "",
+    recommendation_config: dict[str, Any] | None = None,
+    now_fn=time.time,
+    sleep_fn=time.sleep,
+) -> dict[str, Any]:
+    target_sessions = int(target_sessions)
+    if target_sessions <= 0:
+        raise ValueError("target_sessions must be > 0")
+    schedule_id = str(schedule_id or f"pilot_schedule_{int(now_fn())}")
+    state_path = Path(schedule_state_json_path) if str(schedule_state_json_path or "").strip() else None
+    state: dict[str, Any] = {"schedule_id": schedule_id, "target_sessions": target_sessions, "sessions": [], "stop_reason": ""}
+    if state_path and state_path.exists():
+        if not bool(resume_schedule):
+            raise ValueError("schedule state file already exists; pass --resume-schedule to continue")
+        loaded = json.loads(state_path.read_text(encoding="utf-8"))
+        if not isinstance(loaded, dict):
+            raise ValueError("invalid schedule state file")
+        loaded_id = str(loaded.get("schedule_id") or "")
+        if loaded_id and loaded_id != schedule_id:
+            raise ValueError("schedule_id does not match existing schedule state")
+        state = loaded
+        state["schedule_id"] = loaded_id or schedule_id
+        state["target_sessions"] = target_sessions
+        state["sessions"] = list(state.get("sessions") or [])
+    started_unix = float(now_fn())
+    completed_sessions = list(state.get("sessions") or [])
+    stop_reason = str(state.get("stop_reason") or "")
+    for session_index in range(len(completed_sessions), target_sessions):
+        if stop_reason:
+            break
+        if float(schedule_max_duration_seconds or 0.0) > 0 and (float(now_fn()) - started_unix) >= float(schedule_max_duration_seconds):
+            stop_reason = "schedule_timebox_elapsed"
+            break
+        campaign = run_campaign_fn(session_index)
+        campaign = dict(campaign or {})
+        csum = dict(campaign.get("campaign_summary") or {})
+        completed_sessions.append(
+            {
+                "session_index": session_index,
+                "campaign_id": str(csum.get("campaign_id") or ""),
+                "campaign_summary": csum,
+                "report_path": str(campaign.get("report_path") or ""),
+                "state_path": str(campaign.get("state_path") or ""),
+            }
+        )
+        c_stop = str(csum.get("stop_reason") or "")
+        if bool(stop_on_campaign_stop_reason) and c_stop:
+            stop_reason = f"campaign_stop:{c_stop}"
+        state = {
+            "schedule_id": schedule_id,
+            "target_sessions": target_sessions,
+            "sessions": completed_sessions,
+            "stop_reason": stop_reason,
+        }
+        if state_path:
+            state_path.write_text(json.dumps(state, sort_keys=True, indent=2), encoding="utf-8")
+        if session_index + 1 < target_sessions and not stop_reason and float(session_interval_seconds or 0.0) > 0:
+            sleep_fn(float(session_interval_seconds))
+    campaign_reports = [{"campaign_summary": dict(s.get("campaign_summary") or {})} for s in completed_sessions]
+    daily_report = build_live_pilot_daily_operator_report(
+        campaign_reports,
+        date_label=str(daily_operator_date_label or ""),
+        recommendation_config=recommendation_config,
+    )
+    if str(daily_operator_report_path or "").strip():
+        write_live_pilot_daily_operator_report(daily_report, str(daily_operator_report_path))
+    schedule_summary = {
+        "schedule_id": schedule_id,
+        "target_sessions": target_sessions,
+        "completed_sessions": len(completed_sessions),
+        "stop_reason": stop_reason or ("" if len(completed_sessions) >= target_sessions else "interrupted"),
+        "timebox_elapsed": str(stop_reason) == "schedule_timebox_elapsed",
+    }
+    report = {
+        "schedule_summary": schedule_summary,
+        "sessions": completed_sessions,
+        "resume_used": bool(resume_schedule),
+        "state_path": str(state_path) if state_path else "",
+        "daily_operator_report": daily_report,
+    }
+    if str(schedule_report_path or "").strip():
+        _write_campaign_schedule_report(report, str(schedule_report_path))
+        report["report_path"] = str(schedule_report_path)
+    return report
+
+
 def _write_campaign_report(report: dict[str, Any], report_path: str) -> None:
     path = Path(report_path)
     if path.suffix.lower() in {".md", ".markdown"}:
@@ -1800,6 +2032,20 @@ def _apply_live_pilot_mode_preset(args) -> None:
         setattr(args, "auto_pilot_stop_on_reconciliation_inconclusive", True)
         return
     if mode == "pilot_campaign_tiny_supervised":
+        _set_default("campaign_runs", 3)
+        _set_default("auto_pilot_window_seconds", 30.0)
+        _set_default("auto_pilot_max_trades", 1)
+        _set_default("signal_require_fresh_seconds", 3600.0)
+        _set_default("signal_max_candidates_per_window", 5)
+        _set_default("dexscreener_chain_id", "solana")
+        _set_default("dexscreener_min_liquidity_usd", 5000.0)
+        _set_default("dexscreener_max_pair_age_seconds", 600.0)
+        setattr(args, "use_dexscreener_signals", True)
+        setattr(args, "auto_pilot_stop_on_reconciliation_mismatch", True)
+        setattr(args, "auto_pilot_stop_on_reconciliation_inconclusive", True)
+        return
+    if mode == "pilot_campaign_schedule_tiny_supervised":
+        _set_default("schedule_sessions", 3)
         _set_default("campaign_runs", 3)
         _set_default("auto_pilot_window_seconds", 30.0)
         _set_default("auto_pilot_max_trades", 1)
@@ -2775,6 +3021,16 @@ def _main() -> int:
     p.add_argument("--alert-on-campaign-stop", action="store_true")
     p.add_argument("--campaign-report-glob", default="")
     p.add_argument("--campaign-trend-report-path", default="")
+    p.add_argument("--daily-operator-report-path", default="")
+    p.add_argument("--daily-operator-date-label", default="")
+    p.add_argument("--schedule-sessions", type=int, default=0)
+    p.add_argument("--schedule-id", default="")
+    p.add_argument("--schedule-session-interval-seconds", type=float, default=0.0)
+    p.add_argument("--schedule-max-duration-seconds", type=float, default=0.0)
+    p.add_argument("--schedule-state-json-path", default="")
+    p.add_argument("--schedule-report-path", default="")
+    p.add_argument("--resume-schedule", action="store_true")
+    p.add_argument("--schedule-stop-on-campaign-stop", action="store_true")
     p.add_argument("--discovery-provider-order", default="")
     p.add_argument("--fallback-candidate-list-json-path", default="")
     p.add_argument("--provider-failover-on-transport-error", action="store_true")
@@ -2824,6 +3080,12 @@ def _main() -> int:
             ensure_dir_within_base(str(Path(args.alerts_jsonl_path).parent))
         if args.campaign_trend_report_path:
             ensure_dir_within_base(str(Path(args.campaign_trend_report_path).parent))
+        if args.daily_operator_report_path:
+            ensure_dir_within_base(str(Path(args.daily_operator_report_path).parent))
+        if args.schedule_state_json_path:
+            ensure_dir_within_base(str(Path(args.schedule_state_json_path).parent))
+        if args.schedule_report_path:
+            ensure_dir_within_base(str(Path(args.schedule_report_path).parent))
         if args.adaptive_reliability_state_json_path:
             ensure_dir_within_base(str(Path(args.adaptive_reliability_state_json_path).parent))
 
@@ -2851,6 +3113,13 @@ def _main() -> int:
         trend_report["report_paths"] = [str(p) for p in report_paths]
         if str(args.campaign_trend_report_path or "").strip():
             write_campaign_trend_report(trend_report, str(args.campaign_trend_report_path))
+        if str(args.daily_operator_report_path or "").strip():
+            daily_report = build_live_pilot_daily_operator_report(
+                reports,
+                date_label=str(args.daily_operator_date_label or ""),
+                recommendation_config=((adapter_config or {}).get("live_pilot_multi_campaign_recommendation") if isinstance(adapter_config, dict) else None),
+            )
+            write_live_pilot_daily_operator_report(daily_report, str(args.daily_operator_report_path))
         print(json.dumps(trend_report, sort_keys=True))
         return 0
     preflight = _build_live_pilot_preflight(args, adapter_config=adapter_config)
@@ -3150,35 +3419,83 @@ def _main() -> int:
                 )
             )
             return 2
-        campaign = run_live_pilot_campaign(
-            campaign_runs=int(args.campaign_runs),
-            run_once_fn=_run_campaign_with_provider_failover,
-            campaign_id=resolved_campaign_id,
-            campaign_state_json_path=str(args.campaign_state_json_path or ""),
-            campaign_report_path=str(args.campaign_report_path or ""),
-            resume_campaign=bool(args.resume_campaign),
-            promotion_gate_config=((adapter_config or {}).get("live_pilot_promotion_gates") if isinstance(adapter_config, dict) else None),
-            stop_evaluator=_campaign_stop_evaluator_with_failover,
-            alert_emitter=campaign_alert_emitter,
-            alert_policy=((adapter_config or {}).get("live_pilot_campaign_alerts") if isinstance(adapter_config, dict) else None),
-            alert_on_promotion_gate_fail=bool(args.alert_on_promotion_gate_fail),
-            alert_on_campaign_stop=bool(args.alert_on_campaign_stop),
-            initial_alerts=campaign_initial_alerts,
-            campaign_extra_summary=(
-                {
-                    **({"fallback_candidate_probe_summary": dict(fallback_candidate_preflight_summary)} if fallback_candidate_preflight_summary else {}),
-                    **({"adaptive_fallback_candidate_summary": dict(adaptive_fallback_summary)} if adaptive_fallback_summary else {}),
-                    **({"adaptive_provider_order_summary": dict(adaptive_provider_order_summary)} if adaptive_provider_order_summary else {}),
+        def _run_one_campaign_session(session_index: int = 0, total_sessions: int = 1):
+            nonlocal adaptive_reliability_state
+            suffix = (f"_s{int(session_index) + 1:03d}" if int(total_sessions) > 1 else "")
+            campaign = run_live_pilot_campaign(
+                campaign_runs=int(args.campaign_runs),
+                run_once_fn=_run_campaign_with_provider_failover,
+                campaign_id=(f"{resolved_campaign_id}{suffix}" if suffix else resolved_campaign_id),
+                campaign_state_json_path=(_path_with_inserted_suffix(str(args.campaign_state_json_path or ""), suffix) if suffix else str(args.campaign_state_json_path or "")),
+                campaign_report_path=(_path_with_inserted_suffix(str(args.campaign_report_path or ""), suffix) if suffix else str(args.campaign_report_path or "")),
+                resume_campaign=(bool(args.resume_campaign) if not suffix else False),
+                promotion_gate_config=((adapter_config or {}).get("live_pilot_promotion_gates") if isinstance(adapter_config, dict) else None),
+                stop_evaluator=_campaign_stop_evaluator_with_failover,
+                alert_emitter=campaign_alert_emitter,
+                alert_policy=((adapter_config or {}).get("live_pilot_campaign_alerts") if isinstance(adapter_config, dict) else None),
+                alert_on_promotion_gate_fail=bool(args.alert_on_promotion_gate_fail),
+                alert_on_campaign_stop=bool(args.alert_on_campaign_stop),
+                initial_alerts=campaign_initial_alerts,
+                campaign_extra_summary=(
+                    {
+                        **({"fallback_candidate_probe_summary": dict(fallback_candidate_preflight_summary)} if fallback_candidate_preflight_summary else {}),
+                        **({"adaptive_fallback_candidate_summary": dict(adaptive_fallback_summary)} if adaptive_fallback_summary else {}),
+                        **({"adaptive_provider_order_summary": dict(adaptive_provider_order_summary)} if adaptive_provider_order_summary else {}),
+                    }
+                ),
+            )
+            if str(args.adaptive_reliability_state_json_path or "").strip():
+                adaptive_reliability_state = update_adaptive_reliability_state_from_campaign_report(adaptive_reliability_state, campaign)
+                save_adaptive_reliability_state(str(args.adaptive_reliability_state_json_path), adaptive_reliability_state)
+            return campaign
+
+        if int(args.schedule_sessions or 0) > 0:
+            schedule = run_live_pilot_campaign_schedule(
+                target_sessions=int(args.schedule_sessions),
+                run_campaign_fn=lambda session_index: _run_one_campaign_session(session_index, int(args.schedule_sessions)),
+                schedule_id=str(args.schedule_id or f"{resolved_campaign_id}_schedule"),
+                session_interval_seconds=float(args.schedule_session_interval_seconds or 0.0),
+                schedule_max_duration_seconds=float(args.schedule_max_duration_seconds or 0.0),
+                schedule_state_json_path=str(args.schedule_state_json_path or ""),
+                schedule_report_path=str(args.schedule_report_path or ""),
+                resume_schedule=bool(args.resume_schedule),
+                stop_on_campaign_stop_reason=bool(args.schedule_stop_on_campaign_stop),
+                daily_operator_report_path=str(args.daily_operator_report_path or ""),
+                daily_operator_date_label=str(args.daily_operator_date_label or ""),
+                recommendation_config=((adapter_config or {}).get("live_pilot_multi_campaign_recommendation") if isinstance(adapter_config, dict) else None),
+            )
+            cli_out = {
+                "schedule_summary": schedule.get("schedule_summary"),
+                "report_path": schedule.get("report_path", ""),
+                "state_path": schedule.get("state_path", ""),
+                "daily_operator_report_path": (str(args.daily_operator_report_path or "")),
+            }
+            print(json.dumps(cli_out, sort_keys=True))
+            if bool(args.print_human_summary):
+                sessions = list(schedule.get("sessions") or [])
+                latest_campaign_summary = dict((sessions[-1] or {}).get("campaign_summary") or {}) if sessions else {}
+                aggregate = dict(latest_campaign_summary.get("aggregate_rollup") or {})
+                human_in = {
+                    "rollup": aggregate,
+                    "live_pilot_summary": {},
+                    "promotion_gate_summary": dict(latest_campaign_summary.get("promotion_gate_summary") or {}),
                 }
-            ),
-        )
-        if str(args.adaptive_reliability_state_json_path or "").strip():
-            adaptive_reliability_state = update_adaptive_reliability_state_from_campaign_report(adaptive_reliability_state, campaign)
-            save_adaptive_reliability_state(str(args.adaptive_reliability_state_json_path), adaptive_reliability_state)
+                print(_format_human_live_pilot_summary(human_in))
+            return 0
+
+        campaign = _run_one_campaign_session()
+        if str(args.daily_operator_report_path or "").strip():
+            daily_report = build_live_pilot_daily_operator_report(
+                [campaign],
+                date_label=str(args.daily_operator_date_label or ""),
+                recommendation_config=((adapter_config or {}).get("live_pilot_multi_campaign_recommendation") if isinstance(adapter_config, dict) else None),
+            )
+            write_live_pilot_daily_operator_report(daily_report, str(args.daily_operator_report_path))
         cli_out = {
             "campaign_summary": campaign.get("campaign_summary"),
             "report_path": campaign.get("report_path", ""),
             "state_path": campaign.get("state_path", ""),
+            "daily_operator_report_path": (str(args.daily_operator_report_path or "")),
         }
         print(json.dumps(cli_out, sort_keys=True))
         if bool(args.print_human_summary):
