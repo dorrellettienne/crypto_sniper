@@ -1,6 +1,7 @@
 import json
 
 from src.live.live_pilot_service import (
+    aggregate_live_pilot_campaign_reports,
     _apply_live_pilot_mode_preset,
     _evaluate_live_pilot_promotion_gates,
     _extract_live_submit_economics,
@@ -14,6 +15,7 @@ from src.live.live_pilot_service import (
     run_live_pilot_auto_window_candidates,
     run_live_pilot_auto_window_from_signal_provider,
     run_live_pilot_campaign,
+    write_campaign_trend_report,
     run_live_pilot_service_loop,
     run_live_pilot_service_once,
 )
@@ -1441,3 +1443,98 @@ def test_run_live_pilot_campaign_no_alerts_when_disabled(tmp_path):
     )
     assert seen_alerts == []
     assert out["campaign_summary"]["alert_summary"]["count"] == 0
+
+
+def test_run_live_pilot_campaign_resume_without_new_runs_suppresses_completion_alerts(tmp_path):
+    state_path = tmp_path / "camp_state.json"
+    state_path.write_text(
+        json.dumps({"campaign_id": "camp_resume", "target_runs": 1, "runs": [], "stop_reason": "manual_stop"}),
+        encoding="utf-8",
+    )
+    seen = []
+    out = run_live_pilot_campaign(
+        campaign_runs=1,
+        run_once_fn=lambda: (_ for _ in ()).throw(RuntimeError("should not run")),
+        campaign_id="camp_resume",
+        campaign_state_json_path=str(state_path),
+        resume_campaign=True,
+        alert_emitter=lambda a: seen.append(a),
+        alert_on_promotion_gate_fail=True,
+        alert_on_campaign_stop=True,
+    )
+    assert out["campaign_summary"]["completed_runs"] == 0
+    assert seen == []
+    assert out["campaign_summary"]["alert_summary"]["count"] == 0
+
+
+def test_aggregate_live_pilot_campaign_reports_produces_recommendation_and_trends(tmp_path):
+    reports = [
+        {
+            "campaign_summary": {
+                "campaign_id": "c1",
+                "target_runs": 3,
+                "completed_runs": 3,
+                "stop_reason": "",
+                "aggregate_rollup": {
+                    "live_finalized_count": 1,
+                    "live_reconciliation_mismatch_count": 0,
+                    "economics_samples_count": 1,
+                    "fee_lamports_total": 5000,
+                    "avg_realized_slippage_bps": 30.0,
+                    "worst_realized_slippage_bps": 40.0,
+                    "signal_provider_metrics": {"fetch_transport_errors": 0, "fetch_endpoint_failure_events": 0},
+                },
+                "promotion_gate_summary": {"status": "pass", "ready_to_promote": True, "failed_checks": []},
+                "alert_summary": {"count": 0, "by_level": {}},
+            }
+        },
+        {
+            "campaign_summary": {
+                "campaign_id": "c2",
+                "target_runs": 3,
+                "completed_runs": 3,
+                "stop_reason": "",
+                "aggregate_rollup": {
+                    "live_finalized_count": 1,
+                    "live_reconciliation_mismatch_count": 0,
+                    "economics_samples_count": 1,
+                    "fee_lamports_total": 4500,
+                    "avg_realized_slippage_bps": 25.0,
+                    "worst_realized_slippage_bps": 35.0,
+                    "signal_provider_metrics": {"fetch_transport_errors": 0, "fetch_endpoint_failure_events": 0},
+                },
+                "promotion_gate_summary": {"status": "pass", "ready_to_promote": True, "failed_checks": []},
+                "alert_summary": {"count": 0, "by_level": {}},
+            }
+        },
+        {
+            "campaign_summary": {
+                "campaign_id": "c3",
+                "target_runs": 3,
+                "completed_runs": 3,
+                "stop_reason": "",
+                "aggregate_rollup": {
+                    "live_finalized_count": 2,
+                    "live_reconciliation_mismatch_count": 0,
+                    "economics_samples_count": 2,
+                    "fee_lamports_total": 9000,
+                    "avg_realized_slippage_bps": 20.0,
+                    "worst_realized_slippage_bps": 30.0,
+                    "signal_provider_metrics": {"fetch_transport_errors": 0, "fetch_endpoint_failure_events": 0},
+                },
+                "promotion_gate_summary": {"status": "pass", "ready_to_promote": True, "failed_checks": []},
+                "alert_summary": {"count": 0, "by_level": {}},
+            }
+        },
+    ]
+    trend = aggregate_live_pilot_campaign_reports(reports)
+    assert trend["campaign_count"] == 3
+    assert trend["aggregate"]["live_finalized_count_total"] == 4
+    assert trend["trends"]["promotion_gate_status_sequence"] == ["pass", "pass", "pass"]
+    assert trend["recommendation"]["action"] == "increase_cap_small_step"
+
+    md_path = tmp_path / "trend_report.md"
+    write_campaign_trend_report(trend, str(md_path))
+    md = md_path.read_text(encoding="utf-8")
+    assert "# Live Pilot Campaign Trend Report" in md
+    assert "increase_cap_small_step" in md

@@ -533,6 +533,187 @@ def _render_campaign_report_markdown(report: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _extract_campaign_report_summary(report: dict[str, Any]) -> dict[str, Any]:
+    summary = dict((report or {}).get("campaign_summary") or {})
+    agg = dict(summary.get("aggregate_rollup") or {})
+    gate = dict(summary.get("promotion_gate_summary") or {})
+    alerts = dict(summary.get("alert_summary") or {})
+    return {
+        "campaign_id": str(summary.get("campaign_id") or ""),
+        "completed_runs": int(summary.get("completed_runs", 0) or 0),
+        "target_runs": int(summary.get("target_runs", 0) or 0),
+        "stop_reason": str(summary.get("stop_reason") or ""),
+        "live_finalized_count": int(agg.get("live_finalized_count", 0) or 0),
+        "live_reconciliation_mismatch_count": int(agg.get("live_reconciliation_mismatch_count", 0) or 0),
+        "economics_samples_count": int(agg.get("economics_samples_count", 0) or 0),
+        "fee_lamports_total": int(agg.get("fee_lamports_total", 0) or 0),
+        "avg_realized_slippage_bps": _to_float_or_none(agg.get("avg_realized_slippage_bps")),
+        "worst_realized_slippage_bps": _to_float_or_none(agg.get("worst_realized_slippage_bps")),
+        "dexscreener_transport_errors": int(((agg.get("signal_provider_metrics") or {}).get("fetch_transport_errors", 0) or 0)),
+        "dexscreener_endpoint_failures": int(((agg.get("signal_provider_metrics") or {}).get("fetch_endpoint_failure_events", 0) or 0)),
+        "promotion_gate_status": str(gate.get("status") or ""),
+        "promotion_gate_ready": bool(gate.get("ready_to_promote", False)),
+        "promotion_gate_failed_checks": list(gate.get("failed_checks", []) or []),
+        "alert_count": int(alerts.get("count", 0) or 0),
+        "alert_levels": dict(alerts.get("by_level", {}) or {}),
+    }
+
+
+def aggregate_live_pilot_campaign_reports(
+    reports: list[dict[str, Any]],
+    *,
+    recommendation_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    summaries = [_extract_campaign_report_summary(r) for r in list(reports or []) if isinstance(r, dict)]
+    count = len(summaries)
+    if count == 0:
+        return {
+            "campaign_count": 0,
+            "campaigns": [],
+            "aggregate": {},
+            "trends": {},
+            "recommendation": {"action": "hold", "confidence": "low", "reasons": ["no_campaign_reports"]},
+        }
+    aggregate = {
+        "campaign_count": count,
+        "completed_runs_total": sum(int(s["completed_runs"]) for s in summaries),
+        "live_finalized_count_total": sum(int(s["live_finalized_count"]) for s in summaries),
+        "live_reconciliation_mismatch_count_total": sum(int(s["live_reconciliation_mismatch_count"]) for s in summaries),
+        "economics_samples_count_total": sum(int(s["economics_samples_count"]) for s in summaries),
+        "fee_lamports_total": sum(int(s["fee_lamports_total"]) for s in summaries),
+        "dexscreener_transport_errors_total": sum(int(s["dexscreener_transport_errors"]) for s in summaries),
+        "dexscreener_endpoint_failures_total": sum(int(s["dexscreener_endpoint_failures"]) for s in summaries),
+        "promotion_gate_pass_count": sum(1 for s in summaries if s["promotion_gate_status"] == "pass"),
+        "promotion_gate_fail_count": sum(1 for s in summaries if s["promotion_gate_status"] == "fail"),
+        "stop_reason_by_reason": {},
+        "alert_level_by_level": {},
+    }
+    slippage_avgs = [float(s["avg_realized_slippage_bps"]) for s in summaries if s["avg_realized_slippage_bps"] is not None]
+    slippage_worsts = [float(s["worst_realized_slippage_bps"]) for s in summaries if s["worst_realized_slippage_bps"] is not None]
+    if slippage_avgs:
+        aggregate["avg_realized_slippage_bps_across_campaigns"] = round(sum(slippage_avgs) / len(slippage_avgs), 6)
+    if slippage_worsts:
+        aggregate["worst_realized_slippage_bps_across_campaigns"] = round(max(slippage_worsts), 6)
+    for s in summaries:
+        sr = str(s.get("stop_reason") or "")
+        if sr:
+            m = aggregate.setdefault("stop_reason_by_reason", {})
+            m[sr] = int(m.get(sr, 0)) + 1
+        for lvl, n in dict(s.get("alert_levels") or {}).items():
+            m = aggregate.setdefault("alert_level_by_level", {})
+            m[str(lvl)] = int(m.get(str(lvl), 0)) + int(n or 0)
+
+    trends = {
+        "campaign_ids": [s["campaign_id"] for s in summaries],
+        "promotion_gate_status_sequence": [s["promotion_gate_status"] for s in summaries],
+        "finalized_count_sequence": [int(s["live_finalized_count"]) for s in summaries],
+        "avg_slippage_bps_sequence": [s["avg_realized_slippage_bps"] for s in summaries],
+        "provider_transport_errors_sequence": [int(s["dexscreener_transport_errors"]) for s in summaries],
+        "stop_reason_sequence": [s["stop_reason"] for s in summaries],
+    }
+    if count >= 2:
+        trends["finalized_count_delta_last"] = int(summaries[-1]["live_finalized_count"]) - int(summaries[-2]["live_finalized_count"])
+        a_prev = summaries[-2]["avg_realized_slippage_bps"]
+        a_last = summaries[-1]["avg_realized_slippage_bps"]
+        trends["avg_slippage_bps_delta_last"] = None if a_prev is None or a_last is None else round(float(a_last) - float(a_prev), 6)
+        trends["transport_error_delta_last"] = int(summaries[-1]["dexscreener_transport_errors"]) - int(summaries[-2]["dexscreener_transport_errors"])
+
+    recommendation = _recommend_live_pilot_promotion_from_campaign_trends(
+        {"campaigns": summaries, "aggregate": aggregate, "trends": trends},
+        config=recommendation_config,
+    )
+    return {"campaign_count": count, "campaigns": summaries, "aggregate": aggregate, "trends": trends, "recommendation": recommendation}
+
+
+def _recommend_live_pilot_promotion_from_campaign_trends(summary: dict[str, Any], *, config: dict[str, Any] | None = None) -> dict[str, Any]:
+    cfg = dict(config or {})
+    campaigns = list(summary.get("campaigns") or [])
+    aggregate = dict(summary.get("aggregate") or {})
+    reasons: list[str] = []
+    if not campaigns:
+        return {"action": "hold", "confidence": "low", "reasons": ["no_campaigns"]}
+
+    min_campaigns = int(cfg.get("min_campaigns", 3))
+    min_total_finalized = int(cfg.get("min_total_finalized", 3))
+    max_total_mismatches = int(cfg.get("max_total_reconciliation_mismatches", 0))
+    max_total_transport_errors = int(cfg.get("max_total_dexscreener_transport_errors", 0))
+    max_worst_slippage = float(cfg.get("max_worst_slippage_bps", 120.0))
+    max_warning_alerts = int(cfg.get("max_warning_alerts", 9999))
+    require_recent_gate_passes = int(cfg.get("require_recent_gate_passes", 2))
+
+    if len(campaigns) < min_campaigns:
+        reasons.append("insufficient_campaign_count")
+    if int(aggregate.get("live_finalized_count_total", 0)) < min_total_finalized:
+        reasons.append("insufficient_total_finalized")
+    if int(aggregate.get("live_reconciliation_mismatch_count_total", 0)) > max_total_mismatches:
+        reasons.append("reconciliation_mismatch_total_exceeded")
+    if int(aggregate.get("dexscreener_transport_errors_total", 0)) > max_total_transport_errors:
+        reasons.append("provider_transport_errors_total_exceeded")
+    worst = _to_float_or_none(aggregate.get("worst_realized_slippage_bps_across_campaigns"))
+    if worst is None or worst > max_worst_slippage:
+        reasons.append("worst_slippage_too_high_or_missing")
+    warnings_total = int((aggregate.get("alert_level_by_level") or {}).get("warning", 0) or 0)
+    if warnings_total > max_warning_alerts:
+        reasons.append("warning_alert_volume_high")
+
+    recent_statuses = [str(c.get("promotion_gate_status") or "") for c in campaigns[-require_recent_gate_passes:]] if require_recent_gate_passes > 0 else []
+    if require_recent_gate_passes > 0 and len(recent_statuses) < require_recent_gate_passes:
+        reasons.append("insufficient_recent_gate_history")
+    elif require_recent_gate_passes > 0 and any(s != "pass" for s in recent_statuses):
+        reasons.append("recent_campaign_gate_not_all_pass")
+
+    if not reasons:
+        action = "increase_cap_small_step"
+        confidence = "medium"
+    elif reasons == ["insufficient_campaign_count"] or reasons == ["insufficient_total_finalized"]:
+        action = "continue_tiny_pilots"
+        confidence = "medium"
+    elif any(r in reasons for r in ("provider_transport_errors_total_exceeded", "reconciliation_mismatch_total_exceeded")):
+        action = "hold"
+        confidence = "high"
+    else:
+        action = "continue_tiny_pilots"
+        confidence = "low"
+    return {"action": action, "confidence": confidence, "reasons": reasons}
+
+
+def _render_campaign_trend_report_markdown(report: dict[str, Any]) -> str:
+    agg = dict(report.get("aggregate") or {})
+    rec = dict(report.get("recommendation") or {})
+    trends = dict(report.get("trends") or {})
+    lines = [
+        "# Live Pilot Campaign Trend Report",
+        "",
+        f"- campaign_count: `{report.get('campaign_count', 0)}`",
+        f"- live_finalized_count_total: `{agg.get('live_finalized_count_total', 0)}`",
+        f"- live_reconciliation_mismatch_count_total: `{agg.get('live_reconciliation_mismatch_count_total', 0)}`",
+        f"- dexscreener_transport_errors_total: `{agg.get('dexscreener_transport_errors_total', 0)}`",
+        f"- worst_realized_slippage_bps_across_campaigns: `{agg.get('worst_realized_slippage_bps_across_campaigns')}`",
+        "",
+        "## Recommendation",
+        "",
+        f"- action: `{rec.get('action')}`",
+        f"- confidence: `{rec.get('confidence')}`",
+        f"- reasons: `{', '.join(list(rec.get('reasons', []) or [])) or '-'}`",
+        "",
+        "## Trends",
+        "",
+        f"- promotion_gate_status_sequence: `{json.dumps(trends.get('promotion_gate_status_sequence', []))}`",
+        f"- finalized_count_sequence: `{json.dumps(trends.get('finalized_count_sequence', []))}`",
+        f"- provider_transport_errors_sequence: `{json.dumps(trends.get('provider_transport_errors_sequence', []))}`",
+        f"- stop_reason_sequence: `{json.dumps(trends.get('stop_reason_sequence', []))}`",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def write_campaign_trend_report(report: dict[str, Any], path_str: str) -> None:
+    path = Path(path_str)
+    if path.suffix.lower() in {".md", ".markdown"}:
+        path.write_text(_render_campaign_trend_report_markdown(report), encoding="utf-8")
+    else:
+        path.write_text(json.dumps(report, sort_keys=True, indent=2), encoding="utf-8")
+
+
 def _write_campaign_report(report: dict[str, Any], report_path: str) -> None:
     path = Path(report_path)
     if path.suffix.lower() in {".md", ".markdown"}:
@@ -591,10 +772,12 @@ def run_live_pilot_campaign(
 
     stop_reason = str(state.get("stop_reason") or "")
     started_from_count = len(completed_runs)
+    new_runs_executed = 0
     for run_index in range(started_from_count, campaign_runs):
         if stop_reason:
             break
         out = run_once_fn()
+        new_runs_executed += 1
         run_rollup = dict((out or {}).get("rollup") or {})
         run_summary = dict((out or {}).get("live_pilot_summary") or {})
         run_gate = dict((out or {}).get("promotion_gate_summary") or {})
@@ -650,7 +833,7 @@ def run_live_pilot_campaign(
         "promotion_gate_summary": campaign_gate,
         "alert_summary": _summarize_campaign_alerts(alerts_emitted),
     }
-    if bool(alert_on_promotion_gate_fail) and str(campaign_gate.get("status") or "") == "fail":
+    if bool(alert_on_promotion_gate_fail) and new_runs_executed > 0 and str(campaign_gate.get("status") or "") == "fail":
         row = {
             "alert_type": "promotion_gate_failed",
             "level": "warning",
@@ -1960,6 +2143,8 @@ def _main() -> int:
     p.add_argument("--alert-webhook-url", default="")
     p.add_argument("--alert-on-promotion-gate-fail", action="store_true")
     p.add_argument("--alert-on-campaign-stop", action="store_true")
+    p.add_argument("--campaign-report-glob", default="")
+    p.add_argument("--campaign-trend-report-path", default="")
     p.add_argument("--candidate-list-json", default="")
     p.add_argument("--candidate-list-json-path", default="")
     p.add_argument("--signal-provider-json-path", default="")
@@ -1992,6 +2177,8 @@ def _main() -> int:
             ensure_dir_within_base(str(Path(args.campaign_report_path).parent))
         if args.alerts_jsonl_path:
             ensure_dir_within_base(str(Path(args.alerts_jsonl_path).parent))
+        if args.campaign_trend_report_path:
+            ensure_dir_within_base(str(Path(args.campaign_trend_report_path).parent))
 
     adapter_config = None
     if args.adapter_config_json and args.adapter_config_json_path:
@@ -2000,6 +2187,25 @@ def _main() -> int:
         adapter_config = json.loads(Path(args.adapter_config_json_path).read_text(encoding="utf-8"))
     elif args.adapter_config_json:
         adapter_config = json.loads(args.adapter_config_json)
+    if str(args.campaign_report_glob or "").strip():
+        report_paths = sorted(Path(".").glob(str(args.campaign_report_glob)))
+        reports = []
+        for pth in report_paths:
+            try:
+                data = json.loads(pth.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if isinstance(data, dict):
+                reports.append(data)
+        trend_report = aggregate_live_pilot_campaign_reports(
+            reports,
+            recommendation_config=((adapter_config or {}).get("live_pilot_multi_campaign_recommendation") if isinstance(adapter_config, dict) else None),
+        )
+        trend_report["report_paths"] = [str(p) for p in report_paths]
+        if str(args.campaign_trend_report_path or "").strip():
+            write_campaign_trend_report(trend_report, str(args.campaign_trend_report_path))
+        print(json.dumps(trend_report, sort_keys=True))
+        return 0
     preflight = _build_live_pilot_preflight(args, adapter_config=adapter_config)
     if args.preflight_only:
         print(json.dumps({"preflight": preflight}, sort_keys=True))
