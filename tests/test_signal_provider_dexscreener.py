@@ -2,6 +2,7 @@ from src.live.signal_provider_dexscreener import (
     DexScreenerSignalProvider,
     parse_dexscreener_pairs_to_signals,
 )
+from src.live.dexscreener_transport import DexScreenerFetchError
 
 
 def _payload():
@@ -88,11 +89,26 @@ def test_dexscreener_signal_provider_exposes_transport_metrics_delta():
         if state["n"] == 1:
             return {
                 "pairs": _payload()["pairs"],
-                "_fetch_meta": {"retry_events": 2, "stale_payload": False},
+                "_fetch_meta": {
+                    "retry_events": 2,
+                    "stale_payload": False,
+                    "selected_url": "https://example.test/fallback",
+                    "endpoint_attempts": [
+                        {"url": "https://example.test/primary", "success": False},
+                        {"url": "https://example.test/fallback", "success": True},
+                    ],
+                },
             }
         return {
             "pairs": [],
-            "_fetch_meta": {"retry_events": 0, "stale_payload": True},
+            "_fetch_meta": {
+                "retry_events": 0,
+                "stale_payload": True,
+                "selected_url": "https://example.test/primary",
+                "endpoint_attempts": [
+                    {"url": "https://example.test/primary", "success": True},
+                ],
+            },
         }
 
     provider = DexScreenerSignalProvider(fetcher, chain_id="solana", now_ts_fn=lambda: 1700000060)
@@ -100,8 +116,43 @@ def test_dexscreener_signal_provider_exposes_transport_metrics_delta():
     d1 = provider.consume_runtime_metrics_delta()
     assert d1["fetch_retry_events"] == 2
     assert d1["fetch_stale_payload_events"] == 0
+    assert d1["fetch_fallback_selected_events"] == 1
+    assert d1["fetch_endpoint_failure_events"] == 1
+    assert d1["last_payload_stats"]["raw_pairs_count"] == 2
+    assert d1["last_payload_stats"]["parsed_signals_count"] == 1
 
     assert provider.get_next_signal() is None
     d2 = provider.consume_runtime_metrics_delta()
     assert d2["fetch_retry_events"] == 0
     assert d2["fetch_stale_payload_events"] == 1
+    assert d2["fetch_fallback_selected_events"] == 0
+    assert d2["fetch_endpoint_failure_events"] == 0
+    assert d2["last_payload_stats"]["raw_pairs_count"] == 0
+
+
+def test_dexscreener_signal_provider_counts_endpoint_failures_from_structured_fetch_error():
+    state = {"n": 0}
+
+    def fetcher():
+        state["n"] += 1
+        if state["n"] == 1:
+            raise DexScreenerFetchError(
+                "HTTP Error 403: Forbidden",
+                fetch_meta={
+                    "retry_events": 0,
+                    "selected_url": "",
+                    "endpoint_attempts": [
+                        {"url": "https://example.test/primary", "success": False},
+                        {"url": "https://example.test/fallback", "success": False},
+                    ],
+                },
+            )
+        return {"pairs": []}
+
+    provider = DexScreenerSignalProvider(fetcher, swallow_fetch_errors=True)
+    assert provider.get_next_signal() is None
+    d1 = provider.consume_runtime_metrics_delta()
+    assert d1["fetch_transport_errors"] == 1
+    assert d1["fetch_endpoint_failure_events"] == 2
+    assert d1["fetch_fallback_selected_events"] == 0
+    assert len(d1["last_fetch_meta"]["endpoint_attempts"]) == 2

@@ -1,0 +1,11 @@
+[
+  {
+    "token_address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "symbol": "USDC",
+    "entry_price": 1.0,
+    "usd_size": 1.0,
+    "metadata": {
+      "observed_at_unix_ms": 4102444800000
+    }
+  }
+]

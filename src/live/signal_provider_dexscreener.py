@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from typing import Any
 
+from src.live.dexscreener_transport import DexScreenerFetchError
 from src.live.interfaces import TradeSignal
 from src.live.signal_provider_polling import PollingSignalProvider
 
@@ -121,19 +122,51 @@ class DexScreenerSignalProvider(PollingSignalProvider):
             "fetch_retry_events": 0,
             "fetch_stale_payload_events": 0,
             "fetch_transport_errors": 0,
+            "fetch_fallback_selected_events": 0,
+            "fetch_endpoint_failure_events": 0,
         }
+        self._last_payload_stats: dict[str, Any] = {}
         self._last_fetch_meta_index = 0
 
+        def _ingest_fetch_meta(meta: dict[str, Any]) -> None:
+            self._last_fetch_meta = dict(meta)
+            self._runtime_counters["fetch_retry_events"] += int(meta.get("retry_events", 0) or 0)
+            if bool(meta.get("stale_payload", False)):
+                self._runtime_counters["fetch_stale_payload_events"] += 1
+            endpoint_attempts = meta.get("endpoint_attempts")
+            if isinstance(endpoint_attempts, list):
+                self._runtime_counters["fetch_endpoint_failure_events"] += sum(
+                    1 for item in endpoint_attempts if isinstance(item, dict) and not bool(item.get("success", False))
+                )
+                selected_url = str(meta.get("selected_url") or "")
+                if selected_url:
+                    primary_url = ""
+                    for item in endpoint_attempts:
+                        if isinstance(item, dict):
+                            primary_url = str(item.get("url") or "")
+                            break
+                    if primary_url and selected_url != primary_url:
+                        self._runtime_counters["fetch_fallback_selected_events"] += 1
+
         def adapted_fetcher():
-            payload = fetcher()
+            try:
+                payload = fetcher()
+            except DexScreenerFetchError as exc:
+                if isinstance(getattr(exc, "fetch_meta", None), dict):
+                    _ingest_fetch_meta(exc.fetch_meta)
+                raise
+            raw_pairs_count = None
+            first_pair_chain_id = None
             if isinstance(payload, dict):
+                pairs = payload.get("pairs")
+                if isinstance(pairs, list):
+                    raw_pairs_count = len(pairs)
+                    if pairs and isinstance(pairs[0], dict):
+                        first_pair_chain_id = str(pairs[0].get("chainId") or "")
                 meta = payload.get("_fetch_meta")
                 if isinstance(meta, dict):
-                    self._last_fetch_meta = dict(meta)
-                    self._runtime_counters["fetch_retry_events"] += int(meta.get("retry_events", 0) or 0)
-                    if bool(meta.get("stale_payload", False)):
-                        self._runtime_counters["fetch_stale_payload_events"] += 1
-            return parse_dexscreener_pairs_to_signals(
+                    _ingest_fetch_meta(meta)
+            out = parse_dexscreener_pairs_to_signals(
                 payload,
                 default_usd_size=self._default_usd_size,
                 chain_id=self._chain_id,
@@ -141,6 +174,15 @@ class DexScreenerSignalProvider(PollingSignalProvider):
                 max_pair_age_seconds=self._max_pair_age_seconds,
                 now_ts=self._now_ts_fn(),
             )
+            self._last_payload_stats = {
+                "raw_pairs_count": raw_pairs_count,
+                "parsed_signals_count": len(out),
+                "first_pair_chain_id": first_pair_chain_id,
+                "configured_chain_id": self._chain_id,
+                "configured_min_liquidity_usd": self._min_liquidity_usd,
+                "configured_max_pair_age_seconds": self._max_pair_age_seconds,
+            }
+            return out
 
         super().__init__(adapted_fetcher, swallow_fetch_errors=swallow_fetch_errors)
 
@@ -153,12 +195,29 @@ class DexScreenerSignalProvider(PollingSignalProvider):
 
     def consume_runtime_metrics_delta(self) -> dict[str, Any]:
         current = dict(self._runtime_counters)
-        last = getattr(self, "_runtime_counters_snapshot", {"fetch_retry_events": 0, "fetch_stale_payload_events": 0, "fetch_transport_errors": 0})
+        last = getattr(
+            self,
+            "_runtime_counters_snapshot",
+            {
+                "fetch_retry_events": 0,
+                "fetch_stale_payload_events": 0,
+                "fetch_transport_errors": 0,
+                "fetch_fallback_selected_events": 0,
+                "fetch_endpoint_failure_events": 0,
+            },
+        )
         delta = {
             "fetch_retry_events": int(current["fetch_retry_events"] - last.get("fetch_retry_events", 0)),
             "fetch_stale_payload_events": int(current["fetch_stale_payload_events"] - last.get("fetch_stale_payload_events", 0)),
             "fetch_transport_errors": int(current["fetch_transport_errors"] - last.get("fetch_transport_errors", 0)),
+            "fetch_fallback_selected_events": int(
+                current["fetch_fallback_selected_events"] - last.get("fetch_fallback_selected_events", 0)
+            ),
+            "fetch_endpoint_failure_events": int(
+                current["fetch_endpoint_failure_events"] - last.get("fetch_endpoint_failure_events", 0)
+            ),
             "last_fetch_meta": dict(self._last_fetch_meta or {}),
+            "last_payload_stats": dict(self._last_payload_stats or {}),
             "last_error": str(self.last_error or ""),
         }
         self._runtime_counters_snapshot = current

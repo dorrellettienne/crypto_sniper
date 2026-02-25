@@ -1,0 +1,14 @@
+[
+  {
+    "token_address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "symbol": "USDC",
+    "entry_price": 1.0,
+    "usd_size": 1.0
+  },
+  {
+    "token_address": "So11111111111111111111111111111111111111112",
+    "symbol": "WSOL",
+    "entry_price": 1.0,
+    "usd_size": 1.0
+  }
+]

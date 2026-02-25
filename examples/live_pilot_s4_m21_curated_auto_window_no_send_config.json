@@ -1,0 +1,47 @@
+{
+  "live_enabled": true,
+  "pilot_mode": true,
+  "rpc_url": "https://mainnet.helius-rpc.com/?api-key=REPLACE_WITH_RPC_KEY",
+  "rpc_read_url": "https://mainnet.helius-rpc.com/?api-key=REPLACE_WITH_RPC_KEY",
+  "wallet_public_key": "REPLACE_WITH_YOUR_PHANTOM_PUBLIC_KEY",
+  "dex_name": "JUPITER",
+  "use_real_quote_clients": true,
+  "dex_quote_url": "https://lite-api.jup.ag/swap/v1/quote",
+  "dex_swap_url": "https://lite-api.jup.ag/swap/v1/swap",
+  "dex_quote_only_mode": true,
+  "dex_quote_input_mint": "So11111111111111111111111111111111111111112",
+  "allowlist_tokens": [
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "So11111111111111111111111111111111111111112"
+  ],
+  "max_order_usd_cap": 1,
+  "pilot_hard_max_order_usd_cap": 1,
+  "live_submit_skeleton_enabled": true,
+  "manual_submit_approval_enabled": true,
+  "manual_submit_required_token": "APPROVE_ME",
+  "manual_submit_provided_token": "APPROVE_ME",
+  "manual_submit_mode": "buy_only",
+  "live_send_enabled": true,
+  "live_send_network_enabled": false,
+  "submit_signer_command": [
+    "python",
+    "examples/solana_command_signer_template.py"
+  ],
+  "submit_signer_command_timeout_seconds": 10,
+  "live_send_max_orders_per_session": 1,
+  "live_send_max_notional_usd_total": 1,
+  "live_pilot_mechanical_safety": {
+    "enabled": true,
+    "require_buy_route": true,
+    "require_sell_route": false,
+    "max_buy_price_impact_pct": 10,
+    "fail_closed_on_check_error": true
+  },
+  "live_pilot_volatility_guard": {
+    "enabled": true,
+    "max_loss_streak_block": 2,
+    "loss_streak_derisk_threshold": 1,
+    "derisk_size_multiplier": 0.5,
+    "derisk_min_usd_size": 0.5
+  }
+}

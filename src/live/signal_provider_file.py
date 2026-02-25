@@ -60,14 +60,14 @@ class FileSignalProvider(SignalProvider):
 
         if suffix == ".jsonl":
             rows = []
-            with p.open("r", encoding="utf-8") as f:
+            with p.open("r", encoding="utf-8-sig") as f:
                 for line in f:
                     line = line.strip()
                     if not line:
                         continue
                     rows.append(json.loads(line))
         else:
-            text = p.read_text(encoding="utf-8")
+            text = p.read_text(encoding="utf-8-sig")
             payload = json.loads(text)
             rows = payload.get("signals") if isinstance(payload, dict) and "signals" in payload else payload
             if not isinstance(rows, list):

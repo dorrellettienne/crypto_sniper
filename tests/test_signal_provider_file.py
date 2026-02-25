@@ -82,3 +82,13 @@ def test_file_signal_provider_rejects_file_over_size_limit(tmp_path):
         assert False, "Expected ValueError"
     except ValueError as exc:
         assert "max_file_bytes" in str(exc)
+
+
+def test_file_signal_provider_loads_json_with_utf8_bom(tmp_path):
+    path = tmp_path / "signals_bom.json"
+    raw = '\ufeff' + json.dumps([{"token_address": "BOM", "symbol": "BOM", "entry_price": 1.0, "usd_size": 1.0}])
+    path.write_text(raw, encoding="utf-8")
+    provider = FileSignalProvider.from_path(str(path))
+    sig = provider.get_next_signal()
+    assert sig is not None
+    assert sig.token_address == "BOM"
