@@ -770,23 +770,49 @@ def _build_campaign_alert_emitter(
     alerts_jsonl_path: str = "",
     console: bool = False,
     webhook_url: str = "",
+    quiet_hours_start_hour_utc: int | None = None,
+    quiet_hours_end_hour_utc: int | None = None,
+    allow_critical_during_quiet_hours: bool = True,
+    escalation_levels: dict[str, str] | None = None,
 ):
     alerts_file = Path(alerts_jsonl_path) if str(alerts_jsonl_path or "").strip() else None
+    escalation_levels = {str(k): str(v) for k, v in dict(escalation_levels or {}).items()}
+
+    def _in_quiet_hours(now_unix_ms: int) -> bool:
+        if quiet_hours_start_hour_utc is None or quiet_hours_end_hour_utc is None:
+            return False
+        h = int(time.gmtime(float(now_unix_ms) / 1000.0).tm_hour)
+        start_h = int(quiet_hours_start_hour_utc) % 24
+        end_h = int(quiet_hours_end_hour_utc) % 24
+        if start_h == end_h:
+            return True
+        if start_h < end_h:
+            return start_h <= h < end_h
+        return (h >= start_h) or (h < end_h)
 
     def emit(alert: dict[str, Any]) -> None:
+        now_unix_ms = int(time.time() * 1000)
+        base_level = str((alert or {}).get("level") or "info").lower()
+        effective_level = str(escalation_levels.get(base_level, base_level))
+        in_quiet = _in_quiet_hours(now_unix_ms)
+        suppress_console = bool(in_quiet and not (allow_critical_during_quiet_hours and effective_level == "critical"))
         row = {
-            "ts_unix_ms": int(time.time() * 1000),
+            "ts_unix_ms": now_unix_ms,
             "event_type": "live_pilot_campaign_alert",
             "campaign_id": campaign_id,
             **dict(alert or {}),
         }
+        row["level"] = effective_level
+        row["base_level"] = base_level
+        row["quiet_hours_active"] = in_quiet
+        row["console_suppressed_by_quiet_hours"] = suppress_console
         if webhook_url:
             # Future-safe placeholder: surface config presence without performing network calls.
             row.setdefault("webhook_configured", True)
         if alerts_file:
             with alerts_file.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(row, sort_keys=True) + "\n")
-        if console:
+        if console and not suppress_console:
             print(
                 f"[campaign-alert] {row.get('level','info')} {row.get('alert_type','')}: {row.get('message','')}",
                 flush=True,
@@ -1351,7 +1377,53 @@ def build_live_pilot_daily_operator_report(
         "trend_report": trend,
         "operator_decision_summary": operator_decision_summary,
         "operator_checklist": checklist,
+        "operator_acknowledgement": {},
     }
+
+
+def append_live_pilot_operator_decision_log(
+    *,
+    path_str: str,
+    daily_report: dict[str, Any],
+    operator_id: str,
+    action: str,
+    notes: str = "",
+    now_unix_ms: int | None = None,
+) -> dict[str, Any]:
+    if not str(path_str or "").strip():
+        return {}
+    ts_unix_ms = int(now_unix_ms if now_unix_ms is not None else time.time() * 1000)
+    report = dict(daily_report or {})
+    decision_summary = dict(report.get("operator_decision_summary") or {})
+    row = {
+        "ts_unix_ms": ts_unix_ms,
+        "event_type": "live_pilot_operator_decision",
+        "date_label": str(report.get("date_label") or ""),
+        "campaign_count": int(report.get("campaign_count", 0) or 0),
+        "operator_id": str(operator_id or ""),
+        "action": str(action or ""),
+        "notes": str(notes or ""),
+        "recommended_action": str(decision_summary.get("recommended_action") or ""),
+        "decision_status": str(decision_summary.get("decision_status") or ""),
+        "report_recommendation_confidence": str(decision_summary.get("recommendation_confidence") or ""),
+    }
+    with Path(path_str).open("a", encoding="utf-8") as f:
+        f.write(json.dumps(row, sort_keys=True) + "\n")
+    return row
+
+
+def apply_operator_acknowledgement_to_daily_report(daily_report: dict[str, Any], decision_row: dict[str, Any] | None) -> dict[str, Any]:
+    out = dict(daily_report or {})
+    ack = dict(decision_row or {})
+    if not ack:
+        return out
+    out["operator_acknowledgement"] = {
+        "ts_unix_ms": int(ack.get("ts_unix_ms", 0) or 0),
+        "operator_id": str(ack.get("operator_id") or ""),
+        "action": str(ack.get("action") or ""),
+        "notes": str(ack.get("notes") or ""),
+    }
+    return out
 
 
 def _render_live_pilot_daily_operator_report_markdown(report: dict[str, Any]) -> str:
@@ -1362,6 +1434,7 @@ def _render_live_pilot_daily_operator_report_markdown(report: dict[str, Any]) ->
     latest = dict(report.get("latest_campaign_summary") or {})
     latest_gate = dict(latest.get("promotion_gate_summary") or {})
     checklist = [dict(x) for x in list(report.get("operator_checklist") or []) if isinstance(x, dict)]
+    ack = dict(report.get("operator_acknowledgement") or {})
     lines = [
         "# Live Pilot Daily Operator Report",
         "",
@@ -1398,6 +1471,18 @@ def _render_live_pilot_daily_operator_report_markdown(report: dict[str, Any]) ->
     ]
     for row in checklist:
         lines.append(f"- [{'x' if bool(row.get('done', False)) else ' '}] {row.get('item', '')}")
+    if ack:
+        lines.extend(
+            [
+                "",
+                "## Operator Acknowledgement",
+                "",
+                f"- operator_id: `{ack.get('operator_id', '')}`",
+                f"- action: `{ack.get('action', '')}`",
+                f"- notes: `{ack.get('notes', '')}`",
+                f"- ts_unix_ms: `{ack.get('ts_unix_ms', 0)}`",
+            ]
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -3019,10 +3104,18 @@ def _main() -> int:
     p.add_argument("--alert-webhook-url", default="")
     p.add_argument("--alert-on-promotion-gate-fail", action="store_true")
     p.add_argument("--alert-on-campaign-stop", action="store_true")
+    p.add_argument("--alert-quiet-hours-start-hour-utc", type=int, default=None)
+    p.add_argument("--alert-quiet-hours-end-hour-utc", type=int, default=None)
+    p.add_argument("--alert-suppress-noncritical-during-quiet-hours", action="store_true")
+    p.add_argument("--alert-escalate-warning-to-critical", action="store_true")
     p.add_argument("--campaign-report-glob", default="")
     p.add_argument("--campaign-trend-report-path", default="")
     p.add_argument("--daily-operator-report-path", default="")
     p.add_argument("--daily-operator-date-label", default="")
+    p.add_argument("--operator-decision-log-jsonl-path", default="")
+    p.add_argument("--operator-decision-actor", default="")
+    p.add_argument("--operator-decision-action", default="")
+    p.add_argument("--operator-decision-notes", default="")
     p.add_argument("--schedule-sessions", type=int, default=0)
     p.add_argument("--schedule-id", default="")
     p.add_argument("--schedule-session-interval-seconds", type=float, default=0.0)
@@ -3082,6 +3175,8 @@ def _main() -> int:
             ensure_dir_within_base(str(Path(args.campaign_trend_report_path).parent))
         if args.daily_operator_report_path:
             ensure_dir_within_base(str(Path(args.daily_operator_report_path).parent))
+        if args.operator_decision_log_jsonl_path:
+            ensure_dir_within_base(str(Path(args.operator_decision_log_jsonl_path).parent))
         if args.schedule_state_json_path:
             ensure_dir_within_base(str(Path(args.schedule_state_json_path).parent))
         if args.schedule_report_path:
@@ -3119,6 +3214,15 @@ def _main() -> int:
                 date_label=str(args.daily_operator_date_label or ""),
                 recommendation_config=((adapter_config or {}).get("live_pilot_multi_campaign_recommendation") if isinstance(adapter_config, dict) else None),
             )
+            if str(args.operator_decision_action or "").strip():
+                decision_row = append_live_pilot_operator_decision_log(
+                    path_str=str(args.operator_decision_log_jsonl_path or ""),
+                    daily_report=daily_report,
+                    operator_id=str(args.operator_decision_actor or ""),
+                    action=str(args.operator_decision_action or ""),
+                    notes=str(args.operator_decision_notes or ""),
+                )
+                daily_report = apply_operator_acknowledgement_to_daily_report(daily_report, decision_row)
             write_live_pilot_daily_operator_report(daily_report, str(args.daily_operator_report_path))
         print(json.dumps(trend_report, sort_keys=True))
         return 0
@@ -3376,11 +3480,16 @@ def _main() -> int:
 
         campaign_alert_emitter = None
         if str(args.alerts_jsonl_path or "").strip() or bool(args.alert_console) or str(args.alert_webhook_url or "").strip():
+            escalation_levels = {"warning": "critical"} if bool(args.alert_escalate_warning_to_critical) else {}
             campaign_alert_emitter = _build_campaign_alert_emitter(
                 campaign_id=resolved_campaign_id,
                 alerts_jsonl_path=str(args.alerts_jsonl_path or ""),
                 console=bool(args.alert_console),
                 webhook_url=str(args.alert_webhook_url or ""),
+                quiet_hours_start_hour_utc=args.alert_quiet_hours_start_hour_utc,
+                quiet_hours_end_hour_utc=args.alert_quiet_hours_end_hour_utc,
+                allow_critical_during_quiet_hours=bool(args.alert_suppress_noncritical_during_quiet_hours),
+                escalation_levels=escalation_levels,
             )
         if bool(fallback_candidate_preflight_summary.get("fallback_candidates_probe_fail_closed_triggered", False)):
             for row in campaign_initial_alerts:
@@ -3464,6 +3573,18 @@ def _main() -> int:
                 daily_operator_date_label=str(args.daily_operator_date_label or ""),
                 recommendation_config=((adapter_config or {}).get("live_pilot_multi_campaign_recommendation") if isinstance(adapter_config, dict) else None),
             )
+            if str(args.daily_operator_report_path or "").strip() and str(args.operator_decision_action or "").strip():
+                daily_report = dict(schedule.get("daily_operator_report") or {})
+                decision_row = append_live_pilot_operator_decision_log(
+                    path_str=str(args.operator_decision_log_jsonl_path or ""),
+                    daily_report=daily_report,
+                    operator_id=str(args.operator_decision_actor or ""),
+                    action=str(args.operator_decision_action or ""),
+                    notes=str(args.operator_decision_notes or ""),
+                )
+                daily_report = apply_operator_acknowledgement_to_daily_report(daily_report, decision_row)
+                write_live_pilot_daily_operator_report(daily_report, str(args.daily_operator_report_path))
+                schedule["daily_operator_report"] = daily_report
             cli_out = {
                 "schedule_summary": schedule.get("schedule_summary"),
                 "report_path": schedule.get("report_path", ""),
@@ -3490,6 +3611,15 @@ def _main() -> int:
                 date_label=str(args.daily_operator_date_label or ""),
                 recommendation_config=((adapter_config or {}).get("live_pilot_multi_campaign_recommendation") if isinstance(adapter_config, dict) else None),
             )
+            if str(args.operator_decision_action or "").strip():
+                decision_row = append_live_pilot_operator_decision_log(
+                    path_str=str(args.operator_decision_log_jsonl_path or ""),
+                    daily_report=daily_report,
+                    operator_id=str(args.operator_decision_actor or ""),
+                    action=str(args.operator_decision_action or ""),
+                    notes=str(args.operator_decision_notes or ""),
+                )
+                daily_report = apply_operator_acknowledgement_to_daily_report(daily_report, decision_row)
             write_live_pilot_daily_operator_report(daily_report, str(args.daily_operator_report_path))
         cli_out = {
             "campaign_summary": campaign.get("campaign_summary"),

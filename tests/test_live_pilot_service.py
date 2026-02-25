@@ -26,6 +26,9 @@ from src.live.live_pilot_service import (
     save_adaptive_reliability_state,
     update_adaptive_reliability_state_from_campaign_report,
     build_live_pilot_daily_operator_report,
+    append_live_pilot_operator_decision_log,
+    apply_operator_acknowledgement_to_daily_report,
+    _build_campaign_alert_emitter,
     write_live_pilot_daily_operator_report,
     write_campaign_trend_report,
     run_live_pilot_service_loop,
@@ -2018,3 +2021,61 @@ def test_build_live_pilot_daily_operator_report_and_write_markdown(tmp_path):
     txt = path.read_text(encoding="utf-8")
     assert "Live Pilot Daily Operator Report" in txt
     assert "Operator Checklist" in txt
+
+
+def test_campaign_alert_emitter_quiet_hours_suppresses_noncritical_and_escalates(tmp_path, capsys):
+    alerts_path = tmp_path / "alerts.jsonl"
+    emit = _build_campaign_alert_emitter(
+        campaign_id="c1",
+        alerts_jsonl_path=str(alerts_path),
+        console=True,
+        quiet_hours_start_hour_utc=0,
+        quiet_hours_end_hour_utc=0,  # treated as always quiet for deterministic testing
+        allow_critical_during_quiet_hours=True,
+        escalation_levels={"warning": "critical"},
+    )
+    emit({"alert_type": "warn1", "level": "warning", "message": "hello"})
+    out = capsys.readouterr().out
+    assert "[campaign-alert] critical warn1: hello" in out
+
+    emit2 = _build_campaign_alert_emitter(
+        campaign_id="c2",
+        alerts_jsonl_path=str(alerts_path),
+        console=True,
+        quiet_hours_start_hour_utc=0,
+        quiet_hours_end_hour_utc=0,
+        allow_critical_during_quiet_hours=False,
+    )
+    emit2({"alert_type": "warn2", "level": "warning", "message": "quiet"})
+    out2 = capsys.readouterr().out
+    assert "warn2" not in out2
+
+    rows = [json.loads(x) for x in alerts_path.read_text(encoding="utf-8").splitlines() if x.strip()]
+    assert rows[0]["level"] == "critical"
+    assert rows[0]["base_level"] == "warning"
+    assert rows[0]["quiet_hours_active"] is True
+    assert rows[0]["console_suppressed_by_quiet_hours"] is False
+    assert rows[1]["console_suppressed_by_quiet_hours"] is True
+
+
+def test_operator_decision_log_and_acknowledgement_are_embedded_in_daily_report(tmp_path):
+    report = build_live_pilot_daily_operator_report([], date_label="2026-02-25")
+    log_path = tmp_path / "decision_log.jsonl"
+    row = append_live_pilot_operator_decision_log(
+        path_str=str(log_path),
+        daily_report=report,
+        operator_id="main_user",
+        action="hold",
+        notes="Waiting for more clean campaigns",
+        now_unix_ms=123456789,
+    )
+    out = apply_operator_acknowledgement_to_daily_report(report, row)
+    md_path = tmp_path / "daily.md"
+    write_live_pilot_daily_operator_report(out, str(md_path))
+    txt = md_path.read_text(encoding="utf-8")
+    assert "Operator Acknowledgement" in txt
+    assert "main_user" in txt
+    assert "Waiting for more clean campaigns" in txt
+    rows = [json.loads(x) for x in log_path.read_text(encoding="utf-8").splitlines() if x.strip()]
+    assert rows[0]["event_type"] == "live_pilot_operator_decision"
+    assert rows[0]["action"] == "hold"
