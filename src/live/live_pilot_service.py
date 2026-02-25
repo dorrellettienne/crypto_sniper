@@ -179,6 +179,8 @@ def _evaluate_live_pilot_promotion_gates(rollup: dict[str, Any], cfg: dict[str, 
         "max_dexscreener_transport_errors": int(cfg.get("max_dexscreener_transport_errors", 0)),
         "max_dexscreener_endpoint_failures": int(cfg.get("max_dexscreener_endpoint_failures", 0)),
         "min_economics_samples": int(cfg.get("min_economics_samples", 1)),
+        "max_adaptive_candidate_quarantined_count": int(cfg.get("max_adaptive_candidate_quarantined_count", 999999)),
+        "max_adaptive_fallback_quality_degraded_events": int(cfg.get("max_adaptive_fallback_quality_degraded_events", 999999)),
     }
     provider_metrics = dict(rollup.get("signal_provider_metrics") or {})
     metrics = {
@@ -190,6 +192,8 @@ def _evaluate_live_pilot_promotion_gates(rollup: dict[str, Any], cfg: dict[str, 
         "economics_samples_count": int(rollup.get("economics_samples_count", 0)),
         "dexscreener_transport_errors": int(provider_metrics.get("fetch_transport_errors", 0)),
         "dexscreener_endpoint_failures": int(provider_metrics.get("fetch_endpoint_failure_events", 0)),
+        "adaptive_candidate_quarantined_count": int(rollup.get("adaptive_candidate_quarantined_count", 0) or 0),
+        "adaptive_fallback_quality_degraded_events": int(rollup.get("adaptive_fallback_quality_degraded_events", 0) or 0),
     }
 
     checks = [
@@ -238,6 +242,20 @@ def _evaluate_live_pilot_promotion_gates(rollup: dict[str, Any], cfg: dict[str, 
             thresholds["min_economics_samples"],
             ">=",
         ),
+        (
+            "max_adaptive_candidate_quarantined_count",
+            metrics["adaptive_candidate_quarantined_count"] <= thresholds["max_adaptive_candidate_quarantined_count"],
+            metrics["adaptive_candidate_quarantined_count"],
+            thresholds["max_adaptive_candidate_quarantined_count"],
+            "<=",
+        ),
+        (
+            "max_adaptive_fallback_quality_degraded_events",
+            metrics["adaptive_fallback_quality_degraded_events"] <= thresholds["max_adaptive_fallback_quality_degraded_events"],
+            metrics["adaptive_fallback_quality_degraded_events"],
+            thresholds["max_adaptive_fallback_quality_degraded_events"],
+            "<=",
+        ),
     ]
     check_rows = [
         {"name": name, "ok": bool(ok), "actual": actual, "threshold": threshold, "op": op}
@@ -254,6 +272,23 @@ def _evaluate_live_pilot_promotion_gates(rollup: dict[str, Any], cfg: dict[str, 
         "metrics": metrics,
         "summary": ("promotion_gate_pass" if ready else f"promotion_gate_fail:{','.join(failed_checks)}"),
     }
+
+
+def _build_campaign_adaptive_gate_rollup(
+    aggregate_rollup: dict[str, Any],
+    campaign_extra_summary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    out = dict(aggregate_rollup or {})
+    extra = dict(campaign_extra_summary or {})
+    adaptive_fallback = dict(extra.get("adaptive_fallback_candidate_summary") or {})
+    if adaptive_fallback:
+        out["adaptive_candidate_quarantined_count"] = int(adaptive_fallback.get("adaptive_candidate_quarantined_count", 0) or 0)
+    fallback_probe = dict(extra.get("fallback_candidate_probe_summary") or {})
+    if fallback_probe:
+        ok_n = int(fallback_probe.get("fallback_candidates_probe_ok", 0) or 0)
+        fail_n = int(fallback_probe.get("fallback_candidates_probe_failed", 0) or 0)
+        out["adaptive_fallback_quality_degraded_events"] = 1 if (ok_n < fail_n and (ok_n + fail_n) > 0) else 0
+    return out
 
 
 def _merge_count_map(dst: dict[str, Any], src: dict[str, Any]) -> dict[str, Any]:
@@ -497,17 +532,69 @@ def save_adaptive_reliability_state(path_str: str, state: dict[str, Any]) -> Non
     p.write_text(json.dumps(dict(state or {}), sort_keys=True, indent=2), encoding="utf-8")
 
 
-def _candidate_quality_score(candidate: dict[str, Any], state: dict[str, Any], *, quarantine_failure_threshold: int = 3) -> dict[str, Any]:
+def _decay_adaptive_reliability_state(
+    state: dict[str, Any],
+    *,
+    candidate_decay_factor: float = 0.9,
+    provider_decay_factor: float = 0.95,
+) -> dict[str, Any]:
+    out = dict(state or {})
+    cstats = dict(out.get("candidate_stats") or {})
+    pstats = dict(out.get("provider_stats") or {})
+    cdf = max(0.0, min(1.0, float(candidate_decay_factor)))
+    pdf = max(0.0, min(1.0, float(provider_decay_factor)))
+    candidate_numeric_keys = {"probe_ok", "probe_failed", "execution_error", "submitted"}
+    provider_numeric_keys = {"runs", "transport_errors", "endpoint_failures", "hard_stops", "successful_runs"}
+    for tok, row in list(cstats.items()):
+        if not isinstance(row, dict):
+            continue
+        nr = dict(row)
+        for k in candidate_numeric_keys:
+            if k in nr:
+                nr[k] = round(float(nr.get(k, 0) or 0) * cdf, 6)
+        cstats[str(tok)] = nr
+    for prov, row in list(pstats.items()):
+        if not isinstance(row, dict):
+            continue
+        nr = dict(row)
+        for k in provider_numeric_keys:
+            if k in nr:
+                nr[k] = round(float(nr.get(k, 0) or 0) * pdf, 6)
+        pstats[str(prov)] = nr
+    out["candidate_stats"] = cstats
+    out["provider_stats"] = pstats
+    meta = dict(out.get("meta") or {})
+    meta["last_decay_applied_unix_ms"] = int(time.time() * 1000)
+    meta["candidate_decay_factor"] = cdf
+    meta["provider_decay_factor"] = pdf
+    out["meta"] = meta
+    return out
+
+
+def _candidate_quality_score(
+    candidate: dict[str, Any],
+    state: dict[str, Any],
+    *,
+    quarantine_failure_threshold: int = 3,
+    quarantine_ttl_seconds: float | None = None,
+) -> dict[str, Any]:
     tok = str((candidate or {}).get("token_address") or "")
     cs = dict(((state or {}).get("candidate_stats") or {}).get(tok) or {})
     md = dict((candidate or {}).get("metadata") or {})
     confidence_hint = _to_float_or_none(md.get("confidence_hint")) or 0.0
-    probe_ok = int(cs.get("probe_ok", 0) or 0)
-    probe_failed = int(cs.get("probe_failed", 0) or 0)
-    exec_errors = int(cs.get("execution_error", 0) or 0)
-    submitted = int(cs.get("submitted", 0) or 0)
+    probe_ok = float(cs.get("probe_ok", 0) or 0)
+    probe_failed = float(cs.get("probe_failed", 0) or 0)
+    exec_errors = float(cs.get("execution_error", 0) or 0)
+    submitted = float(cs.get("submitted", 0) or 0)
     score = round(confidence_hint + (probe_ok * 2.0) + (submitted * 1.0) - (probe_failed * 3.0) - (exec_errors * 4.0), 6)
-    quarantined = (probe_failed + exec_errors) >= int(quarantine_failure_threshold)
+    last_negative_unix_ms = _to_int_or_none(cs.get("last_negative_unix_ms"))
+    quarantine_age_seconds = None
+    quarantine_ttl_expired = False
+    if last_negative_unix_ms is not None:
+        quarantine_age_seconds = max(0.0, (time.time() * 1000.0 - float(last_negative_unix_ms)) / 1000.0)
+        if quarantine_ttl_seconds is not None and quarantine_age_seconds > float(quarantine_ttl_seconds):
+            quarantine_ttl_expired = True
+    quarantined = ((probe_failed + exec_errors) >= int(quarantine_failure_threshold)) and not quarantine_ttl_expired
     return {
         "token_address": tok,
         "symbol": str((candidate or {}).get("symbol") or ""),
@@ -518,6 +605,9 @@ def _candidate_quality_score(candidate: dict[str, Any], state: dict[str, Any], *
         "submitted": submitted,
         "confidence_hint": confidence_hint,
         "quarantined": quarantined,
+        "quarantine_ttl_expired": quarantine_ttl_expired,
+        "quarantine_age_seconds": (None if quarantine_age_seconds is None else round(quarantine_age_seconds, 6)),
+        "last_negative_unix_ms": last_negative_unix_ms,
     }
 
 
@@ -527,6 +617,7 @@ def adaptive_reorder_fallback_candidates(
     reliability_state: dict[str, Any] | None = None,
     enabled: bool = False,
     quarantine_failure_threshold: int = 3,
+    quarantine_ttl_seconds: float | None = None,
 ) -> dict[str, Any]:
     candidates = list(candidates or [])
     if not enabled or not candidates:
@@ -536,15 +627,27 @@ def adaptive_reorder_fallback_candidates(
                 "adaptive_candidate_reordering_applied": False,
                 "adaptive_candidate_reordering_enabled": bool(enabled),
                 "adaptive_candidate_quarantined_count": 0,
+                "adaptive_candidate_ttl_expired_count": 0,
                 "adaptive_candidate_top_scores": [],
                 "adaptive_candidate_bottom_scores": [],
             },
         }
     scored = []
     for c in candidates:
-        scored.append({"candidate": dict(c or {}), "scorecard": _candidate_quality_score(c, reliability_state or {}, quarantine_failure_threshold=quarantine_failure_threshold)})
+        scored.append(
+            {
+                "candidate": dict(c or {}),
+                "scorecard": _candidate_quality_score(
+                    c,
+                    reliability_state or {},
+                    quarantine_failure_threshold=quarantine_failure_threshold,
+                    quarantine_ttl_seconds=quarantine_ttl_seconds,
+                ),
+            }
+        )
     kept = [x for x in scored if not bool((x.get("scorecard") or {}).get("quarantined", False))]
     quarantined = [x for x in scored if bool((x.get("scorecard") or {}).get("quarantined", False))]
+    ttl_expired = [x for x in scored if bool((x.get("scorecard") or {}).get("quarantine_ttl_expired", False))]
     kept_sorted = sorted(kept, key=lambda x: (-(x["scorecard"]["score"]), str(x["scorecard"]["token_address"])))
     out_candidates = [x["candidate"] for x in kept_sorted]
     top_scores = [dict(x["scorecard"]) for x in kept_sorted[:5]]
@@ -556,7 +659,9 @@ def adaptive_reorder_fallback_candidates(
             "adaptive_candidate_reordering_applied": True,
             "adaptive_candidate_reordering_enabled": True,
             "adaptive_candidate_quarantined_count": len(quarantined),
+            "adaptive_candidate_ttl_expired_count": len(ttl_expired),
             "adaptive_candidate_quarantine_threshold": int(quarantine_failure_threshold),
+            "adaptive_candidate_quarantine_ttl_seconds": (None if quarantine_ttl_seconds is None else float(quarantine_ttl_seconds)),
             "adaptive_candidate_top_scores": top_scores,
             "adaptive_candidate_bottom_scores": bottom_scores,
             "adaptive_candidate_quarantined_tokens": [x["scorecard"]["token_address"] for x in quarantined],
@@ -599,7 +704,12 @@ def adaptive_reorder_provider_order(
 
 
 def update_adaptive_reliability_state_from_campaign_report(state: dict[str, Any], campaign_report: dict[str, Any]) -> dict[str, Any]:
-    out = dict(state or {})
+    meta_in = dict((state or {}).get("meta") or {})
+    out = _decay_adaptive_reliability_state(
+        dict(state or {}),
+        candidate_decay_factor=float(meta_in.get("candidate_decay_factor", 0.9) or 0.9),
+        provider_decay_factor=float(meta_in.get("provider_decay_factor", 0.95) or 0.95),
+    )
     cstats = dict(out.get("candidate_stats") or {})
     pstats = dict(out.get("provider_stats") or {})
     summary = dict((campaign_report or {}).get("campaign_summary") or {})
@@ -611,7 +721,8 @@ def update_adaptive_reliability_state_from_campaign_report(state: dict[str, Any]
         if not tok:
             continue
         cs = dict(cstats.get(tok) or {})
-        cs["probe_ok"] = int(cs.get("probe_ok", 0)) + 1
+        cs["probe_ok"] = round(float(cs.get("probe_ok", 0) or 0) + 1.0, 6)
+        cs["last_seen_unix_ms"] = int(time.time() * 1000)
         cstats[tok] = cs
     for row in list(fb.get("fallback_candidates_probe_failures") or []):
         if not isinstance(row, dict):
@@ -620,8 +731,10 @@ def update_adaptive_reliability_state_from_campaign_report(state: dict[str, Any]
         if not tok:
             continue
         cs = dict(cstats.get(tok) or {})
-        cs["probe_failed"] = int(cs.get("probe_failed", 0)) + 1
+        cs["probe_failed"] = round(float(cs.get("probe_failed", 0) or 0) + 1.0, 6)
         cs["last_error"] = str(row.get("reason") or "")
+        cs["last_negative_unix_ms"] = int(time.time() * 1000)
+        cs["last_seen_unix_ms"] = int(time.time() * 1000)
         cstats[tok] = cs
     runs = list((campaign_report or {}).get("runs") or [])
     for rec in runs:
@@ -632,15 +745,16 @@ def update_adaptive_reliability_state_from_campaign_report(state: dict[str, Any]
         if not provider:
             continue
         psr = dict(pstats.get(provider) or {})
-        psr["runs"] = int(psr.get("runs", 0)) + 1
+        psr["runs"] = round(float(psr.get("runs", 0) or 0) + 1.0, 6)
         rr = dict(rec.get("rollup") or {})
         spm = dict(rr.get("signal_provider_metrics") or {})
-        psr["transport_errors"] = int(psr.get("transport_errors", 0)) + int(spm.get("fetch_transport_errors", 0) or 0)
-        psr["endpoint_failures"] = int(psr.get("endpoint_failures", 0)) + int(spm.get("fetch_endpoint_failure_events", 0) or 0)
+        psr["transport_errors"] = round(float(psr.get("transport_errors", 0) or 0) + float(spm.get("fetch_transport_errors", 0) or 0), 6)
+        psr["endpoint_failures"] = round(float(psr.get("endpoint_failures", 0) or 0) + float(spm.get("fetch_endpoint_failure_events", 0) or 0), 6)
         if bool(cp.get("execution_error", False)):
-            psr["hard_stops"] = int(psr.get("hard_stops", 0)) + 1
+            psr["hard_stops"] = round(float(psr.get("hard_stops", 0) or 0) + 1.0, 6)
         else:
-            psr["successful_runs"] = int(psr.get("successful_runs", 0)) + 1
+            psr["successful_runs"] = round(float(psr.get("successful_runs", 0) or 0) + 1.0, 6)
+        psr["last_seen_unix_ms"] = int(time.time() * 1000)
         pstats[provider] = psr
     out["candidate_stats"] = cstats
     out["provider_stats"] = pstats
@@ -930,6 +1044,7 @@ def _render_campaign_report_markdown(report: dict[str, Any]) -> str:
                 "",
                 f"- adaptive_candidate_reordering_applied: `{bool(adaptive_fallback.get('adaptive_candidate_reordering_applied', False))}`",
                 f"- adaptive_candidate_quarantined_count: `{adaptive_fallback.get('adaptive_candidate_quarantined_count', 0)}`",
+                f"- adaptive_candidate_ttl_expired_count: `{adaptive_fallback.get('adaptive_candidate_ttl_expired_count', 0)}`",
             ]
         )
     if adaptive_provider:
@@ -980,8 +1095,14 @@ def _extract_campaign_report_summary(report: dict[str, Any]) -> dict[str, Any]:
         "fallback_candidates_probe_ok": int(fallback_probe.get("fallback_candidates_probe_ok", 0) or 0),
         "fallback_candidates_probe_failed": int(fallback_probe.get("fallback_candidates_probe_failed", 0) or 0),
         "adaptive_candidate_quarantined_count": int(adaptive_fallback.get("adaptive_candidate_quarantined_count", 0) or 0),
+        "adaptive_candidate_ttl_expired_count": int(adaptive_fallback.get("adaptive_candidate_ttl_expired_count", 0) or 0),
         "adaptive_candidate_reordering_applied": bool(adaptive_fallback.get("adaptive_candidate_reordering_applied", False)),
         "adaptive_provider_order_applied": bool(adaptive_provider.get("adaptive_provider_order_applied", False)),
+        "adaptive_fallback_quality_degraded": bool(
+            int(fallback_probe.get("fallback_candidates_probe_ok", 0) or 0)
+            < int(fallback_probe.get("fallback_candidates_probe_failed", 0) or 0)
+            and int(fallback_probe.get("fallback_candidates_probe_ok", 0) or 0) + int(fallback_probe.get("fallback_candidates_probe_failed", 0) or 0) > 0
+        ),
     }
 
 
@@ -1016,8 +1137,10 @@ def aggregate_live_pilot_campaign_reports(
         "fallback_candidates_probe_ok_total": sum(int(s.get("fallback_candidates_probe_ok", 0) or 0) for s in summaries),
         "fallback_candidates_probe_failed_total": sum(int(s.get("fallback_candidates_probe_failed", 0) or 0) for s in summaries),
         "adaptive_candidate_quarantined_count_total": sum(int(s.get("adaptive_candidate_quarantined_count", 0) or 0) for s in summaries),
+        "adaptive_candidate_ttl_expired_count_total": sum(int(s.get("adaptive_candidate_ttl_expired_count", 0) or 0) for s in summaries),
         "adaptive_candidate_reordering_applied_count": sum(1 for s in summaries if bool(s.get("adaptive_candidate_reordering_applied", False))),
         "adaptive_provider_order_applied_count": sum(1 for s in summaries if bool(s.get("adaptive_provider_order_applied", False))),
+        "adaptive_fallback_quality_degraded_count": sum(1 for s in summaries if bool(s.get("adaptive_fallback_quality_degraded", False))),
         "stop_reason_by_reason": {},
         "alert_level_by_level": {},
         "provider_usage_by_provider": {},
@@ -1050,6 +1173,7 @@ def aggregate_live_pilot_campaign_reports(
         "provider_usage_sequence": [dict(s.get("provider_usage_by_provider", {}) or {}) for s in summaries],
         "fallback_probe_failed_sequence": [int(s.get("fallback_candidates_probe_failed", 0) or 0) for s in summaries],
         "adaptive_candidate_quarantined_count_sequence": [int(s.get("adaptive_candidate_quarantined_count", 0) or 0) for s in summaries],
+        "adaptive_candidate_ttl_expired_count_sequence": [int(s.get("adaptive_candidate_ttl_expired_count", 0) or 0) for s in summaries],
         "stop_reason_sequence": [s["stop_reason"] for s in summaries],
     }
     if count >= 2:
@@ -1082,6 +1206,8 @@ def _recommend_live_pilot_promotion_from_campaign_trends(summary: dict[str, Any]
     max_warning_alerts = int(cfg.get("max_warning_alerts", 9999))
     require_recent_gate_passes = int(cfg.get("require_recent_gate_passes", 2))
     allow_fallback_continue_on_provider_issues = bool(cfg.get("allow_fallback_continue_on_provider_issues", True))
+    max_adaptive_quarantined_total = int(cfg.get("max_adaptive_quarantined_total", 999999))
+    max_adaptive_fallback_quality_degraded_count = int(cfg.get("max_adaptive_fallback_quality_degraded_count", 999999))
 
     if len(campaigns) < min_campaigns:
         reasons.append("insufficient_campaign_count")
@@ -1097,6 +1223,10 @@ def _recommend_live_pilot_promotion_from_campaign_trends(summary: dict[str, Any]
     warnings_total = int((aggregate.get("alert_level_by_level") or {}).get("warning", 0) or 0)
     if warnings_total > max_warning_alerts:
         reasons.append("warning_alert_volume_high")
+    if int(aggregate.get("adaptive_candidate_quarantined_count_total", 0) or 0) > max_adaptive_quarantined_total:
+        reasons.append("adaptive_candidate_quarantine_total_exceeded")
+    if int(aggregate.get("adaptive_fallback_quality_degraded_count", 0) or 0) > max_adaptive_fallback_quality_degraded_count:
+        reasons.append("adaptive_fallback_quality_degraded_too_often")
 
     recent_statuses = [str(c.get("promotion_gate_status") or "") for c in campaigns[-require_recent_gate_passes:]] if require_recent_gate_passes > 0 else []
     if require_recent_gate_passes > 0 and len(recent_statuses) < require_recent_gate_passes:
@@ -1148,6 +1278,7 @@ def _render_campaign_trend_report_markdown(report: dict[str, Any]) -> str:
         f"- provider_failover_count_total: `{agg.get('provider_failover_count_total', 0)}`",
         f"- fallback_candidates_probe_failed_total: `{agg.get('fallback_candidates_probe_failed_total', 0)}`",
         f"- adaptive_candidate_quarantined_count_total: `{agg.get('adaptive_candidate_quarantined_count_total', 0)}`",
+        f"- adaptive_fallback_quality_degraded_count: `{agg.get('adaptive_fallback_quality_degraded_count', 0)}`",
         f"- worst_realized_slippage_bps_across_campaigns: `{agg.get('worst_realized_slippage_bps_across_campaigns')}`",
         "",
         "## Recommendation",
@@ -1164,6 +1295,7 @@ def _render_campaign_trend_report_markdown(report: dict[str, Any]) -> str:
         f"- provider_failover_count_sequence: `{json.dumps(trends.get('provider_failover_count_sequence', []))}`",
         f"- fallback_probe_failed_sequence: `{json.dumps(trends.get('fallback_probe_failed_sequence', []))}`",
         f"- adaptive_candidate_quarantined_count_sequence: `{json.dumps(trends.get('adaptive_candidate_quarantined_count_sequence', []))}`",
+        f"- adaptive_candidate_ttl_expired_count_sequence: `{json.dumps(trends.get('adaptive_candidate_ttl_expired_count_sequence', []))}`",
         f"- stop_reason_sequence: `{json.dumps(trends.get('stop_reason_sequence', []))}`",
         f"- provider_usage_by_provider_total: `{json.dumps(agg.get('provider_usage_by_provider', {}), sort_keys=True)}`",
     ]
@@ -1317,7 +1449,8 @@ def run_live_pilot_campaign(
             state_path.write_text(json.dumps(state, sort_keys=True, indent=2), encoding="utf-8")
 
     aggregate_clean = _cleanup_campaign_rollup_for_output(aggregate_rollup)
-    campaign_gate = _evaluate_live_pilot_promotion_gates(aggregate_clean, promotion_gate_config)
+    gate_rollup = _build_campaign_adaptive_gate_rollup(aggregate_clean, campaign_extra_summary)
+    campaign_gate = _evaluate_live_pilot_promotion_gates(gate_rollup, promotion_gate_config)
     campaign_summary = {
         "campaign_id": state.get("campaign_id") or campaign_id,
         "target_runs": campaign_runs,
@@ -2653,6 +2786,9 @@ def _main() -> int:
     p.add_argument("--adaptive-fallback-candidate-ordering", action="store_true")
     p.add_argument("--adaptive-provider-ordering", action="store_true")
     p.add_argument("--adaptive-candidate-quarantine-threshold", type=int, default=3)
+    p.add_argument("--adaptive-candidate-quarantine-ttl-hours", type=float, default=72.0)
+    p.add_argument("--adaptive-reliability-candidate-decay-factor", type=float, default=0.9)
+    p.add_argument("--adaptive-reliability-provider-decay-factor", type=float, default=0.95)
     p.add_argument("--alert-on-fallback-pool-quality-degraded", action="store_true")
     p.add_argument("--candidate-list-json", default="")
     p.add_argument("--candidate-list-json-path", default="")
@@ -2732,6 +2868,10 @@ def _main() -> int:
         candidate_list = json.loads(args.candidate_list_json)
     fallback_candidate_list = None
     adaptive_reliability_state = load_adaptive_reliability_state(str(args.adaptive_reliability_state_json_path or ""))
+    ars_meta = dict(adaptive_reliability_state.get("meta") or {})
+    ars_meta["candidate_decay_factor"] = float(args.adaptive_reliability_candidate_decay_factor or 0.9)
+    ars_meta["provider_decay_factor"] = float(args.adaptive_reliability_provider_decay_factor or 0.95)
+    adaptive_reliability_state["meta"] = ars_meta
     adaptive_fallback_summary: dict[str, Any] = {}
     adaptive_provider_order_summary: dict[str, Any] = {}
     if args.fallback_candidate_list_json_path:
@@ -2747,6 +2887,7 @@ def _main() -> int:
             reliability_state=adaptive_reliability_state,
             enabled=bool(args.adaptive_fallback_candidate_ordering),
             quarantine_failure_threshold=int(args.adaptive_candidate_quarantine_threshold or 3),
+            quarantine_ttl_seconds=float(args.adaptive_candidate_quarantine_ttl_hours or 0.0) * 3600.0,
         )
         fallback_candidate_list = list(reordered.get("candidates") or [])
         adaptive_fallback_summary.update(dict(reordered.get("summary") or {}))

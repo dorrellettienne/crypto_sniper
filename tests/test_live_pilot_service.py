@@ -13,6 +13,7 @@ from src.live.live_pilot_service import (
     _build_live_pilot_volatility_guard_from_config,
     _format_human_live_pilot_summary,
     _extract_campaign_report_summary,
+    _evaluate_live_pilot_promotion_gates,
     load_adaptive_reliability_state,
     _validate_live_auto_window_guardrails,
     probe_fallback_candidates_preflight,
@@ -1820,3 +1821,65 @@ def test_extract_campaign_report_summary_includes_adaptive_fields():
     assert s["adaptive_candidate_reordering_applied"] is True
     assert s["adaptive_candidate_quarantined_count"] == 2
     assert s["adaptive_provider_order_applied"] is True
+
+
+def test_adaptive_reorder_fallback_candidates_respects_quarantine_ttl():
+    old_ms = 1
+    state = {
+        "candidate_stats": {
+            "OLD_BAD": {"probe_failed": 4, "last_negative_unix_ms": old_ms},
+            "NEW_BAD": {"probe_failed": 4, "last_negative_unix_ms": 9999999999999},
+        }
+    }
+    candidates = [
+        {"token_address": "OLD_BAD", "symbol": "OLD_BAD", "entry_price": 1, "usd_size": 1},
+        {"token_address": "NEW_BAD", "symbol": "NEW_BAD", "entry_price": 1, "usd_size": 1},
+    ]
+    out = adaptive_reorder_fallback_candidates(
+        candidates,
+        reliability_state=state,
+        enabled=True,
+        quarantine_failure_threshold=3,
+        quarantine_ttl_seconds=60.0,
+    )
+    ordered = [c["token_address"] for c in out["candidates"]]
+    assert ordered == ["OLD_BAD"]
+    assert out["summary"]["adaptive_candidate_quarantined_count"] == 1
+    assert out["summary"]["adaptive_candidate_ttl_expired_count"] == 1
+
+
+def test_update_adaptive_reliability_state_from_campaign_report_applies_decay():
+    state = {
+        "candidate_stats": {"A": {"probe_ok": 10}},
+        "provider_stats": {"dexscreener": {"successful_runs": 10}},
+        "meta": {"candidate_decay_factor": 0.5, "provider_decay_factor": 0.5},
+    }
+    report = {"campaign_summary": {"fallback_candidate_probe_summary": {}}, "runs": []}
+    out = update_adaptive_reliability_state_from_campaign_report(state, report)
+    assert out["candidate_stats"]["A"]["probe_ok"] == 5.0
+    assert out["provider_stats"]["dexscreener"]["successful_runs"] == 5.0
+    assert "last_decay_applied_unix_ms" in out["meta"]
+
+
+def test_promotion_gate_can_fail_on_adaptive_quarantine_metrics():
+    rollup = {
+        "live_finalized_count": 3,
+        "live_reconciliation_mismatch_count": 0,
+        "pause_latch_events": 0,
+        "quote_vs_settlement_mismatch_count": 0,
+        "economics_samples_count": 1,
+        "worst_realized_slippage_bps": 10.0,
+        "signal_provider_metrics": {"fetch_transport_errors": 0, "fetch_endpoint_failure_events": 0},
+        "adaptive_candidate_quarantined_count": 2,
+        "adaptive_fallback_quality_degraded_events": 1,
+    }
+    gate = _evaluate_live_pilot_promotion_gates(
+        rollup,
+        {
+            "max_adaptive_candidate_quarantined_count": 1,
+            "max_adaptive_fallback_quality_degraded_events": 0,
+        },
+    )
+    assert gate["status"] == "fail"
+    assert "max_adaptive_candidate_quarantined_count" in gate["failed_checks"]
+    assert "max_adaptive_fallback_quality_degraded_events" in gate["failed_checks"]
