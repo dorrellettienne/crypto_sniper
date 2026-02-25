@@ -51,6 +51,28 @@ Key reminders before moving from paper/pre-live into real-money execution.
 - The regression suite is now a core safety asset.
 - Add tests for every risky live-path feature before enabling real execution.
 
+## 9. Volatility Risk Is Both Edge and Drawdown Source
+- Volatility creates profit opportunity, but it also amplifies drawdowns and execution risk.
+- Core volatility-related risks to track explicitly:
+  - thin liquidity pools
+  - momentum reversals
+  - whale dumps
+  - clustered losing streaks
+  - market regime shifts
+  - slippage
+- Current contingencies in repo:
+  - liquidity / token-age safety filtering (`TokenSafetyFilter`, DexScreener min-liquidity filters)
+  - strict allowlist + order-cap + kill-switch startup gates
+  - max daily loss and max concurrent position risk limits
+  - token cooldown and pilot single-position constraints
+  - quote-aware cost/slippage estimation for pre-live/live preview exports
+  - audit logs + rollups for post-run review / anomaly detection
+- Remaining gaps (future hardening):
+  - explicit volatility/regime detector with auto de-risking (pause, smaller size, tighter filters)
+  - streak-based throttle/circuit breaker (pause after N losses or drawdown threshold)
+  - whale-dump heuristics / abnormal flow shock filters
+  - dynamic slippage tolerance by liquidity + volatility state
+
 ## Top 3 Reminders
 1. Fees/slippage can flip paper winners into live losers.
 2. Signal quality + token filtering will matter more than most strategy tweaks.

@@ -14,6 +14,9 @@ class DexExecutorProtocol(Protocol):
     def build_sell_order(self, position_id: int, exit_price: float) -> dict[str, Any]: ...
     def build_stop_loss_order(self, position_id: int, stop_percent: float) -> dict[str, Any]: ...
     def build_submit_preview(self, order_preview: dict[str, Any], client_order_id: str) -> dict[str, Any]: ...
+    def build_submit_request_stub(self, order_preview: dict[str, Any], client_order_id: str) -> dict[str, Any]: ...
+    def build_unsigned_submit_stub(self, order_preview: dict[str, Any], client_order_id: str) -> dict[str, Any]: ...
+    def build_signed_submit_stub(self, order_preview: dict[str, Any], client_order_id: str) -> dict[str, Any]: ...
 
 
 class NoopRpcClient:
@@ -63,4 +66,34 @@ class NoopDexExecutor:
             "order_action": order_preview.get("action"),
             "ready": False,
             "reason": "noop_executor_preview_only",
+        }
+
+    def build_submit_request_stub(self, order_preview: dict[str, Any], client_order_id: str) -> dict[str, Any]:
+        return {
+            "mode": "submit_request_stub",
+            "client_order_id": str(client_order_id),
+            "order_action": (order_preview or {}).get("action"),
+            "ready": False,
+            "send_enabled": False,
+            "reason": "noop_executor_submit_stub_only",
+        }
+
+    def build_unsigned_submit_stub(self, order_preview: dict[str, Any], client_order_id: str) -> dict[str, Any]:
+        return {
+            "mode": "unsigned_submit_stub",
+            "client_order_id": str(client_order_id),
+            "order_action": (order_preview or {}).get("action"),
+            "unsigned_transaction_base64": None,
+            "ready": False,
+            "reason": "noop_executor_no_unsigned_tx",
+        }
+
+    def build_signed_submit_stub(self, order_preview: dict[str, Any], client_order_id: str) -> dict[str, Any]:
+        return {
+            "mode": "signed_submit_stub",
+            "client_order_id": str(client_order_id),
+            "order_action": (order_preview or {}).get("action"),
+            "transaction_base64": None,
+            "ready": False,
+            "reason": "noop_executor_no_signed_tx",
         }

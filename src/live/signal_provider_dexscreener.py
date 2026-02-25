@@ -116,9 +116,23 @@ class DexScreenerSignalProvider(PollingSignalProvider):
         self._min_liquidity_usd = min_liquidity_usd
         self._max_pair_age_seconds = max_pair_age_seconds
         self._now_ts_fn = now_ts_fn or _now_ts
+        self._last_fetch_meta: dict[str, Any] = {}
+        self._runtime_counters = {
+            "fetch_retry_events": 0,
+            "fetch_stale_payload_events": 0,
+            "fetch_transport_errors": 0,
+        }
+        self._last_fetch_meta_index = 0
 
         def adapted_fetcher():
             payload = fetcher()
+            if isinstance(payload, dict):
+                meta = payload.get("_fetch_meta")
+                if isinstance(meta, dict):
+                    self._last_fetch_meta = dict(meta)
+                    self._runtime_counters["fetch_retry_events"] += int(meta.get("retry_events", 0) or 0)
+                    if bool(meta.get("stale_payload", False)):
+                        self._runtime_counters["fetch_stale_payload_events"] += 1
             return parse_dexscreener_pairs_to_signals(
                 payload,
                 default_usd_size=self._default_usd_size,
@@ -129,3 +143,23 @@ class DexScreenerSignalProvider(PollingSignalProvider):
             )
 
         super().__init__(adapted_fetcher, swallow_fetch_errors=swallow_fetch_errors)
+
+    def poll(self) -> int:
+        before_errors = self.fetch_errors
+        count = super().poll()
+        if self.fetch_errors > before_errors:
+            self._runtime_counters["fetch_transport_errors"] += int(self.fetch_errors - before_errors)
+        return count
+
+    def consume_runtime_metrics_delta(self) -> dict[str, Any]:
+        current = dict(self._runtime_counters)
+        last = getattr(self, "_runtime_counters_snapshot", {"fetch_retry_events": 0, "fetch_stale_payload_events": 0, "fetch_transport_errors": 0})
+        delta = {
+            "fetch_retry_events": int(current["fetch_retry_events"] - last.get("fetch_retry_events", 0)),
+            "fetch_stale_payload_events": int(current["fetch_stale_payload_events"] - last.get("fetch_stale_payload_events", 0)),
+            "fetch_transport_errors": int(current["fetch_transport_errors"] - last.get("fetch_transport_errors", 0)),
+            "last_fetch_meta": dict(self._last_fetch_meta or {}),
+            "last_error": str(self.last_error or ""),
+        }
+        self._runtime_counters_snapshot = current
+        return delta

@@ -1,0 +1,55 @@
+{
+  "profiles": [
+    {
+      "name": "strict",
+      "require_buy_route": true,
+      "require_sell_route": true,
+      "require_sanity_probe_route": true,
+      "fail_closed_on_check_error": true,
+      "fail_closed_on_quote_error": true,
+      "fail_closed_on_rpc_error": true,
+      "max_buy_price_impact_pct": 10.0,
+      "min_buy_liquidity_usd": 5000.0,
+      "sanity_probe_usd_size": 10.0,
+      "max_quote_age_ms": 1500,
+      "quote_max_attempts": 2,
+      "rpc_max_attempts": 2,
+      "quote_retry_backoff_seconds": 0.05,
+      "rpc_retry_backoff_seconds": 0.05
+    },
+    {
+      "name": "pilot",
+      "require_buy_route": true,
+      "require_sell_route": true,
+      "require_sanity_probe_route": false,
+      "fail_closed_on_check_error": true,
+      "fail_closed_on_quote_error": true,
+      "fail_closed_on_rpc_error": true,
+      "max_buy_price_impact_pct": 12.5,
+      "min_buy_liquidity_usd": 3000.0,
+      "sanity_probe_usd_size": 5.0,
+      "max_quote_age_ms": 2500,
+      "quote_max_attempts": 2,
+      "rpc_max_attempts": 2,
+      "quote_retry_backoff_seconds": 0.05,
+      "rpc_retry_backoff_seconds": 0.05
+    },
+    {
+      "name": "relaxed",
+      "require_buy_route": true,
+      "require_sell_route": false,
+      "require_sanity_probe_route": false,
+      "fail_closed_on_check_error": false,
+      "fail_closed_on_quote_error": false,
+      "fail_closed_on_rpc_error": false,
+      "max_buy_price_impact_pct": 20.0,
+      "min_buy_liquidity_usd": null,
+      "sanity_probe_usd_size": null,
+      "max_quote_age_ms": null,
+      "quote_max_attempts": 1,
+      "rpc_max_attempts": 1,
+      "quote_retry_backoff_seconds": 0.0,
+      "rpc_retry_backoff_seconds": 0.0
+    }
+  ]
+}

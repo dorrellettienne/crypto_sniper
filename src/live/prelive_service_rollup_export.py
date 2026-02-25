@@ -36,6 +36,17 @@ def save_service_rollup_csv(rollup_payload: dict, output_path: str) -> str:
     rollup = rollup_payload.get("rollup") or {}
     for key, value in rollup.items():
         flat[key] = value
+    mechanical_by_reason = rollup.get("mechanical_blocked_by_reason")
+    if isinstance(mechanical_by_reason, dict) and mechanical_by_reason:
+        top_reason, top_count = sorted(
+            mechanical_by_reason.items(),
+            key=lambda kv: (-int(kv[1]), str(kv[0])),
+        )[0]
+        flat["mechanical_blocked_top_reason"] = str(top_reason)
+        flat["mechanical_blocked_top_reason_count"] = int(top_count)
+    elif "mechanical_blocked_by_reason" in rollup:
+        flat["mechanical_blocked_top_reason"] = ""
+        flat["mechanical_blocked_top_reason_count"] = 0
 
     with path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=list(flat.keys()))

@@ -44,3 +44,14 @@ def test_save_service_rollup_csv(tmp_path):
     assert len(rows) == 1
     assert rows[0]["loop_name"] == "prelive"
     assert rows[0]["signals_seen"] == "3"
+
+
+def test_save_service_rollup_csv_flattens_top_mechanical_reason(tmp_path):
+    out = tmp_path / "rollup.csv"
+    payload = _payload()
+    payload["rollup"]["mechanical_blocked_by_reason"] = {"no_buy_route": 3, "liquidity_below_min": 1}
+    save_service_rollup_csv(payload, str(out))
+    with out.open("r", encoding="utf-8", newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert rows[0]["mechanical_blocked_top_reason"] == "no_buy_route"
+    assert rows[0]["mechanical_blocked_top_reason_count"] == "3"

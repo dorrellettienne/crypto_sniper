@@ -56,29 +56,82 @@ def _emit_preview_events(audit_log_path: str, action: str, preview_payload: dict
             "live_confirmation_preview",
             {"action": action, "confirmation_preview": md.get("confirmation_preview"), "client_order_id": md.get("client_order_id")},
         )
+    if md.get("submit_dispatch") is not None:
+        append_audit_event(
+            audit_log_path,
+            "live_submit_dispatch_preview",
+            {
+                "action": action,
+                "submit_dispatch": md.get("submit_dispatch"),
+                "client_order_id": md.get("client_order_id"),
+            },
+        )
+    if md.get("manual_submit_gate") is not None:
+        append_audit_event(
+            audit_log_path,
+            "live_manual_submit_gate_preview",
+            {
+                "action": action,
+                "manual_submit_gate": md.get("manual_submit_gate"),
+                "client_order_id": md.get("client_order_id"),
+            },
+        )
+
+
+def _build_preview_live_send_summary(previews: dict) -> dict:
+    actions = ["buy", "sell", "stop_loss"]
+    out = {
+        "dispatch_reasons": {},
+        "runtime_counters_last_buy": {},
+        "submitted_signatures": [],
+        "pause_latched_actions": [],
+    }
+    for action in actions:
+        md = ((previews or {}).get(action) or {}).get("metadata") or {}
+        dispatch = md.get("submit_dispatch") or {}
+        if not isinstance(dispatch, dict):
+            continue
+        reason = str(dispatch.get("reason") or "")
+        if reason:
+            out["dispatch_reasons"][reason] = int(out["dispatch_reasons"].get(reason, 0)) + 1
+        sig = dispatch.get("submitted_signature")
+        if sig:
+            out["submitted_signatures"].append(str(sig))
+        if bool(dispatch.get("pause_latched", False)):
+            out["pause_latched_actions"].append(action)
+        if action == "buy" and isinstance(dispatch.get("runtime_counters"), dict):
+            out["runtime_counters_last_buy"] = dict(dispatch.get("runtime_counters") or {})
+    out["submitted_signature_count"] = len(out["submitted_signatures"])
+    return out
+
+
+def _build_preview_adapter_config(audit_log_dir: str, overrides: dict | None = None) -> dict:
+    cfg = {
+        "live_enabled": True,
+        "rpc_url": "https://rpc.example",
+        "wallet_public_key": "wallet_pub",
+        "dex_name": "JUPITER",
+        "allowlist_tokens": ["TOKEN_A"],
+        "max_order_usd_cap": 10,
+        "pilot_mode": True,
+        "pilot_hard_max_order_usd_cap": 25,
+        "audit_log_path": str(Path(audit_log_dir) / "pilot_audit.jsonl"),
+        "candidate_preset_name": "candidate_final_v1_tp_higher_034",
+        "live_submit_skeleton_enabled": True,
+        "submit_skeleton_confirmation_outcomes": ["pending", "confirmed"],
+    }
+    if overrides:
+        cfg.update(dict(overrides))
+    return cfg
 
 
 def run_live_execution_preview_export(
     output_json_path: str | None = None,
     output_json_dir: str | None = None,
     audit_log_dir: str = "data/exports",
+    adapter_config_overrides: dict | None = None,
 ) -> dict:
-    adapter = LiveExecutionAdapter(
-        {
-            "live_enabled": True,
-            "rpc_url": "https://rpc.example",
-            "wallet_public_key": "wallet_pub",
-            "dex_name": "JUPITER",
-            "allowlist_tokens": ["TOKEN_A"],
-            "max_order_usd_cap": 10,
-            "pilot_mode": True,
-            "pilot_hard_max_order_usd_cap": 25,
-            "audit_log_path": str(Path(audit_log_dir) / "pilot_audit.jsonl"),
-            "candidate_preset_name": "candidate_final_v1_tp_higher_034",
-            "live_submit_skeleton_enabled": True,
-            "submit_skeleton_confirmation_outcomes": ["pending", "confirmed"],
-        }
-    )
+    adapter = LiveExecutionAdapter(_build_preview_adapter_config(audit_log_dir, adapter_config_overrides))
 
     previews = {
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -93,7 +146,13 @@ def run_live_execution_preview_export(
     _emit_preview_events(audit_log_path, "buy", previews["buy"])
     _emit_preview_events(audit_log_path, "sell", previews["sell"])
     _emit_preview_events(audit_log_path, "stop_loss", previews["stop_loss"])
-    append_audit_event(audit_log_path, "live_execution_preview_run_completed", {"actions": ["buy", "sell", "stop_loss"]})
+    live_send_summary = _build_preview_live_send_summary(previews)
+    append_audit_event(audit_log_path, "live_execution_preview_live_send_summary", live_send_summary)
+    append_audit_event(
+        audit_log_path,
+        "live_execution_preview_run_completed",
+        {"actions": ["buy", "sell", "stop_loss"], "live_send_summary": live_send_summary},
+    )
 
     written_json_path = None
     if output_json_path:
@@ -114,6 +173,12 @@ if __name__ == "__main__":
     parser.add_argument("--export-json-path", type=str, default=None)
     parser.add_argument("--export-json-dir", type=str, default="data/exports")
     parser.add_argument("--audit-log-dir", type=str, default="data/exports")
+    parser.add_argument("--manual-submit-approval-enabled", action="store_true")
+    parser.add_argument("--manual-submit-required-token", type=str, default="")
+    parser.add_argument("--manual-submit-provided-token", type=str, default="")
+    parser.add_argument("--manual-submit-mode", type=str, default="")
+    parser.add_argument("--live-send-enabled", action="store_true")
+    parser.add_argument("--live-send-network-enabled", action="store_true")
     parser.add_argument("--allow-unsafe-paths", action="store_true")
     args = parser.parse_args()
 
@@ -125,10 +190,25 @@ if __name__ == "__main__":
         if args.audit_log_dir:
             ensure_dir_within_base(args.audit_log_dir)
 
+    adapter_config_overrides = {}
+    if args.manual_submit_approval_enabled:
+        adapter_config_overrides["manual_submit_approval_enabled"] = True
+    if args.manual_submit_required_token:
+        adapter_config_overrides["manual_submit_required_token"] = args.manual_submit_required_token
+    if args.manual_submit_provided_token:
+        adapter_config_overrides["manual_submit_provided_token"] = args.manual_submit_provided_token
+    if args.manual_submit_mode:
+        adapter_config_overrides["manual_submit_mode"] = args.manual_submit_mode
+    if args.live_send_enabled:
+        adapter_config_overrides["live_send_enabled"] = True
+    if args.live_send_network_enabled:
+        adapter_config_overrides["live_send_network_enabled"] = True
+
     out = run_live_execution_preview_export(
         output_json_path=args.export_json_path,
         output_json_dir=None if args.export_json_path else args.export_json_dir,
         audit_log_dir=args.audit_log_dir,
+        adapter_config_overrides=adapter_config_overrides or None,
     )
     print("=== LIVE EXECUTION PREVIEW EXPORT COMPLETE ===")
     print(f"Preview JSON: {out['preview_json_path']}")

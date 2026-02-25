@@ -1,0 +1,20 @@
+{
+  "live_enabled": true,
+  "pilot_mode": true,
+  "rpc_url": "https://rpc.example",
+  "wallet_public_key": "wallet_pub",
+  "dex_name": "JUPITER",
+  "allowlist_tokens": ["TOKEN_A"],
+  "max_order_usd_cap": 10,
+  "pilot_hard_max_order_usd_cap": 25,
+  "live_submit_skeleton_enabled": true,
+  "manual_submit_approval_enabled": true,
+  "manual_submit_required_token": "APPROVE_ME",
+  "manual_submit_provided_token": "APPROVE_ME",
+  "manual_submit_mode": "buy_only",
+  "live_send_enabled": true,
+  "live_send_network_enabled": true,
+  "submit_signer_command": ["python", "examples/signer_demo.py"],
+  "submit_signer_command_timeout_seconds": 10
+}
+

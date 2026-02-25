@@ -78,3 +78,30 @@ def test_dexscreener_signal_provider_swallows_parse_errors_when_enabled():
     provider = DexScreenerSignalProvider(lambda: {"pairs": "bad"}, swallow_fetch_errors=True)
     assert provider.get_next_signal() is None
     assert provider.fetch_errors == 1
+
+
+def test_dexscreener_signal_provider_exposes_transport_metrics_delta():
+    state = {"n": 0}
+
+    def fetcher():
+        state["n"] += 1
+        if state["n"] == 1:
+            return {
+                "pairs": _payload()["pairs"],
+                "_fetch_meta": {"retry_events": 2, "stale_payload": False},
+            }
+        return {
+            "pairs": [],
+            "_fetch_meta": {"retry_events": 0, "stale_payload": True},
+        }
+
+    provider = DexScreenerSignalProvider(fetcher, chain_id="solana", now_ts_fn=lambda: 1700000060)
+    assert provider.get_next_signal() is not None
+    d1 = provider.consume_runtime_metrics_delta()
+    assert d1["fetch_retry_events"] == 2
+    assert d1["fetch_stale_payload_events"] == 0
+
+    assert provider.get_next_signal() is None
+    d2 = provider.consume_runtime_metrics_delta()
+    assert d2["fetch_retry_events"] == 0
+    assert d2["fetch_stale_payload_events"] == 1

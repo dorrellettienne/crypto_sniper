@@ -12,6 +12,14 @@ from src.live.idempotency import (
     build_request_fingerprint,
 )
 from src.live.interfaces import SignalProvider, TradeSignal
+from src.live.live_dex_quote_executor import QuoteOnlyDexExecutor
+from src.live.live_rpc_client import HttpRpcClient
+from src.live.mechanical_safety_filter import JupiterQuoteMechanicalChecker
+from src.live.mechanical_safety_profiles import (
+    DEFAULT_MECHANICAL_SAFETY_PROFILE_NAME,
+    DEFAULT_MECHANICAL_SAFETY_PROFILES_PATH,
+    get_mechanical_safety_profile,
+)
 from src.live.prelive_orchestrator import execute_buy_with_controls, execute_sell_with_retry
 from src.live.prelive_risk_engine import PreLiveRiskEngine
 from src.live.path_security import ensure_dir_within_base, ensure_path_within_base
@@ -22,8 +30,13 @@ from src.live.policy_profiles import (
 )
 from src.live.signal_provider_file import FileSignalProvider
 from src.live.signal_provider_dexscreener import DexScreenerSignalProvider
+from src.live.dexscreener_transport import DexScreenerHttpPairsFetcher
 from src.live.signal_provider_stub import StubSignalProvider
 from src.live.token_safety_filter import TokenSafetyFilter
+from src.live.mechanical_safety_filter import MechanicalSafetyFilter
+from src.live.solana_mint_safety import check_mint_safety_detailed
+from src.live.network_reliability import RetryingQuoteDexExecutor, RetryingRpcMintClient
+from src.live.volatility_guard import VolatilityGuard
 from src.live.token_safety_profiles import (
     DEFAULT_TOKEN_SAFETY_PROFILE_NAME,
     DEFAULT_TOKEN_SAFETY_PROFILES_PATH,
@@ -35,11 +48,19 @@ from src.live.prelive_service_rollup_export import (
     save_service_rollup_csv,
     save_service_rollup_json,
 )
+from src.live.prelive_ops import (
+    apply_prelive_ops_preset,
+    build_effective_prelive_config_summary,
+    build_session_incident_report,
+    save_session_incident_report_json,
+    validate_prelive_preflight,
+)
 from src.runner.paper_sim_candidate_runner import (
     DEFAULT_CANDIDATE_PRESET_NAME,
     DEFAULT_CANDIDATE_PRESETS_PATH,
     get_candidate_preset,
 )
+from src.execution.persistence import get_today_realized_pnl, get_trade_streaks
 
 
 def _default_stub_signals(iterations: int) -> list[TradeSignal]:
@@ -88,7 +109,18 @@ def _build_signal_provider_from_args(args, dexscreener_fetcher=None):
         return FileSignalProvider.from_path(args.signals_file_path)
     if getattr(args, "use_dexscreener_signals", False):
         if dexscreener_fetcher is None:
-            dexscreener_fetcher = lambda: {"pairs": []}
+            fetch_url = str(getattr(args, "dexscreener_fetch_url", "") or "").strip()
+            if fetch_url:
+                dexscreener_fetcher = DexScreenerHttpPairsFetcher(
+                    url=fetch_url,
+                    timeout_seconds=float(getattr(args, "dexscreener_fetch_timeout_seconds", 5.0)),
+                    max_attempts=max(1, int(getattr(args, "dexscreener_fetch_max_attempts", 1))),
+                    retry_backoff_seconds=float(getattr(args, "dexscreener_fetch_retry_backoff_seconds", 0.0)),
+                    max_payload_age_ms=getattr(args, "dexscreener_max_payload_age_ms", None),
+                    fail_on_stale_payload=not bool(getattr(args, "dexscreener_allow_stale_payloads", False)),
+                )
+            else:
+                dexscreener_fetcher = lambda: {"pairs": []}
         return DexScreenerSignalProvider(
             dexscreener_fetcher,
             default_usd_size=100.0,
@@ -115,6 +147,207 @@ def _rollup_export_payload(
         "policy_profile_name": policy_profile_name,
         "rollup": _copy_rollup(rollup),
     }
+
+
+def _build_mechanical_safety_filter_from_args(args) -> MechanicalSafetyFilter | None:
+    if not bool(getattr(args, "enable_mechanical_safety_filter", False)):
+        return None
+
+    profile = None
+    if bool(getattr(args, "use_mechanical_safety_profile", False)):
+        profile = get_mechanical_safety_profile(
+            profile_name=getattr(args, "mechanical_safety_profile_name", DEFAULT_MECHANICAL_SAFETY_PROFILE_NAME),
+            profiles_path=getattr(args, "mechanical_safety_profiles_json_path", DEFAULT_MECHANICAL_SAFETY_PROFILES_PATH),
+        )
+
+    rpc_url = str(getattr(args, "mechanical_rpc_url", "") or "").strip()
+    quote_url = str(getattr(args, "mechanical_quote_url", "") or "").strip()
+    profile_quote_fail_closed = None if not profile else bool(profile.get("fail_closed_on_quote_error", profile.get("fail_closed_on_check_error", True)))
+    profile_rpc_fail_closed = None if not profile else bool(profile.get("fail_closed_on_rpc_error", profile.get("fail_closed_on_check_error", True)))
+
+    mint_checker = None
+    if rpc_url:
+        rpc_client_base = HttpRpcClient(
+            rpc_url=rpc_url,
+            timeout_seconds=float(getattr(args, "mechanical_rpc_timeout_seconds", 5.0)),
+        )
+        rpc_client = RetryingRpcMintClient(
+            rpc_client_base,
+            max_attempts=(
+                int(getattr(args, "mechanical_rpc_max_attempts", 0) or 0)
+                if getattr(args, "mechanical_rpc_max_attempts", None) not in (None, 0)
+                else int((profile or {}).get("rpc_max_attempts", 1))
+            ),
+            backoff_seconds=(
+                float(getattr(args, "mechanical_rpc_retry_backoff_seconds", 0.0) or 0.0)
+                if getattr(args, "mechanical_rpc_retry_backoff_seconds", None) not in (None, 0, 0.0)
+                else float((profile or {}).get("rpc_retry_backoff_seconds", 0.0))
+            ),
+        )
+        mint_checker = lambda mint, rpc_client=rpc_client: check_mint_safety_detailed(rpc_client=rpc_client, mint_address=mint)
+
+    quote_checker = None
+    if quote_url:
+        dex_executor_base = QuoteOnlyDexExecutor(
+            quote_url=quote_url,
+            timeout_seconds=float(getattr(args, "mechanical_quote_timeout_seconds", 5.0)),
+            quote_only_mode=True,
+        )
+        dex_executor = RetryingQuoteDexExecutor(
+            dex_executor_base,
+            max_attempts=(
+                int(getattr(args, "mechanical_quote_max_attempts", 0) or 0)
+                if getattr(args, "mechanical_quote_max_attempts", None) not in (None, 0)
+                else int((profile or {}).get("quote_max_attempts", 1))
+            ),
+            backoff_seconds=(
+                float(getattr(args, "mechanical_quote_retry_backoff_seconds", 0.0) or 0.0)
+                if getattr(args, "mechanical_quote_retry_backoff_seconds", None) not in (None, 0, 0.0)
+                else float((profile or {}).get("quote_retry_backoff_seconds", 0.0))
+            ),
+        )
+        quote_checker = JupiterQuoteMechanicalChecker(
+            dex_executor,
+            input_mint=str(getattr(args, "mechanical_quote_input_mint", "USDC")),
+            quote_output_mint=str(getattr(args, "mechanical_quote_output_mint", "USDC")),
+            slippage_bps=int(getattr(args, "mechanical_quote_slippage_bps", 50)),
+            check_sell_route=bool(
+                getattr(args, "mechanical_require_sell_route", False)
+                or bool((profile or {}).get("require_sell_route", False))
+            ),
+            sanity_probe_usd_size=(
+                getattr(args, "mechanical_sanity_probe_usd_size", None)
+                if getattr(args, "mechanical_sanity_probe_usd_size", None) is not None
+                else (profile or {}).get("sanity_probe_usd_size")
+            ),
+            max_quote_age_ms=(
+                getattr(args, "mechanical_max_quote_age_ms", None)
+                if getattr(args, "mechanical_max_quote_age_ms", None) is not None
+                else (profile or {}).get("max_quote_age_ms")
+            ),
+        )
+
+    return MechanicalSafetyFilter(
+        mint_safety_checker=mint_checker,
+        quote_checker=quote_checker,
+        require_buy_route=bool(
+            getattr(args, "mechanical_require_buy_route", True)
+            if not profile
+            else profile.get("require_buy_route", True)
+        ),
+        require_sell_route=bool(
+            getattr(args, "mechanical_require_sell_route", False)
+            if not profile
+            else profile.get("require_sell_route", False)
+        ),
+        require_sanity_probe_route=bool((profile or {}).get("require_sanity_probe_route", False)),
+        min_buy_liquidity_usd=(
+            getattr(args, "mechanical_min_buy_liquidity_usd", None)
+            if getattr(args, "mechanical_min_buy_liquidity_usd", None) is not None
+            else (profile or {}).get("min_buy_liquidity_usd")
+        ),
+        max_buy_price_impact_pct=(
+            getattr(args, "mechanical_max_buy_price_impact_pct", None)
+            if getattr(args, "mechanical_max_buy_price_impact_pct", None) is not None
+            else (profile or {}).get("max_buy_price_impact_pct")
+        ),
+        fail_closed_on_check_error=(
+            not bool(getattr(args, "mechanical_fail_open", False))
+            if not profile
+            else bool(profile.get("fail_closed_on_check_error", True))
+        ),
+        fail_closed_on_quote_error=(
+            None
+            if profile_quote_fail_closed is None
+            else bool(profile_quote_fail_closed)
+        ),
+        fail_closed_on_mint_error=(
+            None
+            if profile_rpc_fail_closed is None
+            else bool(profile_rpc_fail_closed)
+        ),
+    )
+
+
+def _build_volatility_guard_from_args(args) -> VolatilityGuard | None:
+    enabled = bool(getattr(args, "enable_volatility_guard", False))
+    if not enabled:
+        return None
+    return VolatilityGuard(
+        enabled=True,
+        current_loss_streak_fn=lambda: int((get_trade_streaks() or {}).get("current_loss_streak", 0)),
+        today_realized_pnl_fn=lambda: float(get_today_realized_pnl()),
+        max_loss_streak_block=getattr(args, "volatility_max_loss_streak_block", None),
+        loss_streak_derisk_threshold=getattr(args, "volatility_loss_streak_derisk_threshold", None),
+        max_session_drawdown_usd_block=getattr(args, "volatility_max_session_drawdown_usd_block", None),
+        session_drawdown_derisk_threshold_usd=getattr(args, "volatility_session_drawdown_derisk_threshold_usd", None),
+        derisk_size_multiplier=float(getattr(args, "volatility_derisk_size_multiplier", 1.0)),
+        derisk_min_usd_size=getattr(args, "volatility_derisk_min_usd_size", None),
+    )
+
+
+def _build_execution_realism_config_from_args(args) -> dict | None:
+    if not bool(getattr(args, "enable_execution_realism", False)):
+        return None
+    return {
+        "enabled": True,
+        "simulated_latency_ms": int(getattr(args, "execution_realism_latency_ms", 0) or 0),
+        "max_quote_age_ms_at_fill": getattr(args, "execution_realism_max_quote_age_ms_at_fill", None),
+        "fill_ratio": float(getattr(args, "execution_realism_fill_ratio", 1.0) or 0.0),
+        "expected_slippage_bps": float(getattr(args, "execution_realism_expected_slippage_bps", 0.0) or 0.0),
+        "volatility_penalty_bps": float(getattr(args, "execution_realism_volatility_penalty_bps", 0.0) or 0.0),
+        "latency_penalty_bps_per_100ms": float(getattr(args, "execution_realism_latency_penalty_bps_per_100ms", 0.0) or 0.0),
+        "max_realized_slippage_bps": getattr(args, "execution_realism_max_realized_slippage_bps", None),
+    }
+
+
+def _apply_mechanical_telemetry_to_rollup_and_audit(
+    *,
+    audit_log_path: str,
+    iteration: int,
+    rollup: dict[str, Any],
+    mechanical_assessment,
+) -> None:
+    details = mechanical_assessment.details or {}
+    telemetry = details.get("telemetry")
+    if not isinstance(telemetry, dict):
+        return
+    rollup["quote_retry_events"] += int(telemetry.get("quote_retry_events", 0) or 0)
+    rollup["rpc_retry_events"] += int(telemetry.get("rpc_retry_events", 0) or 0)
+    rollup["mechanical_check_errors"] += int(telemetry.get("mechanical_check_errors", 0) or 0)
+    rollup["quote_stale_blocked"] += int(telemetry.get("quote_stale_blocked", 0) or 0)
+    if int(telemetry.get("quote_retry_events", 0) or 0) > 0:
+        append_audit_event(
+            audit_log_path,
+            "mechanical_quote_retry",
+            {
+                "iteration": iteration,
+                "quote_retry_events": int(telemetry.get("quote_retry_events", 0) or 0),
+                "quote_attempts": telemetry.get("quote_attempts"),
+            },
+        )
+    if int(telemetry.get("rpc_retry_events", 0) or 0) > 0:
+        append_audit_event(
+            audit_log_path,
+            "mechanical_rpc_retry",
+            {
+                "iteration": iteration,
+                "rpc_retry_events": int(telemetry.get("rpc_retry_events", 0) or 0),
+                "rpc_attempts": telemetry.get("rpc_attempts"),
+            },
+        )
+    if telemetry.get("quote_error_classification") or telemetry.get("rpc_error_classification"):
+        append_audit_event(
+            audit_log_path,
+            "mechanical_check_error_classified",
+            {
+                "iteration": iteration,
+                "quote_error_classification": telemetry.get("quote_error_classification"),
+                "rpc_error_classification": telemetry.get("rpc_error_classification"),
+                "allowed": bool(mechanical_assessment.allowed),
+                "reason": str(mechanical_assessment.primary_reason or ""),
+            },
+        )
 
 
 def run_prelive_service_loop(
@@ -147,6 +380,9 @@ def run_prelive_service_loop(
     rollup_export_json_dir: str | None = None,
     rollup_export_csv_dir: str | None = None,
     idempotency_store_path: str | None = None,
+    mechanical_safety_filter: MechanicalSafetyFilter | None = None,
+    volatility_guard: VolatilityGuard | None = None,
+    execution_realism_config: dict | None = None,
     sleep_fn=None,
 ) -> dict[str, Any]:
     if max_iterations is not None and max_iterations <= 0:
@@ -160,7 +396,7 @@ def run_prelive_service_loop(
         sleep_fn = time.sleep
 
     audit_log_path = build_audit_log_path(audit_log_dir, prefix=loop_name)
-    adapter = DryRunExecutionAdapter()
+    adapter = DryRunExecutionAdapter(execution_realism=execution_realism_config)
     token_safety_profile = None
     if use_token_safety_profile:
         token_safety_profile = get_token_safety_profile(
@@ -224,10 +460,29 @@ def run_prelive_service_loop(
         "iterations": 0,
         "signals_seen": 0,
         "signals_missing": 0,
+        "signal_fetch_retry_events": 0,
+        "signal_fetch_errors": 0,
+        "signal_payload_stale_events": 0,
         "risk_allowed": 0,
         "risk_blocked": 0,
         "safety_allowed": 0,
         "safety_blocked": 0,
+        "mechanical_allowed": 0,
+        "mechanical_blocked": 0,
+        "mechanical_blocked_by_reason": {},
+        "mechanical_check_errors": 0,
+        "quote_retry_events": 0,
+        "rpc_retry_events": 0,
+        "quote_stale_blocked": 0,
+        "volatility_guard_allowed": 0,
+        "volatility_guard_blocked": 0,
+        "volatility_guard_derisked": 0,
+        "volatility_guard_blocked_by_reason": {},
+        "execution_full_fills": 0,
+        "execution_partial_fills": 0,
+        "execution_no_fills": 0,
+        "execution_stale_quote_rejects": 0,
+        "execution_slippage_rejects": 0,
         "buy_ok": 0,
         "buy_failed": 0,
         "sell_ok": 0,
@@ -273,8 +528,20 @@ def run_prelive_service_loop(
                 "min_token_age_seconds": safety_min_token_age_seconds,
                 "min_liquidity_usd": safety_min_liquidity_usd,
             },
+            "mechanical_safety_filter": (
+                mechanical_safety_filter.describe()
+                if mechanical_safety_filter and hasattr(mechanical_safety_filter, "describe")
+                else {"enabled": bool(mechanical_safety_filter)}
+            ),
+            "volatility_guard": (
+                volatility_guard.describe()
+                if volatility_guard and hasattr(volatility_guard, "describe")
+                else {"enabled": bool(volatility_guard)}
+            ),
+            "execution_realism": dict(execution_realism_config or {"enabled": False}),
             "signal_source": {
                 "provider_class": signal_provider.__class__.__name__,
+                "transport_metrics_supported": bool(hasattr(signal_provider, "consume_runtime_metrics_delta")),
             },
             "idempotency": {
                 "store_type": "file" if idempotency_store_path else "memory",
@@ -290,6 +557,25 @@ def run_prelive_service_loop(
             rollup["iterations"] += 1
             try:
                 signal = signal_provider.get_next_signal()
+                if hasattr(signal_provider, "consume_runtime_metrics_delta"):
+                    try:
+                        transport_delta = signal_provider.consume_runtime_metrics_delta()
+                    except Exception:
+                        transport_delta = None
+                    if isinstance(transport_delta, dict):
+                        rollup["signal_fetch_retry_events"] += int(transport_delta.get("fetch_retry_events", 0) or 0)
+                        rollup["signal_fetch_errors"] += int(transport_delta.get("fetch_transport_errors", 0) or 0)
+                        rollup["signal_payload_stale_events"] += int(transport_delta.get("fetch_stale_payload_events", 0) or 0)
+                        if (
+                            int(transport_delta.get("fetch_retry_events", 0) or 0) > 0
+                            or int(transport_delta.get("fetch_transport_errors", 0) or 0) > 0
+                            or int(transport_delta.get("fetch_stale_payload_events", 0) or 0) > 0
+                        ):
+                            append_audit_event(
+                                audit_log_path,
+                                "signal_source_transport_status",
+                                {"iteration": i, **transport_delta},
+                            )
                 if signal is None:
                     rollup["signals_missing"] += 1
                     append_audit_event(audit_log_path, "service_no_signal", {"iteration": i})
@@ -324,6 +610,78 @@ def run_prelive_service_loop(
                         append_audit_event(audit_log_path, "service_cycle_completed", {"iteration": i, "status": "safety_blocked"})
                         continue
                     rollup["safety_allowed"] += 1
+
+                    if mechanical_safety_filter is not None:
+                        mechanical_assessment = mechanical_safety_filter.assess(signal)
+                        _apply_mechanical_telemetry_to_rollup_and_audit(
+                            audit_log_path=audit_log_path,
+                            iteration=i,
+                            rollup=rollup,
+                            mechanical_assessment=mechanical_assessment,
+                        )
+                        append_audit_event(
+                            audit_log_path,
+                            "mechanical_safety_decision",
+                            {
+                                "iteration": i,
+                                "allowed": mechanical_assessment.allowed,
+                                "reason": mechanical_assessment.primary_reason,
+                                "reasons": list(mechanical_assessment.reasons or []),
+                                "details": mechanical_assessment.details or {},
+                            },
+                        )
+                        if not mechanical_assessment.allowed:
+                            rollup["mechanical_blocked"] += 1
+                            reason = str(mechanical_assessment.primary_reason or "unknown")
+                            blocked_by_reason = rollup["mechanical_blocked_by_reason"]
+                            blocked_by_reason[reason] = int(blocked_by_reason.get(reason, 0)) + 1
+                            append_audit_event(
+                                audit_log_path,
+                                "service_cycle_completed",
+                                {"iteration": i, "status": "mechanical_blocked"},
+                            )
+                            continue
+                        rollup["mechanical_allowed"] += 1
+
+                    if volatility_guard is not None:
+                        vg_decision = volatility_guard.assess(
+                            token_address=signal.token_address,
+                            symbol=signal.symbol,
+                            requested_usd_size=signal.usd_size,
+                        )
+                        append_audit_event(
+                            audit_log_path,
+                            "volatility_guard_decision",
+                            {
+                                "iteration": i,
+                                "allowed": vg_decision.allowed,
+                                "reason": vg_decision.reason,
+                                "derisk_applied": bool(vg_decision.derisk_applied),
+                                "adjusted_usd_size": vg_decision.adjusted_usd_size,
+                                "details": vg_decision.details or {},
+                            },
+                        )
+                        if not vg_decision.allowed:
+                            rollup["volatility_guard_blocked"] += 1
+                            reason = str(vg_decision.reason or "unknown")
+                            by_reason = rollup["volatility_guard_blocked_by_reason"]
+                            by_reason[reason] = int(by_reason.get(reason, 0)) + 1
+                            append_audit_event(
+                                audit_log_path,
+                                "service_cycle_completed",
+                                {"iteration": i, "status": "volatility_guard_blocked"},
+                            )
+                            continue
+                        rollup["volatility_guard_allowed"] += 1
+                        if vg_decision.derisk_applied and vg_decision.adjusted_usd_size is not None:
+                            rollup["volatility_guard_derisked"] += 1
+                            signal = TradeSignal(
+                                token_address=signal.token_address,
+                                symbol=signal.symbol,
+                                entry_price=signal.entry_price,
+                                usd_size=float(vg_decision.adjusted_usd_size),
+                                metadata=signal.metadata,
+                            )
 
                     request_key = build_request_fingerprint(
                         action="buy",
@@ -375,6 +733,20 @@ def run_prelive_service_loop(
                         buy_result = None
 
                     if buy_result:
+                        execution_obj = buy_result.get("execution")
+                        execution_md = getattr(execution_obj, "metadata", None) or {}
+                        outcome_class = str(execution_md.get("execution_outcome_class") or "")
+                        if outcome_class == "full_fill":
+                            rollup["execution_full_fills"] += 1
+                        elif outcome_class == "partial_fill":
+                            rollup["execution_partial_fills"] += 1
+                        elif outcome_class == "no_fill":
+                            rollup["execution_no_fills"] += 1
+                        elif outcome_class == "stale_quote_reject":
+                            rollup["execution_stale_quote_rejects"] += 1
+                        elif outcome_class == "slippage_tolerance_exceeded":
+                            rollup["execution_slippage_rejects"] += 1
+
                         if buy_result.get("ok"):
                             rollup["buy_ok"] += 1
                         else:
@@ -499,10 +871,19 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--max-iterations", type=int, default=10)
     parser.add_argument("--continuous", action="store_true")
+    parser.add_argument("--ops-preset", type=str, default="")
+    parser.add_argument("--preflight-only", action="store_true")
+    parser.add_argument("--print-effective-config", action="store_true")
     parser.add_argument("--audit-log-dir", type=str, default="data/exports")
     parser.add_argument("--use-stub-signals", action="store_true")
     parser.add_argument("--signals-file-path", type=str, default="")
     parser.add_argument("--use-dexscreener-signals", action="store_true")
+    parser.add_argument("--dexscreener-fetch-url", type=str, default="")
+    parser.add_argument("--dexscreener-fetch-timeout-seconds", type=float, default=5.0)
+    parser.add_argument("--dexscreener-fetch-max-attempts", type=int, default=1)
+    parser.add_argument("--dexscreener-fetch-retry-backoff-seconds", type=float, default=0.0)
+    parser.add_argument("--dexscreener-max-payload-age-ms", type=int, default=None)
+    parser.add_argument("--dexscreener-allow-stale-payloads", action="store_true")
     parser.add_argument("--dexscreener-chain-id", type=str, default="")
     parser.add_argument("--dexscreener-min-liquidity-usd", type=float, default=None)
     parser.add_argument("--dexscreener-max-pair-age-seconds", type=float, default=None)
@@ -530,9 +911,49 @@ if __name__ == "__main__":
     parser.add_argument("--token-safety-profiles-json-path", type=str, default=DEFAULT_TOKEN_SAFETY_PROFILES_PATH)
     parser.add_argument("--rollup-export-json-dir", type=str, default=None)
     parser.add_argument("--rollup-export-csv-dir", type=str, default=None)
+    parser.add_argument("--incident-report-json-path", type=str, default=None)
     parser.add_argument("--idempotency-store-path", type=str, default=None)
+    parser.add_argument("--enable-mechanical-safety-filter", action="store_true")
+    parser.add_argument("--use-mechanical-safety-profile", action="store_true")
+    parser.add_argument("--mechanical-safety-profile-name", type=str, default=DEFAULT_MECHANICAL_SAFETY_PROFILE_NAME)
+    parser.add_argument("--mechanical-safety-profiles-json-path", type=str, default=DEFAULT_MECHANICAL_SAFETY_PROFILES_PATH)
+    parser.add_argument("--mechanical-rpc-url", type=str, default="")
+    parser.add_argument("--mechanical-rpc-timeout-seconds", type=float, default=5.0)
+    parser.add_argument("--mechanical-rpc-max-attempts", type=int, default=0)
+    parser.add_argument("--mechanical-rpc-retry-backoff-seconds", type=float, default=0.0)
+    parser.add_argument("--mechanical-quote-url", type=str, default="")
+    parser.add_argument("--mechanical-quote-timeout-seconds", type=float, default=5.0)
+    parser.add_argument("--mechanical-quote-max-attempts", type=int, default=0)
+    parser.add_argument("--mechanical-quote-retry-backoff-seconds", type=float, default=0.0)
+    parser.add_argument("--mechanical-quote-input-mint", type=str, default="USDC")
+    parser.add_argument("--mechanical-quote-output-mint", type=str, default="USDC")
+    parser.add_argument("--mechanical-quote-slippage-bps", type=int, default=50)
+    parser.add_argument("--mechanical-require-buy-route", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--mechanical-require-sell-route", action="store_true")
+    parser.add_argument("--mechanical-sanity-probe-usd-size", type=float, default=None)
+    parser.add_argument("--mechanical-min-buy-liquidity-usd", type=float, default=None)
+    parser.add_argument("--mechanical-max-quote-age-ms", type=int, default=None)
+    parser.add_argument("--mechanical-max-buy-price-impact-pct", type=float, default=None)
+    parser.add_argument("--mechanical-fail-open", action="store_true")
+    parser.add_argument("--enable-volatility-guard", action="store_true")
+    parser.add_argument("--volatility-max-loss-streak-block", type=int, default=None)
+    parser.add_argument("--volatility-loss-streak-derisk-threshold", type=int, default=None)
+    parser.add_argument("--volatility-max-session-drawdown-usd-block", type=float, default=None)
+    parser.add_argument("--volatility-session-drawdown-derisk-threshold-usd", type=float, default=None)
+    parser.add_argument("--volatility-derisk-size-multiplier", type=float, default=1.0)
+    parser.add_argument("--volatility-derisk-min-usd-size", type=float, default=None)
+    parser.add_argument("--enable-execution-realism", action="store_true")
+    parser.add_argument("--execution-realism-fill-ratio", type=float, default=1.0)
+    parser.add_argument("--execution-realism-latency-ms", type=int, default=0)
+    parser.add_argument("--execution-realism-max-quote-age-ms-at-fill", type=int, default=None)
+    parser.add_argument("--execution-realism-expected-slippage-bps", type=float, default=0.0)
+    parser.add_argument("--execution-realism-volatility-penalty-bps", type=float, default=0.0)
+    parser.add_argument("--execution-realism-latency-penalty-bps-per-100ms", type=float, default=0.0)
+    parser.add_argument("--execution-realism-max-realized-slippage-bps", type=float, default=None)
     parser.add_argument("--allow-unsafe-paths", action="store_true")
     args = parser.parse_args()
+
+    args, applied_ops_preset = apply_prelive_ops_preset(args)
 
     _validate_service_startup_args(
         use_stub_signals=args.use_stub_signals,
@@ -548,8 +969,24 @@ if __name__ == "__main__":
                 ensure_dir_within_base(dir_path)
         if args.idempotency_store_path:
             ensure_path_within_base(args.idempotency_store_path)
+        if args.incident_report_json_path:
+            ensure_path_within_base(args.incident_report_json_path)
+
+    preflight = validate_prelive_preflight(args)
+    if args.print_effective_config or args.preflight_only:
+        print("=== PRELIVE EFFECTIVE CONFIG ===")
+        if applied_ops_preset:
+            print(f"Ops Preset Applied: {applied_ops_preset['name']}")
+        print(build_effective_prelive_config_summary(args))
+    if args.preflight_only:
+        print("=== PRELIVE PREFLIGHT ===")
+        print(preflight)
+        raise SystemExit(0 if preflight["ok"] else 2)
 
     provider = _build_signal_provider_from_args(args)
+    mechanical_safety_filter = _build_mechanical_safety_filter_from_args(args)
+    volatility_guard = _build_volatility_guard_from_args(args)
+    execution_realism_config = _build_execution_realism_config_from_args(args)
     result = run_prelive_service_loop(
         signal_provider=provider,
         max_iterations=None if args.continuous else args.max_iterations,
@@ -579,6 +1016,9 @@ if __name__ == "__main__":
         rollup_export_json_dir=args.rollup_export_json_dir,
         rollup_export_csv_dir=args.rollup_export_csv_dir,
         idempotency_store_path=args.idempotency_store_path,
+        mechanical_safety_filter=mechanical_safety_filter,
+        volatility_guard=volatility_guard,
+        execution_realism_config=execution_realism_config,
     )
     print("=== PRELIVE SERVICE LOOP COMPLETE ===")
     print(f"Audit Log: {result['audit_log_path']}")
@@ -587,3 +1027,9 @@ if __name__ == "__main__":
         print(f"Final Rollup JSON: {result['final_rollup_json_path']}")
     if result.get("final_rollup_csv_path"):
         print(f"Final Rollup CSV: {result['final_rollup_csv_path']}")
+    if args.incident_report_json_path:
+        from src.live.prelive_ops import load_audit_events_from_jsonl
+
+        report = build_session_incident_report(load_audit_events_from_jsonl(result["audit_log_path"]))
+        report_path = save_session_incident_report_json(report, args.incident_report_json_path)
+        print(f"Incident Report JSON: {report_path}")

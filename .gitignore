@@ -6,3 +6,4 @@ data/sniper.db
 data/exports/
 audit.jsonl
 PROJECT_STATUS.txt
+config/*_local.json

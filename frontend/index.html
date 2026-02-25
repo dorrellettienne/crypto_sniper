@@ -580,10 +580,22 @@
           <div>
             <div class="row"><span class="k">Service Cycles</span><span id="audit-service-cycles" class="v">0</span></div>
             <div class="row"><span class="k">Last Rollup Iteration</span><span id="audit-last-rollup-iteration" class="v">-</span></div>
+            <div class="row"><span class="k">Top Mech Reject</span><span id="audit-top-mech-reject" class="v">-</span></div>
+            <div class="row"><span class="k">Vol Guard Blocks</span><span id="audit-vol-guard-blocks" class="v">0</span></div>
+            <div class="row"><span class="k">Vol Guard Derisks</span><span id="audit-vol-guard-derisks" class="v">0</span></div>
+            <div class="row"><span class="k">Signal Fetch Retries</span><span id="audit-signal-fetch-retries" class="v">0</span></div>
+            <div class="row"><span class="k">Partial Fills</span><span id="audit-exec-partial-fills" class="v">0</span></div>
           </div>
           <div>
             <div class="row"><span class="k">Last Rollup Risk Blocked</span><span id="audit-last-rollup-risk-blocked" class="v">-</span></div>
             <div class="row"><span class="k">Last Rollup Sell Failed</span><span id="audit-last-rollup-sell-failed" class="v">-</span></div>
+            <div class="row"><span class="k">Top Mech Reject Count</span><span id="audit-top-mech-reject-count" class="v">-</span></div>
+            <div class="row"><span class="k">Quote Retry Events</span><span id="audit-quote-retries" class="v">0</span></div>
+            <div class="row"><span class="k">Quote Stale Blocks</span><span id="audit-quote-stale-blocks" class="v">0</span></div>
+            <div class="row"><span class="k">Signal Fetch Errors</span><span id="audit-signal-fetch-errors" class="v">0</span></div>
+            <div class="row"><span class="k">Signal Stale Payloads</span><span id="audit-signal-stale-payloads" class="v">0</span></div>
+            <div class="row"><span class="k">Exec Stale Quote Rejects</span><span id="audit-exec-stale-rejects" class="v">0</span></div>
+            <div class="row"><span class="k">Exec Slippage Rejects</span><span id="audit-exec-slippage-rejects" class="v">0</span></div>
           </div>
         </div>
         <div class="table-wrap">
@@ -810,6 +822,18 @@
       document.getElementById("audit-last-rollup-iteration").textContent = "-";
       document.getElementById("audit-last-rollup-risk-blocked").textContent = "-";
       document.getElementById("audit-last-rollup-sell-failed").textContent = "-";
+      document.getElementById("audit-top-mech-reject").textContent = "-";
+      document.getElementById("audit-top-mech-reject-count").textContent = "-";
+      document.getElementById("audit-vol-guard-blocks").textContent = "0";
+      document.getElementById("audit-vol-guard-derisks").textContent = "0";
+      document.getElementById("audit-quote-retries").textContent = "0";
+      document.getElementById("audit-quote-stale-blocks").textContent = "0";
+      document.getElementById("audit-signal-fetch-retries").textContent = "0";
+      document.getElementById("audit-exec-partial-fills").textContent = "0";
+      document.getElementById("audit-signal-fetch-errors").textContent = "0";
+      document.getElementById("audit-signal-stale-payloads").textContent = "0";
+      document.getElementById("audit-exec-stale-rejects").textContent = "0";
+      document.getElementById("audit-exec-slippage-rejects").textContent = "0";
     }
 
     function renderCompare(files) {
@@ -976,10 +1000,49 @@
       const serviceErrorEvents = events.filter((evt) => evt.event_type === "service_error").length;
       const serviceRollupEvents = events.filter((evt) => evt.event_type === "service_rollup");
       const serviceCycleEvents = events.filter((evt) => evt.event_type === "service_cycle_completed").length;
+      const volatilityGuardEvents = events.filter((evt) => evt.event_type === "volatility_guard_decision");
+      const volatilityGuardBlocks = volatilityGuardEvents.filter((evt) => evt.payload?.allowed === false).length;
+      const volatilityGuardDerisks = volatilityGuardEvents.filter((evt) => evt.payload?.derisk_applied).length;
+      const quoteRetryAuditEvents = events.filter((evt) => evt.event_type === "mechanical_quote_retry")
+        .reduce((sum, evt) => sum + Number(evt.payload?.quote_retry_events || 0), 0);
+      const signalTransportStatusEvents = events.filter((evt) => evt.event_type === "signal_source_transport_status");
+      const signalFetchRetries = signalTransportStatusEvents.reduce((sum, evt) => sum + Number(evt.payload?.fetch_retry_events || 0), 0);
+      const signalFetchErrors = signalTransportStatusEvents.reduce((sum, evt) => sum + Number(evt.payload?.fetch_transport_errors || 0), 0);
+      const signalStalePayloads = signalTransportStatusEvents.reduce((sum, evt) => sum + Number(evt.payload?.fetch_stale_payload_events || 0), 0);
+      const execResults = events.filter((evt) => evt.event_type === "execution_result" && evt.payload?.action === "buy");
+      const execPartialFills = execResults.filter((evt) => evt.payload?.metadata?.execution_outcome_class === "partial_fill").length;
+      const execStaleRejects = execResults.filter((evt) => evt.payload?.metadata?.execution_outcome_class === "stale_quote_reject").length;
+      const execSlippageRejects = execResults.filter((evt) => evt.payload?.metadata?.execution_outcome_class === "slippage_tolerance_exceeded").length;
       const maxSellRetry = events
         .filter((evt) => evt.event_type === "sell_retry_result")
         .reduce((m, evt) => Math.max(m, Number(evt.payload?.attempts || 0)), 0);
       const lastServiceRollup = serviceRollupEvents.length ? serviceRollupEvents[serviceRollupEvents.length - 1] : null;
+      const mechReasonCounts = {};
+      events.forEach((evt) => {
+        if (evt.event_type === "mechanical_safety_decision" && evt.payload?.allowed === false) {
+          const reason = String(evt.payload?.reason || "unknown");
+          mechReasonCounts[reason] = Number(mechReasonCounts[reason] || 0) + 1;
+        }
+      });
+      const latestRollupReasonCounts = lastServiceRollup?.payload?.rollup?.mechanical_blocked_by_reason;
+      let topMechReject = "-";
+      let topMechRejectCount = "-";
+      const chooseTopReason = (obj) => {
+        if (!obj || typeof obj !== "object") return null;
+        const entries = Object.entries(obj)
+          .map(([k, v]) => [String(k), Number(v || 0)])
+          .filter(([, v]) => Number.isFinite(v) && v > 0);
+        if (!entries.length) return null;
+        entries.sort((a, b) => (b[1] - a[1]) || a[0].localeCompare(b[0]));
+        return entries[0];
+      };
+      const topFromRollup = chooseTopReason(latestRollupReasonCounts);
+      const topFromEvents = chooseTopReason(mechReasonCounts);
+      const topChosen = topFromRollup || topFromEvents;
+      if (topChosen) {
+        topMechReject = topChosen[0];
+        topMechRejectCount = String(topChosen[1]);
+      }
 
       const rows = events.map((evt, idx) => ({
         idx: idx + 1,
@@ -1035,6 +1098,38 @@
       document.getElementById("audit-last-rollup-iteration").textContent = String(lastServiceRollup?.payload?.iteration ?? "-");
       document.getElementById("audit-last-rollup-risk-blocked").textContent = String(lastServiceRollup?.payload?.rollup?.risk_blocked ?? "-");
       document.getElementById("audit-last-rollup-sell-failed").textContent = String(lastServiceRollup?.payload?.rollup?.sell_failed ?? "-");
+      document.getElementById("audit-top-mech-reject").textContent = topMechReject;
+      document.getElementById("audit-top-mech-reject-count").textContent = topMechRejectCount;
+      document.getElementById("audit-vol-guard-blocks").textContent = String(
+        lastServiceRollup?.payload?.rollup?.volatility_guard_blocked ?? volatilityGuardBlocks
+      );
+      document.getElementById("audit-vol-guard-derisks").textContent = String(
+        lastServiceRollup?.payload?.rollup?.volatility_guard_derisked ?? volatilityGuardDerisks
+      );
+      document.getElementById("audit-signal-fetch-retries").textContent = String(
+        lastServiceRollup?.payload?.rollup?.signal_fetch_retry_events ?? signalFetchRetries
+      );
+      document.getElementById("audit-exec-partial-fills").textContent = String(
+        lastServiceRollup?.payload?.rollup?.execution_partial_fills ?? execPartialFills
+      );
+      document.getElementById("audit-quote-retries").textContent = String(
+        lastServiceRollup?.payload?.rollup?.quote_retry_events ?? quoteRetryAuditEvents
+      );
+      document.getElementById("audit-quote-stale-blocks").textContent = String(
+        lastServiceRollup?.payload?.rollup?.quote_stale_blocked ?? 0
+      );
+      document.getElementById("audit-signal-fetch-errors").textContent = String(
+        lastServiceRollup?.payload?.rollup?.signal_fetch_errors ?? signalFetchErrors
+      );
+      document.getElementById("audit-signal-stale-payloads").textContent = String(
+        lastServiceRollup?.payload?.rollup?.signal_payload_stale_events ?? signalStalePayloads
+      );
+      document.getElementById("audit-exec-stale-rejects").textContent = String(
+        lastServiceRollup?.payload?.rollup?.execution_stale_quote_rejects ?? execStaleRejects
+      );
+      document.getElementById("audit-exec-slippage-rejects").textContent = String(
+        lastServiceRollup?.payload?.rollup?.execution_slippage_rejects ?? execSlippageRejects
+      );
       fileNameEl.textContent = label;
       document.getElementById("raw-json").textContent = JSON.stringify({ audit_events: events }, null, 2);
     }

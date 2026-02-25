@@ -4,9 +4,13 @@ from typing import Any
 from src.live.confirmation_retry_policy import (
     ConfirmationRetryPolicy,
 )
-from src.live.confirmation_reconciliation import reconcile_confirmation_attempts
+from src.live.confirmation_reconciliation import (
+    reconcile_confirmation_attempts,
+    reconcile_live_chain_confirmation,
+)
 from src.live.idempotency import build_client_order_id, build_request_fingerprint
 from src.live.order_lifecycle import (
+    lifecycle_event_to_dict,
     make_submitted,
 )
 
@@ -63,6 +67,15 @@ def build_execution_preview_workflow(
     elapsed_seconds: float = 0.0,
     simulated_outcome: str = "retry",
     confirmation_outcomes: list[str] | None = None,
+    confirmation_elapsed_seconds_by_attempt: list[float] | None = None,
+    quote_age_ms_at_submit: int | None = None,
+    max_quote_age_ms_before_submit: int | None = None,
+    simulated_submit_latency_ms: int = 0,
+    signature_status_payload: dict[str, Any] | None = None,
+    tx_payload: dict[str, Any] | None = None,
+    preview_estimates: dict[str, Any] | None = None,
+    chain_reconciliation_thresholds: dict[str, Any] | None = None,
+    chain_reconciliation_owner_filter: str | None = None,
 ) -> dict[str, Any]:
     """
     Build audit/lifecycle-friendly skeleton execution workflow metadata.
@@ -70,6 +83,23 @@ def build_execution_preview_workflow(
     """
     policy = policy or ConfirmationRetryPolicy()
     simulated_outcome = str(simulated_outcome)
+    simulated_submit_latency_ms = int(simulated_submit_latency_ms)
+    if simulated_submit_latency_ms < 0:
+        raise ValueError("simulated_submit_latency_ms must be >= 0")
+    if quote_age_ms_at_submit is not None:
+        quote_age_ms_at_submit = int(quote_age_ms_at_submit)
+        if quote_age_ms_at_submit < 0:
+            raise ValueError("quote_age_ms_at_submit must be >= 0")
+    if max_quote_age_ms_before_submit is not None:
+        max_quote_age_ms_before_submit = int(max_quote_age_ms_before_submit)
+        if max_quote_age_ms_before_submit < 0:
+            raise ValueError("max_quote_age_ms_before_submit must be >= 0")
+
+    stale_submit_reject = (
+        quote_age_ms_at_submit is not None
+        and max_quote_age_ms_before_submit is not None
+        and quote_age_ms_at_submit > max_quote_age_ms_before_submit
+    )
 
     submitted = make_submitted(
         action=action,
@@ -82,7 +112,9 @@ def build_execution_preview_workflow(
             "rpc_health": dict(rpc_health or {}),
         },
     )
-    if confirmation_outcomes is None:
+    if stale_submit_reject:
+        confirmation_outcomes = []
+    elif confirmation_outcomes is None:
         if simulated_outcome == "retry":
             confirmation_outcomes = ["pending"]
         elif simulated_outcome == "timeout":
@@ -95,20 +127,51 @@ def build_execution_preview_workflow(
         else:
             raise ValueError("simulated_outcome must be one of: retry, fail, timeout, confirmed")
 
-    reconciliation = reconcile_confirmation_attempts(
-        submitted,
-        policy=policy,
-        outcomes=confirmation_outcomes,
-        elapsed_seconds_by_attempt=[elapsed_seconds],
-    )
-    retry_policy_decision = (
-        dict(reconciliation.retry_decisions[-1])
-        if reconciliation.retry_decisions
-        else {"decision": "confirmed", "next_attempt": None, "backoff_seconds": 0.0, "reason": "confirmed"}
-    )
-    final_decision = reconciliation.final_decision
+    if stale_submit_reject:
+        reconciliation = {
+            "final_status": "stale_quote_reject",
+            "attempts_used": 0,
+            "elapsed_seconds": 0.0,
+            "retry_decisions": [],
+            "lifecycle_events": [submitted],
+            "final_decision": "stale_quote_reject",
+        }
+        retry_policy_decision = {"decision": "stale_quote_reject", "next_attempt": None, "backoff_seconds": 0.0, "reason": "quote_age_exceeded"}
+        final_decision = "stale_quote_reject"
+        lifecycle_events = [lifecycle_event_to_dict(submitted)]
+        reconciliation_payload = {
+            "final_status": "stale_quote_reject",
+            "attempts_used": 0,
+            "elapsed_seconds": 0.0,
+            "retry_decisions": [],
+            "final_decision": "stale_quote_reject",
+        }
+    else:
+        reconciliation_obj = reconcile_confirmation_attempts(
+            submitted,
+            policy=policy,
+            outcomes=confirmation_outcomes,
+            elapsed_seconds_by_attempt=confirmation_elapsed_seconds_by_attempt if confirmation_elapsed_seconds_by_attempt is not None else [elapsed_seconds],
+        )
+        reconciliation = reconciliation_obj
+        retry_policy_decision = (
+            dict(reconciliation_obj.retry_decisions[-1])
+            if reconciliation_obj.retry_decisions
+            else {"decision": "confirmed", "next_attempt": None, "backoff_seconds": 0.0, "reason": "confirmed"}
+        )
+        final_decision = reconciliation_obj.final_decision
+        lifecycle_events = list(reconciliation_obj.lifecycle_events)
+        reconciliation_payload = {
+            "final_status": reconciliation_obj.final_status,
+            "attempts_used": reconciliation_obj.attempts_used,
+            "elapsed_seconds": reconciliation_obj.elapsed_seconds,
+            "retry_decisions": list(reconciliation_obj.retry_decisions),
+            "final_decision": reconciliation_obj.final_decision,
+        }
 
-    return {
+    outcome_class = _classify_submit_confirm_outcome(final_decision)
+
+    payload = {
         "client_order_id": client_order_id,
         "request_fingerprint": request_fingerprint,
         "order_preview": dict(order_preview or {}),
@@ -121,12 +184,55 @@ def build_execution_preview_workflow(
         },
         "retry_policy_decision": dict(retry_policy_decision),
         "final_decision": final_decision,
-        "lifecycle_events": list(reconciliation.lifecycle_events),
+        "lifecycle_events": lifecycle_events,
+        "submit_confirm_summary": {
+            "outcome_class": outcome_class,
+            "simulated_submit_latency_ms": simulated_submit_latency_ms,
+            "quote_age_ms_at_submit": quote_age_ms_at_submit,
+            "max_quote_age_ms_before_submit": max_quote_age_ms_before_submit,
+            "submit_stale_quote_reject": stale_submit_reject,
+            "confirmation_attempts_used": reconciliation_payload["attempts_used"],
+            "confirmation_elapsed_seconds": reconciliation_payload["elapsed_seconds"],
+            "confirmation_retry_count": len(reconciliation_payload["retry_decisions"]),
+        },
         "reconciliation": {
-            "final_status": reconciliation.final_status,
-            "attempts_used": reconciliation.attempts_used,
-            "elapsed_seconds": reconciliation.elapsed_seconds,
-            "retry_decisions": list(reconciliation.retry_decisions),
-            "final_decision": reconciliation.final_decision,
+            **reconciliation_payload,
         },
     }
+    if (
+        signature_status_payload is not None
+        or tx_payload is not None
+        or preview_estimates is not None
+        or chain_reconciliation_thresholds is not None
+    ):
+        payload["chain_reconciliation"] = reconcile_live_chain_confirmation(
+            workflow={
+                "final_decision": final_decision,
+                "submit_confirm_summary": {
+                    "outcome_class": outcome_class,
+                    "confirmation_attempts_used": reconciliation_payload["attempts_used"],
+                    "confirmation_elapsed_seconds": reconciliation_payload["elapsed_seconds"],
+                },
+            },
+            signature_status_payload=signature_status_payload,
+            tx_payload=tx_payload,
+            preview_estimates=preview_estimates,
+            mismatch_thresholds=chain_reconciliation_thresholds,
+            owner_filter=chain_reconciliation_owner_filter,
+        )
+    return payload
+
+
+def _classify_submit_confirm_outcome(final_decision: str) -> str:
+    decision = str(final_decision or "")
+    if decision == "confirmed":
+        return "submit_confirm_confirmed"
+    if decision == "retry":
+        return "submit_confirm_retrying"
+    if decision == "timeout":
+        return "submit_confirm_timeout"
+    if decision == "fail":
+        return "submit_confirm_failed"
+    if decision == "stale_quote_reject":
+        return "submit_rejected_stale_quote"
+    return "submit_confirm_unknown"

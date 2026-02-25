@@ -93,3 +93,67 @@ def test_build_execution_preview_workflow_rejects_invalid_simulated_outcome():
             request_fingerprint="req_test",
             simulated_outcome="unknown",
         )
+
+
+def test_build_execution_preview_workflow_adds_submit_confirm_summary():
+    workflow = build_execution_preview_workflow(
+        action="buy",
+        order_preview={"action": "buy"},
+        rpc_health={"ok": True},
+        client_order_id="coid_test",
+        request_fingerprint="req_test",
+        simulated_outcome="confirmed",
+        confirmation_elapsed_seconds_by_attempt=[0.2],
+        simulated_submit_latency_ms=150,
+        quote_age_ms_at_submit=50,
+        max_quote_age_ms_before_submit=200,
+    )
+    summary = workflow["submit_confirm_summary"]
+    assert summary["outcome_class"] == "submit_confirm_confirmed"
+    assert summary["simulated_submit_latency_ms"] == 150
+    assert summary["confirmation_attempts_used"] == 1
+
+
+def test_build_execution_preview_workflow_can_stale_reject_before_confirmation():
+    workflow = build_execution_preview_workflow(
+        action="buy",
+        order_preview={"action": "buy"},
+        rpc_health={"ok": True},
+        client_order_id="coid_test",
+        request_fingerprint="req_test",
+        quote_age_ms_at_submit=500,
+        max_quote_age_ms_before_submit=100,
+    )
+    assert workflow["final_decision"] == "stale_quote_reject"
+    assert workflow["submit_confirm_summary"]["outcome_class"] == "submit_rejected_stale_quote"
+    assert workflow["reconciliation"]["attempts_used"] == 0
+
+
+def test_build_execution_preview_workflow_can_attach_chain_reconciliation():
+    workflow = build_execution_preview_workflow(
+        action="buy",
+        order_preview={"action": "buy"},
+        rpc_health={"ok": True},
+        client_order_id="coid_test",
+        request_fingerprint="req_test",
+        simulated_outcome="confirmed",
+        signature_status_payload={"value": [{"slot": 10, "confirmationStatus": "finalized", "err": None}]},
+        tx_payload={
+            "result": {
+                "slot": 10,
+                "transaction": {"signatures": ["SIG1"]},
+                "meta": {
+                    "fee": 5000,
+                    "err": None,
+                    "preBalances": [10000],
+                    "postBalances": [5000],
+                    "preTokenBalances": [],
+                    "postTokenBalances": [
+                        {"accountIndex": 0, "mint": "MINT_A", "owner": "OWNER1", "uiTokenAmount": {"amount": "10"}}
+                    ],
+                },
+            }
+        },
+    )
+    assert workflow["chain_reconciliation"]["outcome_class"] == "live_confirmed_reconciled"
+    assert workflow["chain_reconciliation"]["terminal_reason"] == "finalized"

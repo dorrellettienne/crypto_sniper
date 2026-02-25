@@ -72,3 +72,114 @@ class HttpRpcClient:
             "client_order_id": str(client_order_id),
             "status": "confirmation_not_implemented",
         }
+
+    def get_signature_status(self, signature: str, *, search_transaction_history: bool = True) -> dict[str, Any] | None:
+        data = self._rpc(
+            "getSignatureStatuses",
+            [
+                [str(signature)],
+                {"searchTransactionHistory": bool(search_transaction_history)},
+            ],
+        )
+        if "error" in data:
+            raise LiveRpcClientError(f"RPC returned error for getSignatureStatuses: {data['error']}")
+        value = (data.get("result") or {}).get("value")
+        if not isinstance(value, list):
+            raise LiveRpcClientError("missing signature status list in RPC response")
+        if not value:
+            return None
+        first = value[0]
+        if first is None:
+            return None
+        if not isinstance(first, dict):
+            raise LiveRpcClientError("invalid signature status entry in RPC response")
+        return first
+
+    def get_transaction(
+        self,
+        signature: str,
+        *,
+        encoding: str = "jsonParsed",
+        commitment: str = "confirmed",
+        max_supported_transaction_version: int = 0,
+    ) -> dict[str, Any] | None:
+        data = self._rpc(
+            "getTransaction",
+            [
+                str(signature),
+                {
+                    "encoding": str(encoding),
+                    "commitment": str(commitment),
+                    "maxSupportedTransactionVersion": int(max_supported_transaction_version),
+                },
+            ],
+        )
+        if "error" in data:
+            raise LiveRpcClientError(f"RPC returned error for getTransaction: {data['error']}")
+        return data.get("result")
+
+    def send_raw_transaction(
+        self,
+        transaction_base64: str,
+        *,
+        skip_preflight: bool = False,
+        max_retries: int | None = None,
+        preflight_commitment: str = "processed",
+    ) -> str:
+        params_cfg: dict[str, Any] = {
+            "encoding": "base64",
+            "skipPreflight": bool(skip_preflight),
+            "preflightCommitment": str(preflight_commitment),
+        }
+        if max_retries is not None:
+            params_cfg["maxRetries"] = int(max_retries)
+        data = self._rpc(
+            "sendTransaction",
+            [
+                str(transaction_base64),
+                params_cfg,
+            ],
+        )
+        if "error" in data:
+            raise LiveRpcClientError(f"RPC returned error for sendTransaction: {data['error']}")
+        result = data.get("result")
+        if not result:
+            raise LiveRpcClientError("missing signature result in sendTransaction response")
+        return str(result)
+
+    def get_account_info(self, pubkey: str, encoding: str = "jsonParsed") -> dict[str, Any] | None:
+        data = self._rpc(
+            "getAccountInfo",
+            [
+                str(pubkey),
+                {
+                    "encoding": str(encoding),
+                    "commitment": "processed",
+                },
+            ],
+        )
+        if "error" in data:
+            raise LiveRpcClientError(f"RPC returned error for getAccountInfo: {data['error']}")
+        return (data.get("result") or {}).get("value")
+
+    def get_parsed_mint_authorities(self, mint_address: str) -> dict[str, Any]:
+        value = self.get_account_info(str(mint_address), encoding="jsonParsed")
+        if not isinstance(value, dict):
+            raise LiveRpcClientError("missing mint account info in RPC response")
+
+        data = value.get("data")
+        if not isinstance(data, dict):
+            raise LiveRpcClientError("missing parsed mint data in RPC response")
+        parsed = data.get("parsed")
+        if not isinstance(parsed, dict):
+            raise LiveRpcClientError("missing parsed field in mint account data")
+        info = parsed.get("info")
+        if not isinstance(info, dict):
+            raise LiveRpcClientError("missing info field in parsed mint account data")
+
+        return {
+            "mint_authority": info.get("mintAuthority"),
+            "freeze_authority": info.get("freezeAuthority"),
+            "supply": info.get("supply"),
+            "decimals": info.get("decimals"),
+        }

@@ -37,6 +37,13 @@ def test_run_live_execution_preview_export_writes_json_and_jsonl(tmp_path):
     assert payload["mode"] == "live_execution_preview_skeleton"
     assert "buy" in payload and "sell" in payload and "stop_loss" in payload
     assert payload["buy"]["metadata"]["submit_preview"]["mode"] == "submit_skeleton"
+    assert payload["buy"]["metadata"]["submit_workflow"]["submit_confirm_summary"]["outcome_class"] == "submit_confirm_confirmed"
+    assert payload["buy"]["metadata"]["submit_dispatch"]["reason"] in {
+        "manual_submit_not_approved",
+        "live_send_disabled",
+        "would_send_network_gated",
+        "live_send_action_not_enabled",
+    }
 
     jsonl_path = tmp_path / next(p.name for p in tmp_path.iterdir() if p.suffix == ".jsonl")
     lines = [json.loads(line) for line in jsonl_path.read_text(encoding="utf-8").splitlines() if line.strip()]
@@ -45,5 +52,26 @@ def test_run_live_execution_preview_export_writes_json_and_jsonl(tmp_path):
     assert "live_execution_preview" in event_types
     assert "live_submit_preview" in event_types
     assert "live_confirmation_preview" in event_types
+    assert "live_submit_dispatch_preview" in event_types
+    assert "live_manual_submit_gate_preview" in event_types
+    assert "live_execution_preview_live_send_summary" in event_types
     assert "live_execution_preview_run_completed" in event_types
 
+
+def test_run_live_execution_preview_export_accepts_manual_submit_overrides(tmp_path):
+    out = run_live_execution_preview_export(
+        output_json_dir=str(tmp_path),
+        audit_log_dir=str(tmp_path),
+        adapter_config_overrides={
+            "manual_submit_approval_enabled": True,
+            "manual_submit_required_token": "APPROVE",
+            "manual_submit_provided_token": "APPROVE",
+            "manual_submit_mode": "buy_only",
+            "live_send_enabled": True,
+            # keep network gate off so preview remains no-send but enters would_send path
+            "live_send_network_enabled": False,
+        },
+    )
+    buy_dispatch = out["previews"]["buy"]["metadata"]["submit_dispatch"]
+    assert buy_dispatch["reason"] == "would_send_network_gated"
+    assert buy_dispatch["would_send"]["rpc_method"] == "sendTransaction"
