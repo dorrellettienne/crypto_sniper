@@ -2939,6 +2939,7 @@ def evaluate_live_launch_guard(
     require_launch_authorization_chain_of_chain_approval_token: bool = False,
     require_unrevoked_launch_authorization_chain_of_chain_approval_token: bool = False,
     require_launch_authorization_super_chain_report: bool = False,
+    require_launch_authorization_super_chain_report_binding: bool = False,
     revocation_reason_class_policy_overrides: dict[str, str] | None = None,
     required_ticket_action: str = "approve_live_test",
     required_launch_authorization_packet_approval_action: str = "approve_live_launch_packet",
@@ -3490,6 +3491,48 @@ def evaluate_live_launch_guard(
             "actual": (None if auth_super_chain_generated_ms is None else max(0, now_ms - int(auth_super_chain_generated_ms))),
         }
     )
+    super_chain_fp_actual = str(auth_super_chain_report.get("super_chain_report_fingerprint_sha256") or "")
+    super_chain_fp_expected = ""
+    if auth_super_chain_report:
+        super_chain_fp_expected = hashlib.sha256(
+            json.dumps({k: v for k, v in auth_super_chain_report.items() if k != "super_chain_report_fingerprint_sha256"}, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+    checks.append(
+        {
+            "name": "authorization_super_chain_report_fingerprint_valid",
+            "required": bool(require_launch_authorization_super_chain_report),
+            "ok": (bool(auth_super_chain_report) and bool(super_chain_fp_actual) and super_chain_fp_actual == super_chain_fp_expected),
+            "actual": {
+                "super_chain_report_fingerprint_sha256": super_chain_fp_actual,
+                "expected_super_chain_report_fingerprint_sha256": super_chain_fp_expected,
+            },
+        }
+    )
+    super_chain_binding = dict(auth_super_chain_report.get("binding") or {})
+    expected_super_chain_binding = {
+        "chain_of_chain_report_fingerprint_sha256": str(auth_chain_of_chain_report.get("chain_of_chain_report_fingerprint_sha256") or ""),
+        "chain_of_chain_approval_token_id": str(auth_chain_of_chain_approval_token.get("token_id") or ""),
+    }
+    checks.append(
+        {
+            "name": "authorization_super_chain_report_bound_to_current_inputs",
+            "required": bool(require_launch_authorization_super_chain_report and require_launch_authorization_super_chain_report_binding),
+            "ok": (
+                bool(auth_super_chain_report)
+                and (
+                    not expected_super_chain_binding["chain_of_chain_report_fingerprint_sha256"]
+                    or str(super_chain_binding.get("chain_of_chain_report_fingerprint_sha256") or "")
+                    == expected_super_chain_binding["chain_of_chain_report_fingerprint_sha256"]
+                )
+                and (
+                    not expected_super_chain_binding["chain_of_chain_approval_token_id"]
+                    or str(super_chain_binding.get("chain_of_chain_approval_token_id") or "")
+                    == expected_super_chain_binding["chain_of_chain_approval_token_id"]
+                )
+            ),
+            "actual": {"super_chain_binding": super_chain_binding, "expected_binding": expected_super_chain_binding},
+        }
+    )
 
     prelive_generated_ms = _to_int_or_none(go_no_go.get("generated_unix_ms"))
     prelive_age_ok = False
@@ -3651,6 +3694,9 @@ def evaluate_live_launch_guard(
         "authorization_chain_of_chain_approval_token_id": str(auth_chain_of_chain_approval_token.get("token_id") or ""),
         "authorization_chain_of_chain_approval_token_revoked": chain2_approval_token_revoked,
         "authorization_super_chain_report_status": str(auth_super_chain_report.get("status") or ""),
+        "authorization_super_chain_report_fingerprint_valid": bool(
+            auth_super_chain_report and super_chain_fp_actual and super_chain_fp_actual == super_chain_fp_expected
+        ),
         "summary": ("live_launch_guard_allow" if allowed else f"live_launch_guard_block:{','.join(required_failed)}"),
     }
 
@@ -6581,6 +6627,7 @@ def _main() -> int:
     p.add_argument("--live-launch-guard-require-authorization-chain-of-chain-approval-token", action="store_true")
     p.add_argument("--live-launch-guard-require-unrevoked-authorization-chain-of-chain-approval-token", action="store_true")
     p.add_argument("--live-launch-guard-require-authorization-super-chain-report", action="store_true")
+    p.add_argument("--live-launch-guard-require-authorization-super-chain-report-binding", action="store_true")
     p.add_argument("--live-launch-guard-ticket-action", default="approve_live_test")
     p.add_argument("--live-launch-guard-authorization-packet-approval-action", default="approve_live_launch_packet")
     p.add_argument("--live-launch-guard-authorization-chain-approval-action", default="approve_live_launch_chain")
@@ -6874,6 +6921,9 @@ def _main() -> int:
                 args.live_launch_guard_require_unrevoked_authorization_chain_of_chain_approval_token
             ),
             require_launch_authorization_super_chain_report=bool(args.live_launch_guard_require_authorization_super_chain_report),
+            require_launch_authorization_super_chain_report_binding=bool(
+                args.live_launch_guard_require_authorization_super_chain_report_binding
+            ),
             revocation_reason_class_policy_overrides=revocation_policy_overrides,
             required_ticket_action=str(args.live_launch_guard_ticket_action or "approve_live_test"),
             required_launch_authorization_packet_approval_action=str(args.live_launch_guard_authorization_packet_approval_action or "approve_live_launch_packet"),
