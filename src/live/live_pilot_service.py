@@ -2565,6 +2565,7 @@ def evaluate_live_launch_guard(
     promotion_ticket: dict[str, Any] | None = None,
     launch_intent_manifest: dict[str, Any] | None = None,
     launch_authorization_packet: dict[str, Any] | None = None,
+    launch_authorization_packet_approval_token: dict[str, Any] | None = None,
     requested_mode: str = "",
     requested_risk_profile_preset: str = "",
     require_prelive_go_no_go: bool = False,
@@ -2575,11 +2576,14 @@ def evaluate_live_launch_guard(
     require_launch_intent: bool = False,
     require_launch_authorization_packet: bool = False,
     require_launch_authorization_packet_binding: bool = False,
+    require_launch_authorization_packet_approval_token: bool = False,
     revocation_reason_class_policy_overrides: dict[str, str] | None = None,
     required_ticket_action: str = "approve_live_test",
+    required_launch_authorization_packet_approval_action: str = "approve_live_launch_packet",
     max_prelive_age_seconds: float = 3600.0,
     max_launch_intent_age_seconds: float = 1800.0,
     max_launch_authorization_packet_age_seconds: float = 900.0,
+    max_launch_authorization_packet_approval_token_age_seconds: float = 900.0,
     consumed_tickets: list[dict[str, Any]] | None = None,
     revoked_tickets: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -2589,6 +2593,7 @@ def evaluate_live_launch_guard(
     ticket = dict(promotion_ticket or {})
     intent = dict(launch_intent_manifest or {})
     auth_packet = dict(launch_authorization_packet or {})
+    auth_packet_approval_token = dict(launch_authorization_packet_approval_token or {})
     intent_scope = dict(intent.get("scope") or {})
     now_ms = int(time.time() * 1000)
     checks: list[dict[str, Any]] = []
@@ -2693,6 +2698,75 @@ def evaluate_live_launch_guard(
             "actual": {
                 "packet_binding": auth_packet_binding,
                 "expected_binding": expected_packet_binding,
+            },
+        }
+    )
+    auth_token_generated_ms = _to_int_or_none(auth_packet_approval_token.get("issued_unix_ms"))
+    auth_token_age_ok = False
+    if auth_token_generated_ms is not None:
+        auth_token_age_ok = (now_ms - int(auth_token_generated_ms)) <= int(max(0.0, float(max_launch_authorization_packet_approval_token_age_seconds)) * 1000.0)
+    auth_token_expires_ms = _to_int_or_none(auth_packet_approval_token.get("expires_unix_ms"))
+    auth_token_fp_actual = str(auth_packet_approval_token.get("token_fingerprint_sha256") or "")
+    auth_token_fp_expected = ""
+    if auth_packet_approval_token:
+        auth_token_fp_expected = hashlib.sha256(
+            json.dumps({k: v for k, v in auth_packet_approval_token.items() if k != "token_fingerprint_sha256"}, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+    checks.append(
+        {
+            "name": "authorization_packet_approval_token_present",
+            "required": bool(require_launch_authorization_packet_approval_token),
+            "ok": bool(auth_packet_approval_token),
+            "actual": bool(auth_packet_approval_token),
+        }
+    )
+    checks.append(
+        {
+            "name": "authorization_packet_approval_token_action_matches",
+            "required": bool(require_launch_authorization_packet_approval_token),
+            "ok": str(auth_packet_approval_token.get("approval_action") or "") == str(required_launch_authorization_packet_approval_action or ""),
+            "actual": str(auth_packet_approval_token.get("approval_action") or ""),
+        }
+    )
+    checks.append(
+        {
+            "name": "authorization_packet_approval_token_not_expired",
+            "required": bool(require_launch_authorization_packet_approval_token),
+            "ok": (auth_token_expires_ms is not None and int(auth_token_expires_ms) >= now_ms),
+            "actual": auth_token_expires_ms,
+        }
+    )
+    checks.append(
+        {
+            "name": "authorization_packet_approval_token_fresh_enough",
+            "required": bool(require_launch_authorization_packet_approval_token),
+            "ok": auth_token_age_ok,
+            "actual": (None if auth_token_generated_ms is None else max(0, now_ms - int(auth_token_generated_ms))),
+        }
+    )
+    checks.append(
+        {
+            "name": "authorization_packet_approval_token_fingerprint_valid",
+            "required": bool(require_launch_authorization_packet_approval_token),
+            "ok": (bool(auth_packet_approval_token) and bool(auth_token_fp_actual) and auth_token_fp_actual == auth_token_fp_expected),
+            "actual": {
+                "token_fingerprint_sha256": auth_token_fp_actual,
+                "expected_token_fingerprint_sha256": auth_token_fp_expected,
+            },
+        }
+    )
+    checks.append(
+        {
+            "name": "authorization_packet_approval_token_matches_packet_fingerprint",
+            "required": bool(require_launch_authorization_packet_approval_token),
+            "ok": (
+                bool(auth_packet_approval_token)
+                and bool(auth_packet)
+                and str(auth_packet_approval_token.get("authorization_packet_fingerprint_sha256") or "") == str(auth_packet.get("packet_fingerprint_sha256") or "")
+            ),
+            "actual": {
+                "token_authorization_packet_fingerprint_sha256": str(auth_packet_approval_token.get("authorization_packet_fingerprint_sha256") or ""),
+                "packet_fingerprint_sha256": str(auth_packet.get("packet_fingerprint_sha256") or ""),
             },
         }
     )
@@ -2845,6 +2919,7 @@ def evaluate_live_launch_guard(
         "ticket_revocation_policy_action": ticket_revocation_policy_action,
         "authorization_packet_status": str(auth_packet.get("status") or ""),
         "authorization_packet_fingerprint_valid": bool(auth_packet and auth_packet_fp_actual and auth_packet_fp_actual == auth_packet_fp_expected),
+        "authorization_packet_approval_token_id": str(auth_packet_approval_token.get("token_id") or ""),
         "summary": ("live_launch_guard_allow" if allowed else f"live_launch_guard_block:{','.join(required_failed)}"),
     }
 
@@ -3214,6 +3289,50 @@ def write_live_pilot_launch_authorization_packet(report: dict[str, Any], path_st
         ]
         for c in [dict(x) for x in list(report.get("checks") or []) if isinstance(x, dict)]:
             lines.append(f"- {c.get('name','')}: `{'pass' if c.get('ok') else 'fail'}` required=`{bool(c.get('required', False))}` actual=`{c.get('actual')}`")
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    else:
+        p.write_text(json.dumps(report, sort_keys=True, indent=2), encoding="utf-8")
+
+
+def build_live_pilot_launch_authorization_packet_approval_token(
+    *,
+    launch_authorization_packet: dict[str, Any] | None = None,
+    operator_id: str = "",
+    approval_action: str = "approve_live_launch_packet",
+    expires_in_seconds: float = 900.0,
+) -> dict[str, Any]:
+    packet = dict(launch_authorization_packet or {})
+    now_ms = int(time.time() * 1000)
+    payload = {
+        "issued_unix_ms": now_ms,
+        "expires_unix_ms": now_ms + int(max(0.0, float(expires_in_seconds)) * 1000.0),
+        "operator_id": str(operator_id or ""),
+        "approval_action": str(approval_action or "approve_live_launch_packet"),
+        "authorization_packet_status": str(packet.get("status") or ""),
+        "authorization_packet_fingerprint_sha256": str(packet.get("packet_fingerprint_sha256") or ""),
+        "ticket_id": str(packet.get("ticket_id") or ""),
+        "intent_id": str(packet.get("intent_id") or ""),
+    }
+    token_id_seed = json.dumps(payload, sort_keys=True)
+    payload["token_id"] = "lpa_" + hashlib.sha256(token_id_seed.encode("utf-8")).hexdigest()[:16]
+    token_fp_src = json.dumps(payload, sort_keys=True)
+    payload["token_fingerprint_sha256"] = hashlib.sha256(token_fp_src.encode("utf-8")).hexdigest()
+    return payload
+
+
+def write_live_pilot_launch_authorization_packet_approval_token(report: dict[str, Any], path_str: str) -> None:
+    p = Path(path_str)
+    if p.suffix.lower() in {".md", ".markdown"}:
+        lines = [
+            "# Live Pilot Launch Authorization Packet Approval Token",
+            "",
+            f"- token_id: `{report.get('token_id', '')}`",
+            f"- operator_id: `{report.get('operator_id', '')}`",
+            f"- approval_action: `{report.get('approval_action', '')}`",
+            f"- authorization_packet_fingerprint_sha256: `{report.get('authorization_packet_fingerprint_sha256', '')}`",
+            f"- expires_unix_ms: `{report.get('expires_unix_ms', 0)}`",
+            f"- token_fingerprint_sha256: `{report.get('token_fingerprint_sha256', '')}`",
+        ]
         p.write_text("\n".join(lines) + "\n", encoding="utf-8")
     else:
         p.write_text(json.dumps(report, sort_keys=True, indent=2), encoding="utf-8")
@@ -5006,6 +5125,9 @@ def _main() -> int:
     p.add_argument("--live-launch-guard-report-path", default="")
     p.add_argument("--ticket-state-consistency-report-path", default="")
     p.add_argument("--launch-authorization-packet-path", default="")
+    p.add_argument("--launch-authorization-packet-approval-token-path", default="")
+    p.add_argument("--launch-authorization-packet-approval-action", default="approve_live_launch_packet")
+    p.add_argument("--launch-authorization-packet-approval-expires-seconds", type=float, default=900.0)
     p.add_argument("--launch-authorization-freshness-envelope-path", default="")
     p.add_argument("--live-launch-guard-enforce", action="store_true")
     p.add_argument("--live-launch-guard-require-prelive", action="store_true")
@@ -5018,10 +5140,13 @@ def _main() -> int:
     p.add_argument("--live-launch-guard-require-launch-intent", action="store_true")
     p.add_argument("--live-launch-guard-require-authorization-packet", action="store_true")
     p.add_argument("--live-launch-guard-require-authorization-packet-binding", action="store_true")
+    p.add_argument("--live-launch-guard-require-authorization-packet-approval-token", action="store_true")
     p.add_argument("--live-launch-guard-ticket-action", default="approve_live_test")
+    p.add_argument("--live-launch-guard-authorization-packet-approval-action", default="approve_live_launch_packet")
     p.add_argument("--live-launch-guard-max-prelive-age-seconds", type=float, default=3600.0)
     p.add_argument("--live-launch-guard-max-launch-intent-age-seconds", type=float, default=1800.0)
     p.add_argument("--live-launch-guard-max-authorization-packet-age-seconds", type=float, default=900.0)
+    p.add_argument("--live-launch-guard-max-authorization-packet-approval-token-age-seconds", type=float, default=900.0)
     p.add_argument("--postrun-review-packet-path", default="")
     p.add_argument("--archive-rotation-glob", default="")
     p.add_argument("--archive-rotation-dir", default="")
@@ -5129,6 +5254,8 @@ def _main() -> int:
             ensure_dir_within_base(str(Path(args.ticket_state_consistency_report_path).parent))
         if args.launch_authorization_packet_path:
             ensure_dir_within_base(str(Path(args.launch_authorization_packet_path).parent))
+        if args.launch_authorization_packet_approval_token_path:
+            ensure_dir_within_base(str(Path(args.launch_authorization_packet_approval_token_path).parent))
         if args.launch_authorization_freshness_envelope_path:
             ensure_dir_within_base(str(Path(args.launch_authorization_freshness_envelope_path).parent))
         if args.postrun_review_packet_path:
@@ -5173,6 +5300,7 @@ def _main() -> int:
         ticket_guard_obj = _read_json_or_empty(str(args.promotion_ticket_path or ""))
         launch_intent_guard_obj = _read_json_or_empty(str(args.launch_intent_manifest_path or ""))
         launch_authorization_packet_obj = _read_json_or_empty(str(args.launch_authorization_packet_path or ""))
+        launch_authorization_packet_approval_token_obj = _read_json_or_empty(str(args.launch_authorization_packet_approval_token_path or ""))
         revocation_policy_overrides = _parse_simple_policy_overrides(list(args.live_launch_guard_revocation_reason_class_policy or []))
         consumed_ticket_rows = list_live_pilot_promotion_ticket_consumptions(str(args.promotion_ticket_consumption_log_jsonl_path or ""))
         revoked_ticket_rows = list_live_pilot_promotion_ticket_revocations(str(args.promotion_ticket_revocation_log_jsonl_path or ""))
@@ -5183,6 +5311,7 @@ def _main() -> int:
             promotion_ticket=ticket_guard_obj,
             launch_intent_manifest=launch_intent_guard_obj,
             launch_authorization_packet=launch_authorization_packet_obj,
+            launch_authorization_packet_approval_token=launch_authorization_packet_approval_token_obj,
             requested_mode=str(args.mode or ""),
             requested_risk_profile_preset=str(args.risk_profile_preset or ""),
             require_prelive_go_no_go=bool(args.live_launch_guard_require_prelive),
@@ -5193,11 +5322,14 @@ def _main() -> int:
             require_launch_intent=bool(args.live_launch_guard_require_launch_intent),
             require_launch_authorization_packet=bool(args.live_launch_guard_require_authorization_packet),
             require_launch_authorization_packet_binding=bool(args.live_launch_guard_require_authorization_packet_binding),
+            require_launch_authorization_packet_approval_token=bool(args.live_launch_guard_require_authorization_packet_approval_token),
             revocation_reason_class_policy_overrides=revocation_policy_overrides,
             required_ticket_action=str(args.live_launch_guard_ticket_action or "approve_live_test"),
+            required_launch_authorization_packet_approval_action=str(args.live_launch_guard_authorization_packet_approval_action or "approve_live_launch_packet"),
             max_prelive_age_seconds=float(args.live_launch_guard_max_prelive_age_seconds or 3600.0),
             max_launch_intent_age_seconds=float(args.live_launch_guard_max_launch_intent_age_seconds or 1800.0),
             max_launch_authorization_packet_age_seconds=float(args.live_launch_guard_max_authorization_packet_age_seconds or 900.0),
+            max_launch_authorization_packet_approval_token_age_seconds=float(args.live_launch_guard_max_authorization_packet_approval_token_age_seconds or 900.0),
             consumed_tickets=consumed_ticket_rows,
             revoked_tickets=revoked_ticket_rows,
         )
@@ -5256,6 +5388,16 @@ def _main() -> int:
             write_live_pilot_launch_authorization_packet(launch_authorization_packet_out, str(args.launch_authorization_packet_path))
         else:
             launch_authorization_packet_out = {}
+        if str(args.launch_authorization_packet_approval_token_path or "").strip():
+            write_live_pilot_launch_authorization_packet_approval_token(
+                build_live_pilot_launch_authorization_packet_approval_token(
+                    launch_authorization_packet=(launch_authorization_packet_out or launch_authorization_packet_obj),
+                    operator_id=str(args.operator_decision_actor or args.handoff_operator_id or "main_user"),
+                    approval_action=str(args.launch_authorization_packet_approval_action or "approve_live_launch_packet"),
+                    expires_in_seconds=float(args.launch_authorization_packet_approval_expires_seconds or 900.0),
+                ),
+                str(args.launch_authorization_packet_approval_token_path),
+            )
         if str(args.launch_authorization_freshness_envelope_path or "").strip():
             write_live_pilot_launch_authorization_freshness_envelope(
                 build_live_pilot_launch_authorization_freshness_envelope(
