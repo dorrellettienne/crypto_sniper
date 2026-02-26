@@ -2271,6 +2271,33 @@ def _read_json_or_empty(path_str: str) -> dict[str, Any]:
     return dict(data) if isinstance(data, dict) else {}
 
 
+def list_live_pilot_promotion_ticket_consumptions(consumption_log_jsonl_path: str) -> list[dict[str, Any]]:
+    return [dict(x) for x in _read_jsonl_rows(str(consumption_log_jsonl_path or "")) if isinstance(x, dict) and str(x.get("event_type") or "") == "live_pilot_promotion_ticket_consumed"]
+
+
+def consume_live_pilot_promotion_ticket(
+    *,
+    consumption_log_jsonl_path: str,
+    ticket: dict[str, Any] | None,
+    reason: str = "live_launch_guard_allow",
+) -> dict[str, Any]:
+    t = dict(ticket or {})
+    if not str(consumption_log_jsonl_path or "").strip() or not t:
+        return {}
+    row = {
+        "ts_unix_ms": int(time.time() * 1000),
+        "event_type": "live_pilot_promotion_ticket_consumed",
+        "ticket_id": str(t.get("ticket_id") or ""),
+        "ticket_fingerprint_sha256": str(t.get("ticket_fingerprint_sha256") or ""),
+        "operator_id": str(t.get("operator_id") or ""),
+        "approval_action": str(t.get("approval_action") or ""),
+        "reason": str(reason or ""),
+    }
+    with Path(consumption_log_jsonl_path).open("a", encoding="utf-8") as f:
+        f.write(json.dumps(row, sort_keys=True) + "\n")
+    return row
+
+
 def evaluate_live_launch_guard(
     *,
     adapter_config: dict[str, Any] | None = None,
@@ -2280,8 +2307,10 @@ def evaluate_live_launch_guard(
     require_prelive_go_no_go: bool = False,
     require_bundle_pass: bool = False,
     require_operator_ticket: bool = False,
+    require_unused_ticket: bool = False,
     required_ticket_action: str = "approve_live_test",
     max_prelive_age_seconds: float = 3600.0,
+    consumed_tickets: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     cfg = dict(adapter_config or {})
     live_network = bool(cfg.get("live_send_network_enabled", False))
@@ -2330,6 +2359,14 @@ def evaluate_live_launch_guard(
             }
         )
     ticket_expires = _to_int_or_none(ticket.get("expires_unix_ms"))
+    consumed_rows = [dict(x) for x in list(consumed_tickets or []) if isinstance(x, dict)]
+    ticket_id = str(ticket.get("ticket_id") or "")
+    ticket_fp = str(ticket.get("ticket_fingerprint_sha256") or "")
+    ticket_consumed = any(
+        (ticket_id and str(r.get("ticket_id") or "") == ticket_id)
+        or (ticket_fp and str(r.get("ticket_fingerprint_sha256") or "") == ticket_fp)
+        for r in consumed_rows
+    )
     checks.append({"name": "ticket_present", "required": bool(require_operator_ticket), "ok": bool(ticket), "actual": bool(ticket)})
     checks.append(
         {
@@ -2347,6 +2384,14 @@ def evaluate_live_launch_guard(
             "actual": ticket_expires,
         }
     )
+    checks.append(
+        {
+            "name": "ticket_unused",
+            "required": bool(require_operator_ticket and require_unused_ticket),
+            "ok": (not ticket_consumed),
+            "actual": ticket_consumed,
+        }
+    )
 
     required_failed = [c["name"] for c in checks if bool(c.get("required", False)) and not bool(c.get("ok", False))]
     live_launch_requested = bool(live_network and enable_live_auto_submit_window)
@@ -2357,6 +2402,7 @@ def evaluate_live_launch_guard(
         "live_launch_requested": live_launch_requested,
         "required_failed_checks": required_failed,
         "checks": checks,
+        "ticket_consumed": ticket_consumed,
         "summary": ("live_launch_guard_allow" if allowed else f"live_launch_guard_block:{','.join(required_failed)}"),
     }
 
@@ -4029,11 +4075,14 @@ def _main() -> int:
     p.add_argument("--promotion-ticket-path", default="")
     p.add_argument("--promotion-ticket-action", default="approve_live_test")
     p.add_argument("--promotion-ticket-expires-seconds", type=float, default=3600.0)
+    p.add_argument("--promotion-ticket-consumption-log-jsonl-path", default="")
     p.add_argument("--live-launch-guard-report-path", default="")
     p.add_argument("--live-launch-guard-enforce", action="store_true")
     p.add_argument("--live-launch-guard-require-prelive", action="store_true")
     p.add_argument("--live-launch-guard-require-bundle-pass", action="store_true")
     p.add_argument("--live-launch-guard-require-ticket", action="store_true")
+    p.add_argument("--live-launch-guard-require-unused-ticket", action="store_true")
+    p.add_argument("--live-launch-guard-consume-ticket-on-allow", action="store_true")
     p.add_argument("--live-launch-guard-ticket-action", default="approve_live_test")
     p.add_argument("--live-launch-guard-max-prelive-age-seconds", type=float, default=3600.0)
     p.add_argument("--postrun-review-packet-path", default="")
@@ -4127,6 +4176,8 @@ def _main() -> int:
             ensure_dir_within_base(str(Path(args.prelive_go_no_go_report_path).parent))
         if args.promotion_ticket_path:
             ensure_dir_within_base(str(Path(args.promotion_ticket_path).parent))
+        if args.promotion_ticket_consumption_log_jsonl_path:
+            ensure_dir_within_base(str(Path(args.promotion_ticket_consumption_log_jsonl_path).parent))
         if args.live_launch_guard_report_path:
             ensure_dir_within_base(str(Path(args.live_launch_guard_report_path).parent))
         if args.postrun_review_packet_path:
@@ -4166,14 +4217,26 @@ def _main() -> int:
             require_prelive_go_no_go=bool(args.live_launch_guard_require_prelive),
             require_bundle_pass=bool(args.live_launch_guard_require_bundle_pass),
             require_operator_ticket=bool(args.live_launch_guard_require_ticket),
+            require_unused_ticket=bool(args.live_launch_guard_require_unused_ticket),
             required_ticket_action=str(args.live_launch_guard_ticket_action or "approve_live_test"),
             max_prelive_age_seconds=float(args.live_launch_guard_max_prelive_age_seconds or 3600.0),
+            consumed_tickets=list_live_pilot_promotion_ticket_consumptions(str(args.promotion_ticket_consumption_log_jsonl_path or "")),
         )
         if str(args.live_launch_guard_report_path or "").strip():
             write_live_launch_guard_report(live_guard, str(args.live_launch_guard_report_path))
         if str(live_guard.get("status") or "") != "allow":
             print(json.dumps({"live_launch_guard": live_guard}, sort_keys=True))
             return 3
+        if (
+            bool(args.live_launch_guard_consume_ticket_on_allow)
+            and bool(args.live_launch_guard_require_ticket)
+            and bool(args.live_launch_guard_require_unused_ticket)
+        ):
+            consume_live_pilot_promotion_ticket(
+                consumption_log_jsonl_path=str(args.promotion_ticket_consumption_log_jsonl_path or ""),
+                ticket=ticket_guard_obj,
+                reason="live_launch_guard_allow",
+            )
     if str(args.campaign_report_glob or "").strip():
         report_paths = sorted(Path(".").glob(str(args.campaign_report_glob)))
         reports = []
