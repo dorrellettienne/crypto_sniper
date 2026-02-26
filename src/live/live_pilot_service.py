@@ -2340,6 +2340,14 @@ def list_live_pilot_promotion_ticket_revocations(revocation_log_jsonl_path: str)
     return [dict(x) for x in _read_jsonl_rows(str(revocation_log_jsonl_path or "")) if isinstance(x, dict) and str(x.get("event_type") or "") == "live_pilot_promotion_ticket_revoked"]
 
 
+def list_live_pilot_launch_authorization_packet_approval_token_revocations(revocation_log_jsonl_path: str) -> list[dict[str, Any]]:
+    return [
+        dict(x)
+        for x in _read_jsonl_rows(str(revocation_log_jsonl_path or ""))
+        if isinstance(x, dict) and str(x.get("event_type") or "") == "live_pilot_launch_authorization_packet_approval_token_revoked"
+    ]
+
+
 def resolve_live_pilot_promotion_ticket_latest_state(
     *,
     ticket: dict[str, Any] | None = None,
@@ -2557,6 +2565,35 @@ def revoke_live_pilot_promotion_ticket(
     return row
 
 
+def revoke_live_pilot_launch_authorization_packet_approval_token(
+    *,
+    revocation_log_jsonl_path: str,
+    approval_token: dict[str, Any] | None,
+    operator_id: str = "",
+    reason: str = "manual_revoke",
+) -> dict[str, Any]:
+    tok = dict(approval_token or {})
+    if not str(revocation_log_jsonl_path or "").strip() or not tok:
+        return {}
+    reason_text = str(reason or "manual_revoke")
+    reason_meta = classify_live_pilot_promotion_ticket_revocation_reason(reason_text)
+    row = {
+        "ts_unix_ms": int(time.time() * 1000),
+        "event_type": "live_pilot_launch_authorization_packet_approval_token_revoked",
+        "token_id": str(tok.get("token_id") or ""),
+        "token_fingerprint_sha256": str(tok.get("token_fingerprint_sha256") or ""),
+        "authorization_packet_fingerprint_sha256": str(tok.get("authorization_packet_fingerprint_sha256") or ""),
+        "operator_id": str(operator_id or tok.get("operator_id") or ""),
+        "approval_action": str(tok.get("approval_action") or ""),
+        "reason": reason_text,
+        "reason_class": str(reason_meta.get("reason_class") or "other"),
+        "severity": str(reason_meta.get("severity") or "warning"),
+    }
+    with Path(revocation_log_jsonl_path).open("a", encoding="utf-8") as f:
+        f.write(json.dumps(row, sort_keys=True) + "\n")
+    return row
+
+
 def evaluate_live_launch_guard(
     *,
     adapter_config: dict[str, Any] | None = None,
@@ -2577,6 +2614,7 @@ def evaluate_live_launch_guard(
     require_launch_authorization_packet: bool = False,
     require_launch_authorization_packet_binding: bool = False,
     require_launch_authorization_packet_approval_token: bool = False,
+    require_unrevoked_launch_authorization_packet_approval_token: bool = False,
     revocation_reason_class_policy_overrides: dict[str, str] | None = None,
     required_ticket_action: str = "approve_live_test",
     required_launch_authorization_packet_approval_action: str = "approve_live_launch_packet",
@@ -2586,6 +2624,7 @@ def evaluate_live_launch_guard(
     max_launch_authorization_packet_approval_token_age_seconds: float = 900.0,
     consumed_tickets: list[dict[str, Any]] | None = None,
     revoked_tickets: list[dict[str, Any]] | None = None,
+    revoked_launch_authorization_packet_approval_tokens: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     cfg = dict(adapter_config or {})
     live_network = bool(cfg.get("live_send_network_enabled", False))
@@ -2594,6 +2633,7 @@ def evaluate_live_launch_guard(
     intent = dict(launch_intent_manifest or {})
     auth_packet = dict(launch_authorization_packet or {})
     auth_packet_approval_token = dict(launch_authorization_packet_approval_token or {})
+    revoked_auth_token_rows = [dict(x) for x in list(revoked_launch_authorization_packet_approval_tokens or []) if isinstance(x, dict)]
     intent_scope = dict(intent.get("scope") or {})
     now_ms = int(time.time() * 1000)
     checks: list[dict[str, Any]] = []
@@ -2770,6 +2810,21 @@ def evaluate_live_launch_guard(
             },
         }
     )
+    auth_token_id = str(auth_packet_approval_token.get("token_id") or "")
+    auth_token_fp = str(auth_packet_approval_token.get("token_fingerprint_sha256") or "")
+    auth_token_revoked = any(
+        (auth_token_id and str(r.get("token_id") or "") == auth_token_id)
+        or (auth_token_fp and str(r.get("token_fingerprint_sha256") or "") == auth_token_fp)
+        for r in revoked_auth_token_rows
+    )
+    checks.append(
+        {
+            "name": "authorization_packet_approval_token_unrevoked",
+            "required": bool(require_launch_authorization_packet_approval_token and require_unrevoked_launch_authorization_packet_approval_token),
+            "ok": (not auth_token_revoked),
+            "actual": auth_token_revoked,
+        }
+    )
 
     prelive_generated_ms = _to_int_or_none(go_no_go.get("generated_unix_ms"))
     prelive_age_ok = False
@@ -2920,6 +2975,7 @@ def evaluate_live_launch_guard(
         "authorization_packet_status": str(auth_packet.get("status") or ""),
         "authorization_packet_fingerprint_valid": bool(auth_packet and auth_packet_fp_actual and auth_packet_fp_actual == auth_packet_fp_expected),
         "authorization_packet_approval_token_id": str(auth_packet_approval_token.get("token_id") or ""),
+        "authorization_packet_approval_token_revoked": auth_token_revoked,
         "summary": ("live_launch_guard_allow" if allowed else f"live_launch_guard_block:{','.join(required_failed)}"),
     }
 
@@ -5126,6 +5182,10 @@ def _main() -> int:
     p.add_argument("--ticket-state-consistency-report-path", default="")
     p.add_argument("--launch-authorization-packet-path", default="")
     p.add_argument("--launch-authorization-packet-approval-token-path", default="")
+    p.add_argument("--launch-authorization-packet-approval-token-revocation-log-jsonl-path", default="")
+    p.add_argument("--launch-authorization-packet-approval-token-revoke-now", action="store_true")
+    p.add_argument("--launch-authorization-packet-approval-token-revoke-reason", default="manual_revoke")
+    p.add_argument("--launch-authorization-packet-approval-token-revoke-only", action="store_true")
     p.add_argument("--launch-authorization-packet-approval-action", default="approve_live_launch_packet")
     p.add_argument("--launch-authorization-packet-approval-expires-seconds", type=float, default=900.0)
     p.add_argument("--launch-authorization-freshness-envelope-path", default="")
@@ -5141,6 +5201,7 @@ def _main() -> int:
     p.add_argument("--live-launch-guard-require-authorization-packet", action="store_true")
     p.add_argument("--live-launch-guard-require-authorization-packet-binding", action="store_true")
     p.add_argument("--live-launch-guard-require-authorization-packet-approval-token", action="store_true")
+    p.add_argument("--live-launch-guard-require-unrevoked-authorization-packet-approval-token", action="store_true")
     p.add_argument("--live-launch-guard-ticket-action", default="approve_live_test")
     p.add_argument("--live-launch-guard-authorization-packet-approval-action", default="approve_live_launch_packet")
     p.add_argument("--live-launch-guard-max-prelive-age-seconds", type=float, default=3600.0)
@@ -5256,6 +5317,8 @@ def _main() -> int:
             ensure_dir_within_base(str(Path(args.launch_authorization_packet_path).parent))
         if args.launch_authorization_packet_approval_token_path:
             ensure_dir_within_base(str(Path(args.launch_authorization_packet_approval_token_path).parent))
+        if args.launch_authorization_packet_approval_token_revocation_log_jsonl_path:
+            ensure_dir_within_base(str(Path(args.launch_authorization_packet_approval_token_revocation_log_jsonl_path).parent))
         if args.launch_authorization_freshness_envelope_path:
             ensure_dir_within_base(str(Path(args.launch_authorization_freshness_envelope_path).parent))
         if args.postrun_review_packet_path:
@@ -5295,6 +5358,17 @@ def _main() -> int:
         print(json.dumps({"promotion_ticket_revoked": revoked_row}, sort_keys=True))
         if bool(args.promotion_ticket_revoke_only):
             return 0
+    if bool(args.launch_authorization_packet_approval_token_revoke_now):
+        token_for_revoke = _read_json_or_empty(str(args.launch_authorization_packet_approval_token_path or ""))
+        revoked_token_row = revoke_live_pilot_launch_authorization_packet_approval_token(
+            revocation_log_jsonl_path=str(args.launch_authorization_packet_approval_token_revocation_log_jsonl_path or ""),
+            approval_token=token_for_revoke,
+            operator_id=str(args.operator_decision_actor or args.handoff_operator_id or ""),
+            reason=str(args.launch_authorization_packet_approval_token_revoke_reason or "manual_revoke"),
+        )
+        print(json.dumps({"launch_authorization_packet_approval_token_revoked": revoked_token_row}, sort_keys=True))
+        if bool(args.launch_authorization_packet_approval_token_revoke_only):
+            return 0
     if bool(args.live_launch_guard_enforce):
         prelive_guard_obj = _read_json_or_empty(str(args.prelive_go_no_go_report_path or ""))
         ticket_guard_obj = _read_json_or_empty(str(args.promotion_ticket_path or ""))
@@ -5304,6 +5378,9 @@ def _main() -> int:
         revocation_policy_overrides = _parse_simple_policy_overrides(list(args.live_launch_guard_revocation_reason_class_policy or []))
         consumed_ticket_rows = list_live_pilot_promotion_ticket_consumptions(str(args.promotion_ticket_consumption_log_jsonl_path or ""))
         revoked_ticket_rows = list_live_pilot_promotion_ticket_revocations(str(args.promotion_ticket_revocation_log_jsonl_path or ""))
+        revoked_auth_token_rows = list_live_pilot_launch_authorization_packet_approval_token_revocations(
+            str(args.launch_authorization_packet_approval_token_revocation_log_jsonl_path or "")
+        )
         live_guard = evaluate_live_launch_guard(
             adapter_config=(adapter_config if isinstance(adapter_config, dict) else None),
             enable_live_auto_submit_window=bool(args.enable_live_auto_submit_window),
@@ -5323,6 +5400,9 @@ def _main() -> int:
             require_launch_authorization_packet=bool(args.live_launch_guard_require_authorization_packet),
             require_launch_authorization_packet_binding=bool(args.live_launch_guard_require_authorization_packet_binding),
             require_launch_authorization_packet_approval_token=bool(args.live_launch_guard_require_authorization_packet_approval_token),
+            require_unrevoked_launch_authorization_packet_approval_token=bool(
+                args.live_launch_guard_require_unrevoked_authorization_packet_approval_token
+            ),
             revocation_reason_class_policy_overrides=revocation_policy_overrides,
             required_ticket_action=str(args.live_launch_guard_ticket_action or "approve_live_test"),
             required_launch_authorization_packet_approval_action=str(args.live_launch_guard_authorization_packet_approval_action or "approve_live_launch_packet"),
@@ -5332,6 +5412,7 @@ def _main() -> int:
             max_launch_authorization_packet_approval_token_age_seconds=float(args.live_launch_guard_max_authorization_packet_approval_token_age_seconds or 900.0),
             consumed_tickets=consumed_ticket_rows,
             revoked_tickets=revoked_ticket_rows,
+            revoked_launch_authorization_packet_approval_tokens=revoked_auth_token_rows,
         )
         if str(args.promotion_ticket_revocation_audit_report_path or "").strip():
             revocation_audit_report = build_live_pilot_promotion_ticket_revocation_audit_summary(
