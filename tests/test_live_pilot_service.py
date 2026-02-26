@@ -83,6 +83,8 @@ from src.live.live_pilot_service import (
     revoke_live_pilot_launch_authorization_chain_approval_token,
     list_live_pilot_launch_authorization_chain_of_chain_approval_token_revocations,
     revoke_live_pilot_launch_authorization_chain_of_chain_approval_token,
+    list_live_pilot_launch_authorization_super_chain_approval_token_revocations,
+    revoke_live_pilot_launch_authorization_super_chain_approval_token,
     resolve_live_pilot_launch_authorization_chain_approval_token_latest_state,
     build_live_pilot_launch_authorization_chain_approval_token_audit_summary,
     write_live_pilot_launch_authorization_chain_approval_token_audit_summary,
@@ -3066,6 +3068,9 @@ def test_launch_authorization_chain_freshness_summary_and_guard_requirement(tmp_
         launch_authorization_freshness_envelope={"status": "pass"},
     )
     chain["generated_unix_ms"] = now_ms
+    chain["chain_report_fingerprint_sha256"] = __import__("hashlib").sha256(
+        json.dumps({k: v for k, v in chain.items() if k != "chain_report_fingerprint_sha256"}, sort_keys=True).encode("utf-8")
+    ).hexdigest()
     fresh = {"status": "pass", "stale_sources": ["launch_intent_manifest"]}
     summary = build_live_pilot_launch_authorization_chain_freshness_summary(
         launch_authorization_chain_report=chain,
@@ -3725,6 +3730,60 @@ def test_launch_authorization_super_chain_approval_token_and_guard_checks(tmp_pa
     )
     assert guard_bad["status"] == "block"
     assert "authorization_super_chain_approval_token_matches_super_chain_fingerprint" in guard_bad["required_failed_checks"]
+
+
+def test_launch_authorization_super_chain_approval_token_revocation_and_guard_unrevoked_check(tmp_path):
+    now_ms = int(time.time() * 1000)
+    chain2 = build_live_pilot_launch_authorization_chain_of_chain_report(
+        launch_authorization_chain_report={"status": "ready", "chain_report_fingerprint_sha256": "cfp"},
+        launch_authorization_chain_approval_token={"token_id": "lca_1", "chain_report_fingerprint_sha256": "cfp"},
+        launch_authorization_chain_approval_token_audit_summary={"token_state": {"revoked": False}},
+        live_launch_guard_report={"status": "allow", "required_failed_checks": [], "generated_unix_ms": now_ms},
+    )
+    token2 = build_live_pilot_launch_authorization_chain_of_chain_approval_token(
+        launch_authorization_chain_of_chain_report=chain2,
+        operator_id="main_user",
+        approval_action="approve_live_launch_chain_of_chain",
+        expires_in_seconds=900,
+    )
+    super_chain = build_live_pilot_launch_authorization_super_chain_report(
+        launch_authorization_chain_of_chain_report=chain2,
+        launch_authorization_chain_of_chain_approval_token=token2,
+        launch_authorization_chain_of_chain_approval_token_audit_summary={"token_state": {"revoked": False}},
+        live_launch_guard_report={"status": "allow", "required_failed_checks": [], "generated_unix_ms": now_ms},
+    )
+    super_token = build_live_pilot_launch_authorization_super_chain_approval_token(
+        launch_authorization_super_chain_report=super_chain,
+        operator_id="main_user",
+        approval_action="approve_live_launch_super_chain",
+        expires_in_seconds=900,
+    )
+    log_path = tmp_path / "super_chain_approval_token_revocations.jsonl"
+    row = revoke_live_pilot_launch_authorization_super_chain_approval_token(
+        revocation_log_jsonl_path=str(log_path),
+        approval_token=super_token,
+        operator_id="main_user",
+        reason="operator_cancelled",
+    )
+    assert row["event_type"] == "live_pilot_launch_authorization_super_chain_approval_token_revoked"
+    rows = list_live_pilot_launch_authorization_super_chain_approval_token_revocations(str(log_path))
+    assert len(rows) == 1
+
+    guard = evaluate_live_launch_guard(
+        adapter_config={"live_send_network_enabled": True},
+        enable_live_auto_submit_window=True,
+        launch_authorization_super_chain_report=super_chain,
+        launch_authorization_super_chain_approval_token=super_token,
+        require_launch_authorization_super_chain_report=True,
+        require_launch_authorization_super_chain_approval_token=True,
+        require_unrevoked_launch_authorization_super_chain_approval_token=True,
+        max_launch_authorization_super_chain_report_age_seconds=3600.0,
+        max_launch_authorization_super_chain_approval_token_age_seconds=3600.0,
+        revoked_launch_authorization_super_chain_approval_tokens=rows,
+    )
+    assert guard["status"] == "block"
+    assert guard["authorization_super_chain_approval_token_revoked"] is True
+    assert "authorization_super_chain_approval_token_unrevoked" in guard["required_failed_checks"]
 
 
 def test_live_test_readiness_report_and_runbook_export(tmp_path):
