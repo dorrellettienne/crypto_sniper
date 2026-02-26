@@ -2336,6 +2336,10 @@ def list_live_pilot_promotion_ticket_consumptions(consumption_log_jsonl_path: st
     return [dict(x) for x in _read_jsonl_rows(str(consumption_log_jsonl_path or "")) if isinstance(x, dict) and str(x.get("event_type") or "") == "live_pilot_promotion_ticket_consumed"]
 
 
+def list_live_pilot_promotion_ticket_revocations(revocation_log_jsonl_path: str) -> list[dict[str, Any]]:
+    return [dict(x) for x in _read_jsonl_rows(str(revocation_log_jsonl_path or "")) if isinstance(x, dict) and str(x.get("event_type") or "") == "live_pilot_promotion_ticket_revoked"]
+
+
 def consume_live_pilot_promotion_ticket(
     *,
     consumption_log_jsonl_path: str,
@@ -2359,6 +2363,30 @@ def consume_live_pilot_promotion_ticket(
     return row
 
 
+def revoke_live_pilot_promotion_ticket(
+    *,
+    revocation_log_jsonl_path: str,
+    ticket: dict[str, Any] | None,
+    operator_id: str = "",
+    reason: str = "manual_revoke",
+) -> dict[str, Any]:
+    t = dict(ticket or {})
+    if not str(revocation_log_jsonl_path or "").strip() or not t:
+        return {}
+    row = {
+        "ts_unix_ms": int(time.time() * 1000),
+        "event_type": "live_pilot_promotion_ticket_revoked",
+        "ticket_id": str(t.get("ticket_id") or ""),
+        "ticket_fingerprint_sha256": str(t.get("ticket_fingerprint_sha256") or ""),
+        "operator_id": str(operator_id or t.get("operator_id") or ""),
+        "approval_action": str(t.get("approval_action") or ""),
+        "reason": str(reason or "manual_revoke"),
+    }
+    with Path(revocation_log_jsonl_path).open("a", encoding="utf-8") as f:
+        f.write(json.dumps(row, sort_keys=True) + "\n")
+    return row
+
+
 def evaluate_live_launch_guard(
     *,
     adapter_config: dict[str, Any] | None = None,
@@ -2372,11 +2400,13 @@ def evaluate_live_launch_guard(
     require_bundle_pass: bool = False,
     require_operator_ticket: bool = False,
     require_unused_ticket: bool = False,
+    require_unrevoked_ticket: bool = False,
     require_launch_intent: bool = False,
     required_ticket_action: str = "approve_live_test",
     max_prelive_age_seconds: float = 3600.0,
     max_launch_intent_age_seconds: float = 1800.0,
     consumed_tickets: list[dict[str, Any]] | None = None,
+    revoked_tickets: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     cfg = dict(adapter_config or {})
     live_network = bool(cfg.get("live_send_network_enabled", False))
@@ -2458,12 +2488,18 @@ def evaluate_live_launch_guard(
         )
     ticket_expires = _to_int_or_none(ticket.get("expires_unix_ms"))
     consumed_rows = [dict(x) for x in list(consumed_tickets or []) if isinstance(x, dict)]
+    revoked_rows = [dict(x) for x in list(revoked_tickets or []) if isinstance(x, dict)]
     ticket_id = str(ticket.get("ticket_id") or "")
     ticket_fp = str(ticket.get("ticket_fingerprint_sha256") or "")
     ticket_consumed = any(
         (ticket_id and str(r.get("ticket_id") or "") == ticket_id)
         or (ticket_fp and str(r.get("ticket_fingerprint_sha256") or "") == ticket_fp)
         for r in consumed_rows
+    )
+    ticket_revoked = any(
+        (ticket_id and str(r.get("ticket_id") or "") == ticket_id)
+        or (ticket_fp and str(r.get("ticket_fingerprint_sha256") or "") == ticket_fp)
+        for r in revoked_rows
     )
     checks.append({"name": "ticket_present", "required": bool(require_operator_ticket), "ok": bool(ticket), "actual": bool(ticket)})
     checks.append(
@@ -2492,6 +2528,14 @@ def evaluate_live_launch_guard(
     )
     checks.append(
         {
+            "name": "ticket_unrevoked",
+            "required": bool(require_operator_ticket and require_unrevoked_ticket),
+            "ok": (not ticket_revoked),
+            "actual": ticket_revoked,
+        }
+    )
+    checks.append(
+        {
             "name": "ticket_bound_to_launch_intent",
             "required": bool(require_operator_ticket and require_launch_intent),
             "ok": (
@@ -2516,6 +2560,7 @@ def evaluate_live_launch_guard(
         "required_failed_checks": required_failed,
         "checks": checks,
         "ticket_consumed": ticket_consumed,
+        "ticket_revoked": ticket_revoked,
         "summary": ("live_launch_guard_allow" if allowed else f"live_launch_guard_block:{','.join(required_failed)}"),
     }
 
@@ -4189,6 +4234,10 @@ def _main() -> int:
     p.add_argument("--promotion-ticket-action", default="approve_live_test")
     p.add_argument("--promotion-ticket-expires-seconds", type=float, default=3600.0)
     p.add_argument("--promotion-ticket-consumption-log-jsonl-path", default="")
+    p.add_argument("--promotion-ticket-revocation-log-jsonl-path", default="")
+    p.add_argument("--promotion-ticket-revoke-now", action="store_true")
+    p.add_argument("--promotion-ticket-revoke-reason", default="manual_revoke")
+    p.add_argument("--promotion-ticket-revoke-only", action="store_true")
     p.add_argument("--launch-intent-manifest-path", default="")
     p.add_argument("--launch-intent-expires-seconds", type=float, default=1800.0)
     p.add_argument("--live-launch-guard-report-path", default="")
@@ -4197,6 +4246,7 @@ def _main() -> int:
     p.add_argument("--live-launch-guard-require-bundle-pass", action="store_true")
     p.add_argument("--live-launch-guard-require-ticket", action="store_true")
     p.add_argument("--live-launch-guard-require-unused-ticket", action="store_true")
+    p.add_argument("--live-launch-guard-require-unrevoked-ticket", action="store_true")
     p.add_argument("--live-launch-guard-consume-ticket-on-allow", action="store_true")
     p.add_argument("--live-launch-guard-require-launch-intent", action="store_true")
     p.add_argument("--live-launch-guard-ticket-action", default="approve_live_test")
@@ -4295,6 +4345,8 @@ def _main() -> int:
             ensure_dir_within_base(str(Path(args.promotion_ticket_path).parent))
         if args.promotion_ticket_consumption_log_jsonl_path:
             ensure_dir_within_base(str(Path(args.promotion_ticket_consumption_log_jsonl_path).parent))
+        if args.promotion_ticket_revocation_log_jsonl_path:
+            ensure_dir_within_base(str(Path(args.promotion_ticket_revocation_log_jsonl_path).parent))
         if args.launch_intent_manifest_path:
             ensure_dir_within_base(str(Path(args.launch_intent_manifest_path).parent))
         if args.live_launch_guard_report_path:
@@ -4325,6 +4377,17 @@ def _main() -> int:
         adapter_config = json.loads(Path(args.adapter_config_json_path).read_text(encoding="utf-8"))
     elif args.adapter_config_json:
         adapter_config = json.loads(args.adapter_config_json)
+    if bool(args.promotion_ticket_revoke_now):
+        ticket_for_revoke = _read_json_or_empty(str(args.promotion_ticket_path or ""))
+        revoked_row = revoke_live_pilot_promotion_ticket(
+            revocation_log_jsonl_path=str(args.promotion_ticket_revocation_log_jsonl_path or ""),
+            ticket=ticket_for_revoke,
+            operator_id=str(args.operator_decision_actor or args.handoff_operator_id or ""),
+            reason=str(args.promotion_ticket_revoke_reason or "manual_revoke"),
+        )
+        print(json.dumps({"promotion_ticket_revoked": revoked_row}, sort_keys=True))
+        if bool(args.promotion_ticket_revoke_only):
+            return 0
     if bool(args.live_launch_guard_enforce):
         prelive_guard_obj = _read_json_or_empty(str(args.prelive_go_no_go_report_path or ""))
         ticket_guard_obj = _read_json_or_empty(str(args.promotion_ticket_path or ""))
@@ -4341,11 +4404,13 @@ def _main() -> int:
             require_bundle_pass=bool(args.live_launch_guard_require_bundle_pass),
             require_operator_ticket=bool(args.live_launch_guard_require_ticket),
             require_unused_ticket=bool(args.live_launch_guard_require_unused_ticket),
+            require_unrevoked_ticket=bool(args.live_launch_guard_require_unrevoked_ticket),
             require_launch_intent=bool(args.live_launch_guard_require_launch_intent),
             required_ticket_action=str(args.live_launch_guard_ticket_action or "approve_live_test"),
             max_prelive_age_seconds=float(args.live_launch_guard_max_prelive_age_seconds or 3600.0),
             max_launch_intent_age_seconds=float(args.live_launch_guard_max_launch_intent_age_seconds or 1800.0),
             consumed_tickets=list_live_pilot_promotion_ticket_consumptions(str(args.promotion_ticket_consumption_log_jsonl_path or "")),
+            revoked_tickets=list_live_pilot_promotion_ticket_revocations(str(args.promotion_ticket_revocation_log_jsonl_path or "")),
         )
         if str(args.live_launch_guard_report_path or "").strip():
             write_live_launch_guard_report(live_guard, str(args.live_launch_guard_report_path))

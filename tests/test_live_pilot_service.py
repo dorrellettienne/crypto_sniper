@@ -53,6 +53,8 @@ from src.live.live_pilot_service import (
     write_live_pilot_launch_intent_manifest,
     list_live_pilot_promotion_ticket_consumptions,
     consume_live_pilot_promotion_ticket,
+    list_live_pilot_promotion_ticket_revocations,
+    revoke_live_pilot_promotion_ticket,
     evaluate_live_launch_guard,
     write_live_launch_guard_report,
     build_live_pilot_postrun_review_packet,
@@ -2408,3 +2410,36 @@ def test_launch_intent_manifest_and_ticket_binding_guard(tmp_path):
     )
     assert guard_block["status"] == "block"
     assert "ticket_bound_to_launch_intent" in guard_block["required_failed_checks"]
+
+
+def test_ticket_revocation_log_and_guard_unrevoked_check(tmp_path):
+    ticket = build_live_pilot_promotion_ticket(
+        operator_id="main_user",
+        approval_action="approve_live_test",
+        prelive_go_no_go_report={"status": "go", "failed_required_checks": []},
+        expires_in_seconds=3600,
+    )
+    log_path = tmp_path / "ticket_revocations.jsonl"
+    row = revoke_live_pilot_promotion_ticket(
+        revocation_log_jsonl_path=str(log_path),
+        ticket=ticket,
+        operator_id="main_user",
+        reason="operator_cancelled",
+    )
+    assert row["event_type"] == "live_pilot_promotion_ticket_revoked"
+    revocations = list_live_pilot_promotion_ticket_revocations(str(log_path))
+    assert len(revocations) == 1
+
+    guard = evaluate_live_launch_guard(
+        adapter_config={"live_send_network_enabled": True},
+        enable_live_auto_submit_window=True,
+        prelive_go_no_go_report={"status": "go", "bundle_verification_status": "pass", "generated_unix_ms": int(time.time() * 1000)},
+        promotion_ticket=ticket,
+        require_prelive_go_no_go=True,
+        require_bundle_pass=True,
+        require_operator_ticket=True,
+        require_unrevoked_ticket=True,
+        revoked_tickets=revocations,
+    )
+    assert guard["status"] == "block"
+    assert "ticket_unrevoked" in guard["required_failed_checks"]
