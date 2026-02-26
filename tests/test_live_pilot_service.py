@@ -2427,6 +2427,8 @@ def test_ticket_revocation_log_and_guard_unrevoked_check(tmp_path):
         reason="operator_cancelled",
     )
     assert row["event_type"] == "live_pilot_promotion_ticket_revoked"
+    assert row["reason_class"] == "operator"
+    assert row["severity"] == "warning"
     revocations = list_live_pilot_promotion_ticket_revocations(str(log_path))
     assert len(revocations) == 1
 
@@ -2443,3 +2445,53 @@ def test_ticket_revocation_log_and_guard_unrevoked_check(tmp_path):
     )
     assert guard["status"] == "block"
     assert "ticket_unrevoked" in guard["required_failed_checks"]
+
+
+def test_ticket_revocation_guard_reason_class_policy_override_allows_specific_class(tmp_path):
+    ticket = build_live_pilot_promotion_ticket(
+        operator_id="main_user",
+        approval_action="approve_live_test",
+        prelive_go_no_go_report={"status": "go", "failed_required_checks": []},
+        expires_in_seconds=3600,
+    )
+    log_path = tmp_path / "ticket_revocations.jsonl"
+    revoke_live_pilot_promotion_ticket(
+        revocation_log_jsonl_path=str(log_path),
+        ticket=ticket,
+        operator_id="main_user",
+        reason="operator_cancelled",
+    )
+    revocations = list_live_pilot_promotion_ticket_revocations(str(log_path))
+
+    guard_allow = evaluate_live_launch_guard(
+        adapter_config={"live_send_network_enabled": True},
+        enable_live_auto_submit_window=True,
+        prelive_go_no_go_report={"status": "go", "bundle_verification_status": "pass", "generated_unix_ms": int(time.time() * 1000)},
+        promotion_ticket=ticket,
+        require_prelive_go_no_go=True,
+        require_bundle_pass=True,
+        require_operator_ticket=True,
+        require_unrevoked_ticket=True,
+        revoked_tickets=revocations,
+        revocation_reason_class_policy_overrides={"operator": "allow"},
+    )
+    assert guard_allow["status"] == "allow"
+    assert guard_allow["ticket_revoked"] is True
+    assert guard_allow["ticket_effectively_revoked"] is False
+    assert guard_allow["ticket_revocation_reason_class"] == "operator"
+    assert guard_allow["ticket_revocation_policy_action"] == "allow"
+
+    guard_block = evaluate_live_launch_guard(
+        adapter_config={"live_send_network_enabled": True},
+        enable_live_auto_submit_window=True,
+        prelive_go_no_go_report={"status": "go", "bundle_verification_status": "pass", "generated_unix_ms": int(time.time() * 1000)},
+        promotion_ticket=ticket,
+        require_prelive_go_no_go=True,
+        require_bundle_pass=True,
+        require_operator_ticket=True,
+        require_unrevoked_ticket=True,
+        revoked_tickets=revocations,
+        revocation_reason_class_policy_overrides={"operator": "block"},
+    )
+    assert guard_block["status"] == "block"
+    assert "ticket_unrevoked" in guard_block["required_failed_checks"]
