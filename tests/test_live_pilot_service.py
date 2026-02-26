@@ -49,6 +49,8 @@ from src.live.live_pilot_service import (
     write_live_pilot_prelive_go_no_go_checklist,
     build_live_pilot_promotion_ticket,
     write_live_pilot_promotion_ticket,
+    build_live_pilot_launch_intent_manifest,
+    write_live_pilot_launch_intent_manifest,
     list_live_pilot_promotion_ticket_consumptions,
     consume_live_pilot_promotion_ticket,
     evaluate_live_launch_guard,
@@ -2348,3 +2350,61 @@ def test_ticket_consumption_log_and_guard_replay_protection(tmp_path):
     )
     assert guard["status"] == "block"
     assert "ticket_unused" in guard["required_failed_checks"]
+
+
+def test_launch_intent_manifest_and_ticket_binding_guard(tmp_path):
+    prelive = {"status": "go", "bundle_verification_status": "pass", "generated_unix_ms": int(time.time() * 1000)}
+    intent = build_live_pilot_launch_intent_manifest(
+        mode="live_auto_tiny_one_trade",
+        risk_profile_preset="tiny_supervised",
+        enable_live_auto_submit_window=True,
+        adapter_config={"live_send_network_enabled": True},
+        prelive_go_no_go_report=prelive,
+        expires_in_seconds=1800,
+    )
+    ip = tmp_path / "intent.md"
+    write_live_pilot_launch_intent_manifest(intent, str(ip))
+    assert "Launch Intent Manifest" in ip.read_text(encoding="utf-8")
+
+    ticket = build_live_pilot_promotion_ticket(
+        operator_id="main_user",
+        approval_action="approve_live_test",
+        risk_profile_preset="tiny_supervised",
+        prelive_go_no_go_report=prelive,
+        launch_intent_manifest=intent,
+        expires_in_seconds=3600,
+    )
+    guard_allow = evaluate_live_launch_guard(
+        adapter_config={"live_send_network_enabled": True},
+        enable_live_auto_submit_window=True,
+        prelive_go_no_go_report=prelive,
+        promotion_ticket=ticket,
+        launch_intent_manifest=intent,
+        requested_mode="live_auto_tiny_one_trade",
+        requested_risk_profile_preset="tiny_supervised",
+        require_prelive_go_no_go=True,
+        require_bundle_pass=True,
+        require_operator_ticket=True,
+        require_launch_intent=True,
+    )
+    assert guard_allow["status"] == "allow"
+
+    wrong_intent = dict(intent)
+    wrong_intent["scope"] = dict(intent["scope"])
+    wrong_intent["scope"]["mode"] = "different_mode"
+    wrong_intent["scope_hash_sha256"] = "bad_hash"
+    guard_block = evaluate_live_launch_guard(
+        adapter_config={"live_send_network_enabled": True},
+        enable_live_auto_submit_window=True,
+        prelive_go_no_go_report=prelive,
+        promotion_ticket=ticket,
+        launch_intent_manifest=wrong_intent,
+        requested_mode="live_auto_tiny_one_trade",
+        requested_risk_profile_preset="tiny_supervised",
+        require_prelive_go_no_go=True,
+        require_bundle_pass=True,
+        require_operator_ticket=True,
+        require_launch_intent=True,
+    )
+    assert guard_block["status"] == "block"
+    assert "ticket_bound_to_launch_intent" in guard_block["required_failed_checks"]

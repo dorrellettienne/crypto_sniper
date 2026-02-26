@@ -2211,6 +2211,59 @@ def write_live_pilot_archive_rotation_report(report: dict[str, Any], path_str: s
         p.write_text(json.dumps(report, sort_keys=True, indent=2), encoding="utf-8")
 
 
+def build_live_pilot_launch_intent_manifest(
+    *,
+    mode: str,
+    risk_profile_preset: str = "",
+    enable_live_auto_submit_window: bool = False,
+    adapter_config: dict[str, Any] | None = None,
+    prelive_go_no_go_report: dict[str, Any] | None = None,
+    expires_in_seconds: float = 1800.0,
+) -> dict[str, Any]:
+    now_ms = int(time.time() * 1000)
+    cfg = dict(adapter_config or {})
+    go_no_go = dict(prelive_go_no_go_report or {})
+    scope = {
+        "mode": str(mode or ""),
+        "risk_profile_preset": str(risk_profile_preset or ""),
+        "live_send_network_enabled": bool(cfg.get("live_send_network_enabled", False)),
+        "enable_live_auto_submit_window": bool(enable_live_auto_submit_window),
+        "prelive_status": str(go_no_go.get("status") or ""),
+        "bundle_verification_status": str(go_no_go.get("bundle_verification_status") or ""),
+    }
+    scope_json = json.dumps(scope, sort_keys=True)
+    scope_hash = hashlib.sha256(scope_json.encode("utf-8")).hexdigest()
+    return {
+        "generated_unix_ms": now_ms,
+        "expires_unix_ms": now_ms + int(max(0.0, float(expires_in_seconds)) * 1000.0),
+        "scope": scope,
+        "scope_hash_sha256": scope_hash,
+        "intent_id": "lpi_" + scope_hash[:16],
+    }
+
+
+def write_live_pilot_launch_intent_manifest(report: dict[str, Any], path_str: str) -> None:
+    p = Path(path_str)
+    if p.suffix.lower() in {".md", ".markdown"}:
+        scope = dict(report.get("scope") or {})
+        lines = [
+            "# Live Pilot Launch Intent Manifest",
+            "",
+            f"- intent_id: `{report.get('intent_id', '')}`",
+            f"- generated_unix_ms: `{report.get('generated_unix_ms', 0)}`",
+            f"- expires_unix_ms: `{report.get('expires_unix_ms', 0)}`",
+            f"- scope_hash_sha256: `{report.get('scope_hash_sha256', '')}`",
+            "",
+            "## Scope",
+            "",
+        ]
+        for k in sorted(scope.keys()):
+            lines.append(f"- {k}: `{scope.get(k)}`")
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    else:
+        p.write_text(json.dumps(report, sort_keys=True, indent=2), encoding="utf-8")
+
+
 def build_live_pilot_promotion_ticket(
     *,
     operator_id: str,
@@ -2218,11 +2271,14 @@ def build_live_pilot_promotion_ticket(
     risk_profile_preset: str = "",
     promotion_step_manifest: dict[str, Any] | None = None,
     prelive_go_no_go_report: dict[str, Any] | None = None,
+    launch_intent_manifest: dict[str, Any] | None = None,
     expires_in_seconds: float = 3600.0,
 ) -> dict[str, Any]:
     now_ms = int(time.time() * 1000)
     manifest = dict(promotion_step_manifest or {})
     go_no_go = dict(prelive_go_no_go_report or {})
+    launch_intent = dict(launch_intent_manifest or {})
+    intent_scope = dict(launch_intent.get("scope") or {})
     payload = {
         "issued_unix_ms": now_ms,
         "expires_unix_ms": now_ms + int(max(0.0, float(expires_in_seconds)) * 1000.0),
@@ -2232,6 +2288,11 @@ def build_live_pilot_promotion_ticket(
         "promotion_step_name": str(manifest.get("step_name") or ""),
         "prelive_status": str(go_no_go.get("status") or ""),
         "failed_required_checks": list(go_no_go.get("failed_required_checks", []) or []),
+        "intent_id": str(launch_intent.get("intent_id") or ""),
+        "intent_scope_hash_sha256": str(launch_intent.get("scope_hash_sha256") or ""),
+        "intent_mode": str(intent_scope.get("mode") or ""),
+        "intent_live_send_network_enabled": bool(intent_scope.get("live_send_network_enabled", False)),
+        "intent_enable_live_auto_submit_window": bool(intent_scope.get("enable_live_auto_submit_window", False)),
     }
     fingerprint_src = json.dumps(payload, sort_keys=True)
     payload["ticket_id"] = "lpt_" + hashlib.sha256(fingerprint_src.encode("utf-8")).hexdigest()[:16]
@@ -2304,23 +2365,60 @@ def evaluate_live_launch_guard(
     enable_live_auto_submit_window: bool = False,
     prelive_go_no_go_report: dict[str, Any] | None = None,
     promotion_ticket: dict[str, Any] | None = None,
+    launch_intent_manifest: dict[str, Any] | None = None,
+    requested_mode: str = "",
+    requested_risk_profile_preset: str = "",
     require_prelive_go_no_go: bool = False,
     require_bundle_pass: bool = False,
     require_operator_ticket: bool = False,
     require_unused_ticket: bool = False,
+    require_launch_intent: bool = False,
     required_ticket_action: str = "approve_live_test",
     max_prelive_age_seconds: float = 3600.0,
+    max_launch_intent_age_seconds: float = 1800.0,
     consumed_tickets: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     cfg = dict(adapter_config or {})
     live_network = bool(cfg.get("live_send_network_enabled", False))
     go_no_go = dict(prelive_go_no_go_report or {})
     ticket = dict(promotion_ticket or {})
+    intent = dict(launch_intent_manifest or {})
+    intent_scope = dict(intent.get("scope") or {})
+    now_ms = int(time.time() * 1000)
     checks: list[dict[str, Any]] = []
     checks.append({"name": "live_network_enabled", "required": False, "ok": live_network, "actual": live_network})
     checks.append({"name": "live_auto_submit_requested", "required": False, "ok": bool(enable_live_auto_submit_window), "actual": bool(enable_live_auto_submit_window)})
+    intent_generated_ms = _to_int_or_none(intent.get("generated_unix_ms"))
+    intent_age_ok = False
+    if intent_generated_ms is not None:
+        intent_age_ok = (now_ms - int(intent_generated_ms)) <= int(max(0.0, float(max_launch_intent_age_seconds)) * 1000.0)
+    checks.append({"name": "launch_intent_present", "required": bool(require_launch_intent), "ok": bool(intent), "actual": bool(intent)})
+    checks.append({"name": "launch_intent_fresh_enough", "required": bool(require_launch_intent), "ok": intent_age_ok, "actual": (None if intent_generated_ms is None else max(0, now_ms - int(intent_generated_ms)))})
+    checks.append(
+        {
+            "name": "launch_intent_mode_matches_request",
+            "required": bool(require_launch_intent),
+            "ok": (str(intent_scope.get("mode") or "") == str(requested_mode or "")),
+            "actual": str(intent_scope.get("mode") or ""),
+        }
+    )
+    checks.append(
+        {
+            "name": "launch_intent_risk_profile_matches_request",
+            "required": bool(require_launch_intent and str(requested_risk_profile_preset or "").strip()),
+            "ok": (str(intent_scope.get("risk_profile_preset") or "") == str(requested_risk_profile_preset or "")),
+            "actual": str(intent_scope.get("risk_profile_preset") or ""),
+        }
+    )
+    checks.append(
+        {
+            "name": "launch_intent_live_submit_flag_matches_request",
+            "required": bool(require_launch_intent),
+            "ok": bool(intent_scope.get("enable_live_auto_submit_window", False)) == bool(enable_live_auto_submit_window),
+            "actual": bool(intent_scope.get("enable_live_auto_submit_window", False)),
+        }
+    )
 
-    now_ms = int(time.time() * 1000)
     prelive_generated_ms = _to_int_or_none(go_no_go.get("generated_unix_ms"))
     prelive_age_ok = False
     if prelive_generated_ms is not None:
@@ -2390,6 +2488,21 @@ def evaluate_live_launch_guard(
             "required": bool(require_operator_ticket and require_unused_ticket),
             "ok": (not ticket_consumed),
             "actual": ticket_consumed,
+        }
+    )
+    checks.append(
+        {
+            "name": "ticket_bound_to_launch_intent",
+            "required": bool(require_operator_ticket and require_launch_intent),
+            "ok": (
+                bool(ticket)
+                and bool(intent)
+                and str(ticket.get("intent_scope_hash_sha256") or "") == str(intent.get("scope_hash_sha256") or "")
+            ),
+            "actual": {
+                "ticket_intent_scope_hash_sha256": str(ticket.get("intent_scope_hash_sha256") or ""),
+                "launch_intent_scope_hash_sha256": str(intent.get("scope_hash_sha256") or ""),
+            },
         }
     )
 
@@ -4076,6 +4189,8 @@ def _main() -> int:
     p.add_argument("--promotion-ticket-action", default="approve_live_test")
     p.add_argument("--promotion-ticket-expires-seconds", type=float, default=3600.0)
     p.add_argument("--promotion-ticket-consumption-log-jsonl-path", default="")
+    p.add_argument("--launch-intent-manifest-path", default="")
+    p.add_argument("--launch-intent-expires-seconds", type=float, default=1800.0)
     p.add_argument("--live-launch-guard-report-path", default="")
     p.add_argument("--live-launch-guard-enforce", action="store_true")
     p.add_argument("--live-launch-guard-require-prelive", action="store_true")
@@ -4083,8 +4198,10 @@ def _main() -> int:
     p.add_argument("--live-launch-guard-require-ticket", action="store_true")
     p.add_argument("--live-launch-guard-require-unused-ticket", action="store_true")
     p.add_argument("--live-launch-guard-consume-ticket-on-allow", action="store_true")
+    p.add_argument("--live-launch-guard-require-launch-intent", action="store_true")
     p.add_argument("--live-launch-guard-ticket-action", default="approve_live_test")
     p.add_argument("--live-launch-guard-max-prelive-age-seconds", type=float, default=3600.0)
+    p.add_argument("--live-launch-guard-max-launch-intent-age-seconds", type=float, default=1800.0)
     p.add_argument("--postrun-review-packet-path", default="")
     p.add_argument("--archive-rotation-glob", default="")
     p.add_argument("--archive-rotation-dir", default="")
@@ -4178,6 +4295,8 @@ def _main() -> int:
             ensure_dir_within_base(str(Path(args.promotion_ticket_path).parent))
         if args.promotion_ticket_consumption_log_jsonl_path:
             ensure_dir_within_base(str(Path(args.promotion_ticket_consumption_log_jsonl_path).parent))
+        if args.launch_intent_manifest_path:
+            ensure_dir_within_base(str(Path(args.launch_intent_manifest_path).parent))
         if args.live_launch_guard_report_path:
             ensure_dir_within_base(str(Path(args.live_launch_guard_report_path).parent))
         if args.postrun_review_packet_path:
@@ -4209,17 +4328,23 @@ def _main() -> int:
     if bool(args.live_launch_guard_enforce):
         prelive_guard_obj = _read_json_or_empty(str(args.prelive_go_no_go_report_path or ""))
         ticket_guard_obj = _read_json_or_empty(str(args.promotion_ticket_path or ""))
+        launch_intent_guard_obj = _read_json_or_empty(str(args.launch_intent_manifest_path or ""))
         live_guard = evaluate_live_launch_guard(
             adapter_config=(adapter_config if isinstance(adapter_config, dict) else None),
             enable_live_auto_submit_window=bool(args.enable_live_auto_submit_window),
             prelive_go_no_go_report=prelive_guard_obj,
             promotion_ticket=ticket_guard_obj,
+            launch_intent_manifest=launch_intent_guard_obj,
+            requested_mode=str(args.mode or ""),
+            requested_risk_profile_preset=str(args.risk_profile_preset or ""),
             require_prelive_go_no_go=bool(args.live_launch_guard_require_prelive),
             require_bundle_pass=bool(args.live_launch_guard_require_bundle_pass),
             require_operator_ticket=bool(args.live_launch_guard_require_ticket),
             require_unused_ticket=bool(args.live_launch_guard_require_unused_ticket),
+            require_launch_intent=bool(args.live_launch_guard_require_launch_intent),
             required_ticket_action=str(args.live_launch_guard_ticket_action or "approve_live_test"),
             max_prelive_age_seconds=float(args.live_launch_guard_max_prelive_age_seconds or 3600.0),
+            max_launch_intent_age_seconds=float(args.live_launch_guard_max_launch_intent_age_seconds or 1800.0),
             consumed_tickets=list_live_pilot_promotion_ticket_consumptions(str(args.promotion_ticket_consumption_log_jsonl_path or "")),
         )
         if str(args.live_launch_guard_report_path or "").strip():
@@ -4324,6 +4449,18 @@ def _main() -> int:
                     )
                 else:
                     prelive_obj = {}
+                if str(args.launch_intent_manifest_path or "").strip():
+                    launch_intent_obj = build_live_pilot_launch_intent_manifest(
+                        mode=str(args.mode or ""),
+                        risk_profile_preset=str(args.risk_profile_preset or ""),
+                        enable_live_auto_submit_window=bool(args.enable_live_auto_submit_window),
+                        adapter_config=(adapter_config if isinstance(adapter_config, dict) else None),
+                        prelive_go_no_go_report=prelive_obj,
+                        expires_in_seconds=float(args.launch_intent_expires_seconds or 1800.0),
+                    )
+                    write_live_pilot_launch_intent_manifest(launch_intent_obj, str(args.launch_intent_manifest_path))
+                else:
+                    launch_intent_obj = {}
                 if str(args.promotion_ticket_path or "").strip():
                     write_live_pilot_promotion_ticket(
                         build_live_pilot_promotion_ticket(
@@ -4332,6 +4469,7 @@ def _main() -> int:
                             risk_profile_preset=str(args.risk_profile_preset or ""),
                             promotion_step_manifest=_read_json_or_empty(str(args.promotion_step_manifest_path or "")),
                             prelive_go_no_go_report=prelive_obj,
+                            launch_intent_manifest=launch_intent_obj,
                             expires_in_seconds=float(args.promotion_ticket_expires_seconds or 3600.0),
                         ),
                         str(args.promotion_ticket_path),
@@ -4775,6 +4913,18 @@ def _main() -> int:
                     )
                 else:
                     prelive_obj = {}
+                if str(args.launch_intent_manifest_path or "").strip():
+                    launch_intent_obj = build_live_pilot_launch_intent_manifest(
+                        mode=str(args.mode or ""),
+                        risk_profile_preset=str(args.risk_profile_preset or ""),
+                        enable_live_auto_submit_window=bool(args.enable_live_auto_submit_window),
+                        adapter_config=(adapter_config if isinstance(adapter_config, dict) else None),
+                        prelive_go_no_go_report=prelive_obj,
+                        expires_in_seconds=float(args.launch_intent_expires_seconds or 1800.0),
+                    )
+                    write_live_pilot_launch_intent_manifest(launch_intent_obj, str(args.launch_intent_manifest_path))
+                else:
+                    launch_intent_obj = {}
                 if str(args.promotion_ticket_path or "").strip():
                     write_live_pilot_promotion_ticket(
                         build_live_pilot_promotion_ticket(
@@ -4783,6 +4933,7 @@ def _main() -> int:
                             risk_profile_preset=str(args.risk_profile_preset or ""),
                             promotion_step_manifest=_read_json_or_empty(str(args.promotion_step_manifest_path or "")),
                             prelive_go_no_go_report=prelive_obj,
+                            launch_intent_manifest=launch_intent_obj,
                             expires_in_seconds=float(args.promotion_ticket_expires_seconds or 3600.0),
                         ),
                         str(args.promotion_ticket_path),
