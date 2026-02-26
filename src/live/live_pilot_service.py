@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import shutil
 import sys
@@ -2210,6 +2211,176 @@ def write_live_pilot_archive_rotation_report(report: dict[str, Any], path_str: s
         p.write_text(json.dumps(report, sort_keys=True, indent=2), encoding="utf-8")
 
 
+def build_live_pilot_promotion_ticket(
+    *,
+    operator_id: str,
+    approval_action: str,
+    risk_profile_preset: str = "",
+    promotion_step_manifest: dict[str, Any] | None = None,
+    prelive_go_no_go_report: dict[str, Any] | None = None,
+    expires_in_seconds: float = 3600.0,
+) -> dict[str, Any]:
+    now_ms = int(time.time() * 1000)
+    manifest = dict(promotion_step_manifest or {})
+    go_no_go = dict(prelive_go_no_go_report or {})
+    payload = {
+        "issued_unix_ms": now_ms,
+        "expires_unix_ms": now_ms + int(max(0.0, float(expires_in_seconds)) * 1000.0),
+        "operator_id": str(operator_id or ""),
+        "approval_action": str(approval_action or ""),
+        "risk_profile_preset": str(risk_profile_preset or ""),
+        "promotion_step_name": str(manifest.get("step_name") or ""),
+        "prelive_status": str(go_no_go.get("status") or ""),
+        "failed_required_checks": list(go_no_go.get("failed_required_checks", []) or []),
+    }
+    fingerprint_src = json.dumps(payload, sort_keys=True)
+    payload["ticket_id"] = "lpt_" + hashlib.sha256(fingerprint_src.encode("utf-8")).hexdigest()[:16]
+    payload["ticket_fingerprint_sha256"] = hashlib.sha256(fingerprint_src.encode("utf-8")).hexdigest()
+    return payload
+
+
+def write_live_pilot_promotion_ticket(report: dict[str, Any], path_str: str) -> None:
+    p = Path(path_str)
+    if p.suffix.lower() in {".md", ".markdown"}:
+        lines = [
+            "# Live Pilot Promotion Ticket",
+            "",
+            f"- ticket_id: `{report.get('ticket_id', '')}`",
+            f"- operator_id: `{report.get('operator_id', '')}`",
+            f"- approval_action: `{report.get('approval_action', '')}`",
+            f"- risk_profile_preset: `{report.get('risk_profile_preset', '')}`",
+            f"- promotion_step_name: `{report.get('promotion_step_name', '')}`",
+            f"- prelive_status: `{report.get('prelive_status', '')}`",
+            f"- expires_unix_ms: `{report.get('expires_unix_ms', 0)}`",
+        ]
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    else:
+        p.write_text(json.dumps(report, sort_keys=True, indent=2), encoding="utf-8")
+
+
+def _read_json_or_empty(path_str: str) -> dict[str, Any]:
+    if not str(path_str or "").strip():
+        return {}
+    p = Path(path_str)
+    if not p.exists():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return dict(data) if isinstance(data, dict) else {}
+
+
+def evaluate_live_launch_guard(
+    *,
+    adapter_config: dict[str, Any] | None = None,
+    enable_live_auto_submit_window: bool = False,
+    prelive_go_no_go_report: dict[str, Any] | None = None,
+    promotion_ticket: dict[str, Any] | None = None,
+    require_prelive_go_no_go: bool = False,
+    require_bundle_pass: bool = False,
+    require_operator_ticket: bool = False,
+    required_ticket_action: str = "approve_live_test",
+    max_prelive_age_seconds: float = 3600.0,
+) -> dict[str, Any]:
+    cfg = dict(adapter_config or {})
+    live_network = bool(cfg.get("live_send_network_enabled", False))
+    go_no_go = dict(prelive_go_no_go_report or {})
+    ticket = dict(promotion_ticket or {})
+    checks: list[dict[str, Any]] = []
+    checks.append({"name": "live_network_enabled", "required": False, "ok": live_network, "actual": live_network})
+    checks.append({"name": "live_auto_submit_requested", "required": False, "ok": bool(enable_live_auto_submit_window), "actual": bool(enable_live_auto_submit_window)})
+
+    now_ms = int(time.time() * 1000)
+    prelive_generated_ms = _to_int_or_none(go_no_go.get("generated_unix_ms"))
+    prelive_age_ok = False
+    if prelive_generated_ms is not None:
+        prelive_age_ok = (now_ms - int(prelive_generated_ms)) <= int(max(0.0, float(max_prelive_age_seconds)) * 1000.0)
+    checks.append(
+        {
+            "name": "prelive_report_present",
+            "required": bool(require_prelive_go_no_go),
+            "ok": bool(go_no_go),
+            "actual": bool(go_no_go),
+        }
+    )
+    checks.append(
+        {
+            "name": "prelive_status_go",
+            "required": bool(require_prelive_go_no_go),
+            "ok": str(go_no_go.get("status") or "") == "go",
+            "actual": str(go_no_go.get("status") or ""),
+        }
+    )
+    checks.append(
+        {
+            "name": "prelive_fresh_enough",
+            "required": bool(require_prelive_go_no_go),
+            "ok": prelive_age_ok,
+            "actual": (None if prelive_generated_ms is None else max(0, now_ms - int(prelive_generated_ms))),
+        }
+    )
+    if require_bundle_pass:
+        checks.append(
+            {
+                "name": "prelive_bundle_verification_pass",
+                "required": True,
+                "ok": str(go_no_go.get("bundle_verification_status") or "") == "pass",
+                "actual": str(go_no_go.get("bundle_verification_status") or ""),
+            }
+        )
+    ticket_expires = _to_int_or_none(ticket.get("expires_unix_ms"))
+    checks.append({"name": "ticket_present", "required": bool(require_operator_ticket), "ok": bool(ticket), "actual": bool(ticket)})
+    checks.append(
+        {
+            "name": "ticket_action_matches",
+            "required": bool(require_operator_ticket),
+            "ok": str(ticket.get("approval_action") or "") == str(required_ticket_action or ""),
+            "actual": str(ticket.get("approval_action") or ""),
+        }
+    )
+    checks.append(
+        {
+            "name": "ticket_not_expired",
+            "required": bool(require_operator_ticket),
+            "ok": (ticket_expires is not None and int(ticket_expires) >= now_ms),
+            "actual": ticket_expires,
+        }
+    )
+
+    required_failed = [c["name"] for c in checks if bool(c.get("required", False)) and not bool(c.get("ok", False))]
+    live_launch_requested = bool(live_network and enable_live_auto_submit_window)
+    allowed = (not live_launch_requested) or (len(required_failed) == 0)
+    status = "allow" if allowed else "block"
+    return {
+        "status": status,
+        "live_launch_requested": live_launch_requested,
+        "required_failed_checks": required_failed,
+        "checks": checks,
+        "summary": ("live_launch_guard_allow" if allowed else f"live_launch_guard_block:{','.join(required_failed)}"),
+    }
+
+
+def write_live_launch_guard_report(report: dict[str, Any], path_str: str) -> None:
+    p = Path(path_str)
+    if p.suffix.lower() in {".md", ".markdown"}:
+        lines = [
+            "# Live Launch Guard Report",
+            "",
+            f"- status: `{report.get('status', '')}`",
+            f"- live_launch_requested: `{bool(report.get('live_launch_requested', False))}`",
+            f"- required_failed_checks: `{', '.join(list(report.get('required_failed_checks', []) or [])) or '-'}`",
+            "",
+            "## Checks",
+            "",
+        ]
+        for c in [dict(x) for x in list(report.get("checks") or []) if isinstance(x, dict)]:
+            lines.append(f"- {c.get('name','')}: `{'pass' if c.get('ok') else 'fail'}` required=`{bool(c.get('required',False))}` actual=`{c.get('actual')}`")
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    else:
+        p.write_text(json.dumps(report, sort_keys=True, indent=2), encoding="utf-8")
+
+
 def _path_with_inserted_suffix(path_str: str, suffix: str) -> str:
     if not str(path_str or "").strip():
         return ""
@@ -3855,6 +4026,16 @@ def _main() -> int:
     p.add_argument("--prelive-go-no-go-report-path", default="")
     p.add_argument("--prelive-require-operator-ack", action="store_true")
     p.add_argument("--prelive-require-bundle-pass", action="store_true")
+    p.add_argument("--promotion-ticket-path", default="")
+    p.add_argument("--promotion-ticket-action", default="approve_live_test")
+    p.add_argument("--promotion-ticket-expires-seconds", type=float, default=3600.0)
+    p.add_argument("--live-launch-guard-report-path", default="")
+    p.add_argument("--live-launch-guard-enforce", action="store_true")
+    p.add_argument("--live-launch-guard-require-prelive", action="store_true")
+    p.add_argument("--live-launch-guard-require-bundle-pass", action="store_true")
+    p.add_argument("--live-launch-guard-require-ticket", action="store_true")
+    p.add_argument("--live-launch-guard-ticket-action", default="approve_live_test")
+    p.add_argument("--live-launch-guard-max-prelive-age-seconds", type=float, default=3600.0)
     p.add_argument("--postrun-review-packet-path", default="")
     p.add_argument("--archive-rotation-glob", default="")
     p.add_argument("--archive-rotation-dir", default="")
@@ -3944,6 +4125,10 @@ def _main() -> int:
             ensure_dir_within_base(str(Path(args.promotion_step_manifest_path).parent))
         if args.prelive_go_no_go_report_path:
             ensure_dir_within_base(str(Path(args.prelive_go_no_go_report_path).parent))
+        if args.promotion_ticket_path:
+            ensure_dir_within_base(str(Path(args.promotion_ticket_path).parent))
+        if args.live_launch_guard_report_path:
+            ensure_dir_within_base(str(Path(args.live_launch_guard_report_path).parent))
         if args.postrun_review_packet_path:
             ensure_dir_within_base(str(Path(args.postrun_review_packet_path).parent))
         if args.archive_rotation_dir:
@@ -3970,6 +4155,25 @@ def _main() -> int:
         adapter_config = json.loads(Path(args.adapter_config_json_path).read_text(encoding="utf-8"))
     elif args.adapter_config_json:
         adapter_config = json.loads(args.adapter_config_json)
+    if bool(args.live_launch_guard_enforce):
+        prelive_guard_obj = _read_json_or_empty(str(args.prelive_go_no_go_report_path or ""))
+        ticket_guard_obj = _read_json_or_empty(str(args.promotion_ticket_path or ""))
+        live_guard = evaluate_live_launch_guard(
+            adapter_config=(adapter_config if isinstance(adapter_config, dict) else None),
+            enable_live_auto_submit_window=bool(args.enable_live_auto_submit_window),
+            prelive_go_no_go_report=prelive_guard_obj,
+            promotion_ticket=ticket_guard_obj,
+            require_prelive_go_no_go=bool(args.live_launch_guard_require_prelive),
+            require_bundle_pass=bool(args.live_launch_guard_require_bundle_pass),
+            require_operator_ticket=bool(args.live_launch_guard_require_ticket),
+            required_ticket_action=str(args.live_launch_guard_ticket_action or "approve_live_test"),
+            max_prelive_age_seconds=float(args.live_launch_guard_max_prelive_age_seconds or 3600.0),
+        )
+        if str(args.live_launch_guard_report_path or "").strip():
+            write_live_launch_guard_report(live_guard, str(args.live_launch_guard_report_path))
+        if str(live_guard.get("status") or "") != "allow":
+            print(json.dumps({"live_launch_guard": live_guard}, sort_keys=True))
+            return 3
     if str(args.campaign_report_glob or "").strip():
         report_paths = sorted(Path(".").glob(str(args.campaign_report_glob)))
         reports = []
@@ -4043,16 +4247,31 @@ def _main() -> int:
                         str(args.promotion_step_manifest_path),
                     )
                 if str(args.prelive_go_no_go_report_path or "").strip():
+                    prelive_obj = build_live_pilot_prelive_go_no_go_checklist(
+                        daily_operator_report=daily_report,
+                        bundle_verification=(bundle_verification or verify_live_pilot_validation_bundle(artifact_index=artifact_index)),
+                        handoff_snapshot=(handoff if 'handoff' in locals() else {}),
+                        risk_profile_preset=str(args.risk_profile_preset or ""),
+                        required_operator_ack=bool(args.prelive_require_operator_ack),
+                        require_bundle_pass=bool(args.prelive_require_bundle_pass),
+                    )
                     write_live_pilot_prelive_go_no_go_checklist(
-                        build_live_pilot_prelive_go_no_go_checklist(
-                            daily_operator_report=daily_report,
-                            bundle_verification=(bundle_verification or verify_live_pilot_validation_bundle(artifact_index=artifact_index)),
-                            handoff_snapshot=(handoff if 'handoff' in locals() else {}),
-                            risk_profile_preset=str(args.risk_profile_preset or ""),
-                            required_operator_ack=bool(args.prelive_require_operator_ack),
-                            require_bundle_pass=bool(args.prelive_require_bundle_pass),
-                        ),
+                        prelive_obj,
                         str(args.prelive_go_no_go_report_path),
+                    )
+                else:
+                    prelive_obj = {}
+                if str(args.promotion_ticket_path or "").strip():
+                    write_live_pilot_promotion_ticket(
+                        build_live_pilot_promotion_ticket(
+                            operator_id=str(args.operator_decision_actor or args.handoff_operator_id or ""),
+                            approval_action=str(args.promotion_ticket_action or "approve_live_test"),
+                            risk_profile_preset=str(args.risk_profile_preset or ""),
+                            promotion_step_manifest=_read_json_or_empty(str(args.promotion_step_manifest_path or "")),
+                            prelive_go_no_go_report=prelive_obj,
+                            expires_in_seconds=float(args.promotion_ticket_expires_seconds or 3600.0),
+                        ),
+                        str(args.promotion_ticket_path),
                     )
         print(json.dumps(trend_report, sort_keys=True))
         return 0
@@ -4479,16 +4698,31 @@ def _main() -> int:
                         str(args.promotion_step_manifest_path),
                     )
                 if str(args.prelive_go_no_go_report_path or "").strip():
+                    prelive_obj = build_live_pilot_prelive_go_no_go_checklist(
+                        daily_operator_report=dict(schedule.get("daily_operator_report") or {}),
+                        bundle_verification=bundle_verification,
+                        handoff_snapshot=handoff,
+                        risk_profile_preset=str(args.risk_profile_preset or ""),
+                        required_operator_ack=bool(args.prelive_require_operator_ack),
+                        require_bundle_pass=bool(args.prelive_require_bundle_pass),
+                    )
                     write_live_pilot_prelive_go_no_go_checklist(
-                        build_live_pilot_prelive_go_no_go_checklist(
-                            daily_operator_report=dict(schedule.get("daily_operator_report") or {}),
-                            bundle_verification=bundle_verification,
-                            handoff_snapshot=handoff,
-                            risk_profile_preset=str(args.risk_profile_preset or ""),
-                            required_operator_ack=bool(args.prelive_require_operator_ack),
-                            require_bundle_pass=bool(args.prelive_require_bundle_pass),
-                        ),
+                        prelive_obj,
                         str(args.prelive_go_no_go_report_path),
+                    )
+                else:
+                    prelive_obj = {}
+                if str(args.promotion_ticket_path or "").strip():
+                    write_live_pilot_promotion_ticket(
+                        build_live_pilot_promotion_ticket(
+                            operator_id=str(args.operator_decision_actor or args.handoff_operator_id or ""),
+                            approval_action=str(args.promotion_ticket_action or "approve_live_test"),
+                            risk_profile_preset=str(args.risk_profile_preset or ""),
+                            promotion_step_manifest=_read_json_or_empty(str(args.promotion_step_manifest_path or "")),
+                            prelive_go_no_go_report=prelive_obj,
+                            expires_in_seconds=float(args.promotion_ticket_expires_seconds or 3600.0),
+                        ),
+                        str(args.promotion_ticket_path),
                     )
                 if str(args.postrun_review_packet_path or "").strip():
                     write_live_pilot_postrun_review_packet(

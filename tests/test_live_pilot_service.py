@@ -1,4 +1,5 @@
 import json
+import time
 
 from src.live.live_pilot_service import (
     aggregate_live_pilot_campaign_reports,
@@ -46,6 +47,10 @@ from src.live.live_pilot_service import (
     write_live_pilot_promotion_step_manifest,
     build_live_pilot_prelive_go_no_go_checklist,
     write_live_pilot_prelive_go_no_go_checklist,
+    build_live_pilot_promotion_ticket,
+    write_live_pilot_promotion_ticket,
+    evaluate_live_launch_guard,
+    write_live_launch_guard_report,
     build_live_pilot_postrun_review_packet,
     write_live_pilot_postrun_review_packet,
     rotate_live_pilot_artifacts_by_glob,
@@ -2268,3 +2273,43 @@ def test_postrun_review_packet_and_archive_rotation(tmp_path, monkeypatch):
     rp = tmp_path / "rotation.md"
     write_live_pilot_archive_rotation_report(out, str(rp))
     assert "Archive Rotation Report" in rp.read_text(encoding="utf-8")
+
+
+def test_promotion_ticket_and_live_launch_guard_reports(tmp_path):
+    ticket = build_live_pilot_promotion_ticket(
+        operator_id="main_user",
+        approval_action="approve_live_test",
+        risk_profile_preset="tiny_supervised",
+        prelive_go_no_go_report={"status": "go", "failed_required_checks": []},
+        expires_in_seconds=3600,
+    )
+    assert ticket["ticket_id"].startswith("lpt_")
+    tp = tmp_path / "ticket.md"
+    write_live_pilot_promotion_ticket(ticket, str(tp))
+    assert "Promotion Ticket" in tp.read_text(encoding="utf-8")
+
+    guard_block = evaluate_live_launch_guard(
+        adapter_config={"live_send_network_enabled": True},
+        enable_live_auto_submit_window=True,
+        prelive_go_no_go_report={"status": "no_go", "bundle_verification_status": "fail", "generated_unix_ms": int(1e15)},
+        promotion_ticket={},
+        require_prelive_go_no_go=True,
+        require_bundle_pass=True,
+        require_operator_ticket=True,
+    )
+    assert guard_block["status"] == "block"
+    assert "ticket_present" in guard_block["required_failed_checks"]
+
+    guard_allow = evaluate_live_launch_guard(
+        adapter_config={"live_send_network_enabled": True},
+        enable_live_auto_submit_window=True,
+        prelive_go_no_go_report={"status": "go", "bundle_verification_status": "pass", "generated_unix_ms": int(time.time() * 1000)},
+        promotion_ticket={"approval_action": "approve_live_test", "expires_unix_ms": int(time.time() * 1000) + 60000},
+        require_prelive_go_no_go=True,
+        require_bundle_pass=True,
+        require_operator_ticket=True,
+    )
+    assert guard_allow["status"] == "allow"
+    gp = tmp_path / "guard.md"
+    write_live_launch_guard_report(guard_allow, str(gp))
+    assert "Live Launch Guard Report" in gp.read_text(encoding="utf-8")
