@@ -2918,6 +2918,7 @@ def evaluate_live_launch_guard(
     launch_authorization_chain_approval_token: dict[str, Any] | None = None,
     launch_authorization_chain_of_chain_report: dict[str, Any] | None = None,
     launch_authorization_chain_of_chain_approval_token: dict[str, Any] | None = None,
+    launch_authorization_super_chain_report: dict[str, Any] | None = None,
     requested_mode: str = "",
     requested_risk_profile_preset: str = "",
     require_prelive_go_no_go: bool = False,
@@ -2937,6 +2938,7 @@ def evaluate_live_launch_guard(
     require_launch_authorization_chain_of_chain_report_binding: bool = False,
     require_launch_authorization_chain_of_chain_approval_token: bool = False,
     require_unrevoked_launch_authorization_chain_of_chain_approval_token: bool = False,
+    require_launch_authorization_super_chain_report: bool = False,
     revocation_reason_class_policy_overrides: dict[str, str] | None = None,
     required_ticket_action: str = "approve_live_test",
     required_launch_authorization_packet_approval_action: str = "approve_live_launch_packet",
@@ -2949,6 +2951,7 @@ def evaluate_live_launch_guard(
     max_launch_authorization_chain_approval_token_age_seconds: float = 900.0,
     max_launch_authorization_chain_of_chain_report_age_seconds: float = 900.0,
     max_launch_authorization_chain_of_chain_approval_token_age_seconds: float = 900.0,
+    max_launch_authorization_super_chain_report_age_seconds: float = 900.0,
     consumed_tickets: list[dict[str, Any]] | None = None,
     revoked_tickets: list[dict[str, Any]] | None = None,
     revoked_launch_authorization_packet_approval_tokens: list[dict[str, Any]] | None = None,
@@ -2966,6 +2969,7 @@ def evaluate_live_launch_guard(
     auth_chain_approval_token = dict(launch_authorization_chain_approval_token or {})
     auth_chain_of_chain_report = dict(launch_authorization_chain_of_chain_report or {})
     auth_chain_of_chain_approval_token = dict(launch_authorization_chain_of_chain_approval_token or {})
+    auth_super_chain_report = dict(launch_authorization_super_chain_report or {})
     revoked_auth_token_rows = [dict(x) for x in list(revoked_launch_authorization_packet_approval_tokens or []) if isinstance(x, dict)]
     revoked_chain_token_rows = [dict(x) for x in list(revoked_launch_authorization_chain_approval_tokens or []) if isinstance(x, dict)]
     revoked_chain2_token_rows = [dict(x) for x in list(revoked_launch_authorization_chain_of_chain_approval_tokens or []) if isinstance(x, dict)]
@@ -3458,6 +3462,34 @@ def evaluate_live_launch_guard(
             "actual": chain2_approval_token_revoked,
         }
     )
+    auth_super_chain_generated_ms = _to_int_or_none(auth_super_chain_report.get("generated_unix_ms"))
+    auth_super_chain_age_ok = False
+    if auth_super_chain_generated_ms is not None:
+        auth_super_chain_age_ok = (now_ms - int(auth_super_chain_generated_ms)) <= int(max(0.0, float(max_launch_authorization_super_chain_report_age_seconds)) * 1000.0)
+    checks.append(
+        {
+            "name": "authorization_super_chain_report_present",
+            "required": bool(require_launch_authorization_super_chain_report),
+            "ok": bool(auth_super_chain_report),
+            "actual": bool(auth_super_chain_report),
+        }
+    )
+    checks.append(
+        {
+            "name": "authorization_super_chain_report_status_ready",
+            "required": bool(require_launch_authorization_super_chain_report),
+            "ok": str(auth_super_chain_report.get("status") or "") == "ready",
+            "actual": str(auth_super_chain_report.get("status") or ""),
+        }
+    )
+    checks.append(
+        {
+            "name": "authorization_super_chain_report_fresh_enough",
+            "required": bool(require_launch_authorization_super_chain_report),
+            "ok": auth_super_chain_age_ok,
+            "actual": (None if auth_super_chain_generated_ms is None else max(0, now_ms - int(auth_super_chain_generated_ms))),
+        }
+    )
 
     prelive_generated_ms = _to_int_or_none(go_no_go.get("generated_unix_ms"))
     prelive_age_ok = False
@@ -3618,6 +3650,7 @@ def evaluate_live_launch_guard(
         ),
         "authorization_chain_of_chain_approval_token_id": str(auth_chain_of_chain_approval_token.get("token_id") or ""),
         "authorization_chain_of_chain_approval_token_revoked": chain2_approval_token_revoked,
+        "authorization_super_chain_report_status": str(auth_super_chain_report.get("status") or ""),
         "summary": ("live_launch_guard_allow" if allowed else f"live_launch_guard_block:{','.join(required_failed)}"),
     }
 
@@ -4600,6 +4633,67 @@ def write_live_pilot_launch_authorization_super_chain_report(report: dict[str, A
             f"- chain_of_chain_approval_token_id: `{s.get('chain_of_chain_approval_token_id', '')}`",
             f"- chain_of_chain_approval_token_revoked: `{bool(s.get('chain_of_chain_approval_token_revoked', False))}`",
             f"- guard_status: `{s.get('guard_status', '')}`",
+            "",
+            "## Checks",
+            "",
+        ]
+        for c in [dict(x) for x in list(report.get("checks") or []) if isinstance(x, dict)]:
+            lines.append(f"- {c.get('name','')}: `{'pass' if c.get('ok') else 'fail'}` required=`{bool(c.get('required', False))}` actual=`{c.get('actual')}`")
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    else:
+        p.write_text(json.dumps(report, sort_keys=True, indent=2), encoding="utf-8")
+
+
+def build_live_pilot_launch_authorization_super_chain_freshness_summary(
+    *,
+    launch_authorization_super_chain_report: dict[str, Any] | None = None,
+    launch_authorization_chain_of_chain_freshness_summary: dict[str, Any] | None = None,
+    max_super_chain_report_age_seconds: float = 900.0,
+) -> dict[str, Any]:
+    super_chain = dict(launch_authorization_super_chain_report or {})
+    chain2_fresh = dict(launch_authorization_chain_of_chain_freshness_summary or {})
+    now_ms = int(time.time() * 1000)
+    generated_ms = _to_int_or_none(super_chain.get("generated_unix_ms"))
+    age_ok = False
+    if generated_ms is not None:
+        age_ok = (now_ms - int(generated_ms)) <= int(max(0.0, float(max_super_chain_report_age_seconds)) * 1000.0)
+    checks = [
+        {"name": "super_chain_report_present", "required": True, "ok": bool(super_chain), "actual": bool(super_chain)},
+        {"name": "super_chain_report_status_ready", "required": True, "ok": str(super_chain.get("status") or "") == "ready", "actual": str(super_chain.get("status") or "")},
+        {
+            "name": "super_chain_report_fresh_enough",
+            "required": True,
+            "ok": age_ok,
+            "actual": (None if generated_ms is None else max(0, now_ms - int(generated_ms))),
+        },
+        {
+            "name": "chain_of_chain_freshness_summary_pass",
+            "required": False,
+            "ok": str(chain2_fresh.get("status") or "") == "pass",
+            "actual": str(chain2_fresh.get("status") or ""),
+        },
+    ]
+    failed_required = [c["name"] for c in checks if bool(c.get("required", False)) and not bool(c.get("ok", False))]
+    return {
+        "generated_unix_ms": now_ms,
+        "status": ("pass" if not failed_required else "fail"),
+        "failed_required_checks": failed_required,
+        "super_chain_report_status": str(super_chain.get("status") or ""),
+        "chain_of_chain_report_status": str(((super_chain.get("summary") or {}) if isinstance(super_chain.get("summary"), dict) else {}).get("chain_of_chain_status") or ""),
+        "checks": checks,
+    }
+
+
+def write_live_pilot_launch_authorization_super_chain_freshness_summary(report: dict[str, Any], path_str: str) -> None:
+    p = Path(path_str)
+    if p.suffix.lower() in {".md", ".markdown"}:
+        lines = [
+            "# Live Pilot Launch Authorization Super-Chain Freshness Summary",
+            "",
+            f"- status: `{report.get('status', '')}`",
+            f"- super_chain_report_status: `{report.get('super_chain_report_status', '')}`",
+            f"- chain_of_chain_report_status: `{report.get('chain_of_chain_report_status', '')}`",
+            f"- failed_required_checks: `{', '.join(list(report.get('failed_required_checks', []) or [])) or '-'}`",
             "",
             "## Checks",
             "",
@@ -6452,6 +6546,7 @@ def _main() -> int:
     p.add_argument("--launch-authorization-chain-of-chain-approval-token-path", default="")
     p.add_argument("--launch-authorization-chain-of-chain-approval-token-audit-report-path", default="")
     p.add_argument("--launch-authorization-super-chain-report-path", default="")
+    p.add_argument("--launch-authorization-super-chain-freshness-summary-path", default="")
     p.add_argument("--launch-authorization-chain-of-chain-approval-token-revocation-log-jsonl-path", default="")
     p.add_argument("--launch-authorization-chain-of-chain-approval-token-revoke-now", action="store_true")
     p.add_argument("--launch-authorization-chain-of-chain-approval-token-revoke-reason", default="manual_revoke")
@@ -6485,6 +6580,7 @@ def _main() -> int:
     p.add_argument("--live-launch-guard-require-authorization-chain-of-chain-report-binding", action="store_true")
     p.add_argument("--live-launch-guard-require-authorization-chain-of-chain-approval-token", action="store_true")
     p.add_argument("--live-launch-guard-require-unrevoked-authorization-chain-of-chain-approval-token", action="store_true")
+    p.add_argument("--live-launch-guard-require-authorization-super-chain-report", action="store_true")
     p.add_argument("--live-launch-guard-ticket-action", default="approve_live_test")
     p.add_argument("--live-launch-guard-authorization-packet-approval-action", default="approve_live_launch_packet")
     p.add_argument("--live-launch-guard-authorization-chain-approval-action", default="approve_live_launch_chain")
@@ -6496,6 +6592,7 @@ def _main() -> int:
     p.add_argument("--live-launch-guard-max-authorization-chain-approval-token-age-seconds", type=float, default=900.0)
     p.add_argument("--live-launch-guard-max-authorization-chain-of-chain-report-age-seconds", type=float, default=900.0)
     p.add_argument("--live-launch-guard-max-authorization-chain-of-chain-approval-token-age-seconds", type=float, default=900.0)
+    p.add_argument("--live-launch-guard-max-authorization-super-chain-report-age-seconds", type=float, default=900.0)
     p.add_argument("--postrun-review-packet-path", default="")
     p.add_argument("--archive-rotation-glob", default="")
     p.add_argument("--archive-rotation-dir", default="")
@@ -6631,6 +6728,8 @@ def _main() -> int:
             ensure_dir_within_base(str(Path(args.launch_authorization_chain_of_chain_approval_token_audit_report_path).parent))
         if args.launch_authorization_super_chain_report_path:
             ensure_dir_within_base(str(Path(args.launch_authorization_super_chain_report_path).parent))
+        if args.launch_authorization_super_chain_freshness_summary_path:
+            ensure_dir_within_base(str(Path(args.launch_authorization_super_chain_freshness_summary_path).parent))
         if args.launch_authorization_chain_of_chain_approval_token_revocation_log_jsonl_path:
             ensure_dir_within_base(str(Path(args.launch_authorization_chain_of_chain_approval_token_revocation_log_jsonl_path).parent))
         if args.live_test_readiness_report_path:
@@ -6719,6 +6818,7 @@ def _main() -> int:
         launch_authorization_chain_of_chain_approval_token_obj = _read_json_or_empty(
             str(args.launch_authorization_chain_of_chain_approval_token_path or "")
         )
+        launch_authorization_super_chain_report_obj = _read_json_or_empty(str(args.launch_authorization_super_chain_report_path or ""))
         revocation_policy_overrides = _parse_simple_policy_overrides(list(args.live_launch_guard_revocation_reason_class_policy or []))
         consumed_ticket_rows = list_live_pilot_promotion_ticket_consumptions(str(args.promotion_ticket_consumption_log_jsonl_path or ""))
         revoked_ticket_rows = list_live_pilot_promotion_ticket_revocations(str(args.promotion_ticket_revocation_log_jsonl_path or ""))
@@ -6743,6 +6843,7 @@ def _main() -> int:
             launch_authorization_chain_approval_token=launch_authorization_chain_approval_token_obj,
             launch_authorization_chain_of_chain_report=launch_authorization_chain_of_chain_report_obj,
             launch_authorization_chain_of_chain_approval_token=launch_authorization_chain_of_chain_approval_token_obj,
+            launch_authorization_super_chain_report=launch_authorization_super_chain_report_obj,
             requested_mode=str(args.mode or ""),
             requested_risk_profile_preset=str(args.risk_profile_preset or ""),
             require_prelive_go_no_go=bool(args.live_launch_guard_require_prelive),
@@ -6772,6 +6873,7 @@ def _main() -> int:
             require_unrevoked_launch_authorization_chain_of_chain_approval_token=bool(
                 args.live_launch_guard_require_unrevoked_authorization_chain_of_chain_approval_token
             ),
+            require_launch_authorization_super_chain_report=bool(args.live_launch_guard_require_authorization_super_chain_report),
             revocation_reason_class_policy_overrides=revocation_policy_overrides,
             required_ticket_action=str(args.live_launch_guard_ticket_action or "approve_live_test"),
             required_launch_authorization_packet_approval_action=str(args.live_launch_guard_authorization_packet_approval_action or "approve_live_launch_packet"),
@@ -6787,6 +6889,9 @@ def _main() -> int:
             ),
             max_launch_authorization_chain_of_chain_approval_token_age_seconds=float(
                 args.live_launch_guard_max_authorization_chain_of_chain_approval_token_age_seconds or 900.0
+            ),
+            max_launch_authorization_super_chain_report_age_seconds=float(
+                args.live_launch_guard_max_authorization_super_chain_report_age_seconds or 900.0
             ),
             consumed_tickets=consumed_ticket_rows,
             revoked_tickets=revoked_ticket_rows,
@@ -6966,6 +7071,8 @@ def _main() -> int:
                 chain_of_chain_freshness_summary,
                 str(args.launch_authorization_chain_of_chain_freshness_summary_path),
             )
+        else:
+            chain_of_chain_freshness_summary = {}
         if str(args.launch_authorization_chain_of_chain_approval_token_path or "").strip():
             write_live_pilot_launch_authorization_chain_of_chain_approval_token(
                 build_live_pilot_launch_authorization_chain_of_chain_approval_token(
@@ -7001,6 +7108,18 @@ def _main() -> int:
             write_live_pilot_launch_authorization_super_chain_report(
                 super_chain_report,
                 str(args.launch_authorization_super_chain_report_path),
+            )
+        else:
+            super_chain_report = {}
+        if str(args.launch_authorization_super_chain_freshness_summary_path or "").strip():
+            super_chain_freshness_summary = build_live_pilot_launch_authorization_super_chain_freshness_summary(
+                launch_authorization_super_chain_report=(super_chain_report or launch_authorization_super_chain_report_obj),
+                launch_authorization_chain_of_chain_freshness_summary=chain_of_chain_freshness_summary,
+                max_super_chain_report_age_seconds=float(args.live_launch_guard_max_authorization_super_chain_report_age_seconds or 900.0),
+            )
+            write_live_pilot_launch_authorization_super_chain_freshness_summary(
+                super_chain_freshness_summary,
+                str(args.launch_authorization_super_chain_freshness_summary_path),
             )
         if str(args.supervised_live_launch_runbook_path or "").strip():
             if not readiness_report and str(args.live_test_readiness_report_path or "").strip():
