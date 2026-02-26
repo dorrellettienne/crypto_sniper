@@ -66,6 +66,8 @@ from src.live.live_pilot_service import (
     write_live_pilot_promotion_ticket_lifecycle_timeline,
     build_live_pilot_launch_authorization_packet,
     write_live_pilot_launch_authorization_packet,
+    build_live_pilot_launch_authorization_freshness_envelope,
+    write_live_pilot_launch_authorization_freshness_envelope,
     build_live_pilot_postrun_review_packet,
     write_live_pilot_postrun_review_packet,
     rotate_live_pilot_artifacts_by_glob,
@@ -2684,3 +2686,50 @@ def test_ticket_lifecycle_timeline_and_launch_authorization_packet(tmp_path):
     md_packet = tmp_path / "launch_authorization_packet.md"
     write_live_pilot_launch_authorization_packet(packet, str(md_packet))
     assert "Launch Authorization Packet" in md_packet.read_text(encoding="utf-8")
+
+
+def test_launch_authorization_freshness_envelope_and_guard_requirement(tmp_path):
+    now_ms = int(time.time() * 1000)
+    packet = {
+        "generated_unix_ms": now_ms,
+        "status": "authorized",
+        "source_timestamps_unix_ms": {
+            "prelive_go_no_go_report": now_ms - 1000,
+            "promotion_ticket_issued": now_ms - 2000,
+            "launch_intent_manifest": now_ms - 1000,
+            "live_launch_guard_report": now_ms - 500,
+            "ticket_state_consistency_report": now_ms - 500,
+            "revocation_audit_report": now_ms - 500,
+            "ticket_lifecycle_timeline": now_ms - 500,
+        },
+    }
+    env = build_live_pilot_launch_authorization_freshness_envelope(
+        launch_authorization_packet=packet,
+        max_packet_age_seconds=60.0,
+    )
+    assert env["status"] == "pass"
+    md_path = tmp_path / "launch_auth_freshness.md"
+    write_live_pilot_launch_authorization_freshness_envelope(env, str(md_path))
+    assert "Authorization Freshness Envelope" in md_path.read_text(encoding="utf-8")
+
+    guard_allow = evaluate_live_launch_guard(
+        adapter_config={"live_send_network_enabled": True},
+        enable_live_auto_submit_window=True,
+        launch_authorization_packet=packet,
+        require_launch_authorization_packet=True,
+        max_launch_authorization_packet_age_seconds=60.0,
+    )
+    assert guard_allow["status"] == "allow"
+    assert guard_allow["authorization_packet_status"] == "authorized"
+
+    stale_packet = dict(packet)
+    stale_packet["generated_unix_ms"] = now_ms - 10_000_000
+    guard_block = evaluate_live_launch_guard(
+        adapter_config={"live_send_network_enabled": True},
+        enable_live_auto_submit_window=True,
+        launch_authorization_packet=stale_packet,
+        require_launch_authorization_packet=True,
+        max_launch_authorization_packet_age_seconds=1.0,
+    )
+    assert guard_block["status"] == "block"
+    assert "authorization_packet_fresh_enough" in guard_block["required_failed_checks"]

@@ -2564,6 +2564,7 @@ def evaluate_live_launch_guard(
     prelive_go_no_go_report: dict[str, Any] | None = None,
     promotion_ticket: dict[str, Any] | None = None,
     launch_intent_manifest: dict[str, Any] | None = None,
+    launch_authorization_packet: dict[str, Any] | None = None,
     requested_mode: str = "",
     requested_risk_profile_preset: str = "",
     require_prelive_go_no_go: bool = False,
@@ -2572,10 +2573,12 @@ def evaluate_live_launch_guard(
     require_unused_ticket: bool = False,
     require_unrevoked_ticket: bool = False,
     require_launch_intent: bool = False,
+    require_launch_authorization_packet: bool = False,
     revocation_reason_class_policy_overrides: dict[str, str] | None = None,
     required_ticket_action: str = "approve_live_test",
     max_prelive_age_seconds: float = 3600.0,
     max_launch_intent_age_seconds: float = 1800.0,
+    max_launch_authorization_packet_age_seconds: float = 900.0,
     consumed_tickets: list[dict[str, Any]] | None = None,
     revoked_tickets: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -2584,6 +2587,7 @@ def evaluate_live_launch_guard(
     go_no_go = dict(prelive_go_no_go_report or {})
     ticket = dict(promotion_ticket or {})
     intent = dict(launch_intent_manifest or {})
+    auth_packet = dict(launch_authorization_packet or {})
     intent_scope = dict(intent.get("scope") or {})
     now_ms = int(time.time() * 1000)
     checks: list[dict[str, Any]] = []
@@ -2617,6 +2621,34 @@ def evaluate_live_launch_guard(
             "required": bool(require_launch_intent),
             "ok": bool(intent_scope.get("enable_live_auto_submit_window", False)) == bool(enable_live_auto_submit_window),
             "actual": bool(intent_scope.get("enable_live_auto_submit_window", False)),
+        }
+    )
+    auth_packet_generated_ms = _to_int_or_none(auth_packet.get("generated_unix_ms"))
+    auth_packet_age_ok = False
+    if auth_packet_generated_ms is not None:
+        auth_packet_age_ok = (now_ms - int(auth_packet_generated_ms)) <= int(max(0.0, float(max_launch_authorization_packet_age_seconds)) * 1000.0)
+    checks.append(
+        {
+            "name": "authorization_packet_present",
+            "required": bool(require_launch_authorization_packet),
+            "ok": bool(auth_packet),
+            "actual": bool(auth_packet),
+        }
+    )
+    checks.append(
+        {
+            "name": "authorization_packet_status_authorized",
+            "required": bool(require_launch_authorization_packet),
+            "ok": str(auth_packet.get("status") or "") == "authorized",
+            "actual": str(auth_packet.get("status") or ""),
+        }
+    )
+    checks.append(
+        {
+            "name": "authorization_packet_fresh_enough",
+            "required": bool(require_launch_authorization_packet),
+            "ok": auth_packet_age_ok,
+            "actual": (None if auth_packet_generated_ms is None else max(0, now_ms - int(auth_packet_generated_ms))),
         }
     )
 
@@ -2755,6 +2787,7 @@ def evaluate_live_launch_guard(
     allowed = (not live_launch_requested) or (len(required_failed) == 0)
     status = "allow" if allowed else "block"
     return {
+        "generated_unix_ms": now_ms,
         "status": status,
         "live_launch_requested": live_launch_requested,
         "required_failed_checks": required_failed,
@@ -2765,6 +2798,7 @@ def evaluate_live_launch_guard(
         "ticket_revocation_reason": latest_revocation_reason,
         "ticket_revocation_reason_class": latest_revocation_reason_class,
         "ticket_revocation_policy_action": ticket_revocation_policy_action,
+        "authorization_packet_status": str(auth_packet.get("status") or ""),
         "summary": ("live_launch_guard_allow" if allowed else f"live_launch_guard_block:{','.join(required_failed)}"),
     }
 
@@ -3084,6 +3118,15 @@ def build_live_pilot_launch_authorization_packet(
             "revocation_audit_report_present": bool(audit),
             "ticket_lifecycle_timeline_present": bool(timeline),
         },
+        "source_timestamps_unix_ms": {
+            "prelive_go_no_go_report": _to_int_or_none(go_no_go.get("generated_unix_ms")),
+            "promotion_ticket_issued": _to_int_or_none(ticket.get("issued_unix_ms")),
+            "launch_intent_manifest": _to_int_or_none(intent.get("generated_unix_ms")),
+            "live_launch_guard_report": _to_int_or_none(guard.get("generated_unix_ms")),
+            "ticket_state_consistency_report": _to_int_or_none(consistency.get("generated_unix_ms")),
+            "revocation_audit_report": _to_int_or_none(audit.get("generated_unix_ms")),
+            "ticket_lifecycle_timeline": _to_int_or_none(timeline.get("generated_unix_ms")),
+        },
     }
 
 
@@ -3106,6 +3149,113 @@ def write_live_pilot_launch_authorization_packet(report: dict[str, Any], path_st
             f"- ticket_consistency_status: `{s.get('ticket_consistency_status', '')}`",
             f"- ticket_latest_state: `{s.get('ticket_latest_state', '')}`",
             f"- ticket_effectively_revoked: `{bool(s.get('ticket_effectively_revoked', False))}`",
+            "",
+            "## Checks",
+            "",
+        ]
+        for c in [dict(x) for x in list(report.get("checks") or []) if isinstance(x, dict)]:
+            lines.append(f"- {c.get('name','')}: `{'pass' if c.get('ok') else 'fail'}` required=`{bool(c.get('required', False))}` actual=`{c.get('actual')}`")
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    else:
+        p.write_text(json.dumps(report, sort_keys=True, indent=2), encoding="utf-8")
+
+
+def build_live_pilot_launch_authorization_freshness_envelope(
+    *,
+    launch_authorization_packet: dict[str, Any] | None = None,
+    max_age_seconds_by_source: dict[str, float] | None = None,
+    max_packet_age_seconds: float = 900.0,
+) -> dict[str, Any]:
+    packet = dict(launch_authorization_packet or {})
+    now_ms = int(time.time() * 1000)
+    source_ts = dict(packet.get("source_timestamps_unix_ms") or {})
+    age_limits: dict[str, float] = {
+        "prelive_go_no_go_report": 3600.0,
+        "promotion_ticket_issued": 7200.0,
+        "launch_intent_manifest": 1800.0,
+        "live_launch_guard_report": 900.0,
+        "ticket_state_consistency_report": 900.0,
+        "revocation_audit_report": 900.0,
+        "ticket_lifecycle_timeline": 900.0,
+    }
+    for k, v in dict(max_age_seconds_by_source or {}).items():
+        try:
+            age_limits[str(k)] = float(v)
+        except Exception:
+            continue
+    checks: list[dict[str, Any]] = []
+    packet_generated_ms = _to_int_or_none(packet.get("generated_unix_ms"))
+    packet_age_ok = False
+    if packet_generated_ms is not None:
+        packet_age_ok = (now_ms - int(packet_generated_ms)) <= int(max(0.0, float(max_packet_age_seconds)) * 1000.0)
+    checks.append({"name": "authorization_packet_present", "required": True, "ok": bool(packet), "actual": bool(packet)})
+    checks.append(
+        {
+            "name": "authorization_packet_status_authorized",
+            "required": True,
+            "ok": str(packet.get("status") or "") == "authorized",
+            "actual": str(packet.get("status") or ""),
+        }
+    )
+    checks.append(
+        {
+            "name": "authorization_packet_fresh_enough",
+            "required": True,
+            "ok": packet_age_ok,
+            "actual": (None if packet_generated_ms is None else max(0, now_ms - int(packet_generated_ms))),
+        }
+    )
+    stale_sources: list[str] = []
+    missing_sources: list[str] = []
+    for name in sorted(age_limits.keys()):
+        ts_val = _to_int_or_none(source_ts.get(name))
+        max_age = float(age_limits.get(name, 0.0) or 0.0)
+        if ts_val is None:
+            missing_sources.append(name)
+            checks.append(
+                {
+                    "name": f"source_fresh:{name}",
+                    "required": False,
+                    "ok": False,
+                    "actual": {"present": False, "age_ms": None, "max_age_seconds": max_age},
+                }
+            )
+            continue
+        age_ms = max(0, now_ms - int(ts_val))
+        ok = age_ms <= int(max(0.0, max_age) * 1000.0)
+        if not ok:
+            stale_sources.append(name)
+        checks.append(
+            {
+                "name": f"source_fresh:{name}",
+                "required": False,
+                "ok": ok,
+                "actual": {"present": True, "age_ms": age_ms, "max_age_seconds": max_age},
+            }
+        )
+    failed_required = [c["name"] for c in checks if bool(c.get("required", False)) and not bool(c.get("ok", False))]
+    return {
+        "generated_unix_ms": now_ms,
+        "status": ("pass" if not failed_required else "fail"),
+        "failed_required_checks": failed_required,
+        "authorization_packet_status": str(packet.get("status") or ""),
+        "stale_sources": stale_sources,
+        "missing_sources": missing_sources,
+        "checks": checks,
+    }
+
+
+def write_live_pilot_launch_authorization_freshness_envelope(report: dict[str, Any], path_str: str) -> None:
+    p = Path(path_str)
+    if p.suffix.lower() in {".md", ".markdown"}:
+        lines = [
+            "# Live Pilot Launch Authorization Freshness Envelope",
+            "",
+            f"- status: `{report.get('status', '')}`",
+            f"- authorization_packet_status: `{report.get('authorization_packet_status', '')}`",
+            f"- failed_required_checks: `{', '.join(list(report.get('failed_required_checks', []) or [])) or '-'}`",
+            f"- stale_sources: `{', '.join(list(report.get('stale_sources', []) or [])) or '-'}`",
+            f"- missing_sources: `{', '.join(list(report.get('missing_sources', []) or [])) or '-'}`",
             "",
             "## Checks",
             "",
@@ -4797,6 +4947,7 @@ def _main() -> int:
     p.add_argument("--live-launch-guard-report-path", default="")
     p.add_argument("--ticket-state-consistency-report-path", default="")
     p.add_argument("--launch-authorization-packet-path", default="")
+    p.add_argument("--launch-authorization-freshness-envelope-path", default="")
     p.add_argument("--live-launch-guard-enforce", action="store_true")
     p.add_argument("--live-launch-guard-require-prelive", action="store_true")
     p.add_argument("--live-launch-guard-require-bundle-pass", action="store_true")
@@ -4806,9 +4957,11 @@ def _main() -> int:
     p.add_argument("--live-launch-guard-revocation-reason-class-policy", action="append", default=[])
     p.add_argument("--live-launch-guard-consume-ticket-on-allow", action="store_true")
     p.add_argument("--live-launch-guard-require-launch-intent", action="store_true")
+    p.add_argument("--live-launch-guard-require-authorization-packet", action="store_true")
     p.add_argument("--live-launch-guard-ticket-action", default="approve_live_test")
     p.add_argument("--live-launch-guard-max-prelive-age-seconds", type=float, default=3600.0)
     p.add_argument("--live-launch-guard-max-launch-intent-age-seconds", type=float, default=1800.0)
+    p.add_argument("--live-launch-guard-max-authorization-packet-age-seconds", type=float, default=900.0)
     p.add_argument("--postrun-review-packet-path", default="")
     p.add_argument("--archive-rotation-glob", default="")
     p.add_argument("--archive-rotation-dir", default="")
@@ -4916,6 +5069,8 @@ def _main() -> int:
             ensure_dir_within_base(str(Path(args.ticket_state_consistency_report_path).parent))
         if args.launch_authorization_packet_path:
             ensure_dir_within_base(str(Path(args.launch_authorization_packet_path).parent))
+        if args.launch_authorization_freshness_envelope_path:
+            ensure_dir_within_base(str(Path(args.launch_authorization_freshness_envelope_path).parent))
         if args.postrun_review_packet_path:
             ensure_dir_within_base(str(Path(args.postrun_review_packet_path).parent))
         if args.archive_rotation_dir:
@@ -4957,6 +5112,7 @@ def _main() -> int:
         prelive_guard_obj = _read_json_or_empty(str(args.prelive_go_no_go_report_path or ""))
         ticket_guard_obj = _read_json_or_empty(str(args.promotion_ticket_path or ""))
         launch_intent_guard_obj = _read_json_or_empty(str(args.launch_intent_manifest_path or ""))
+        launch_authorization_packet_obj = _read_json_or_empty(str(args.launch_authorization_packet_path or ""))
         revocation_policy_overrides = _parse_simple_policy_overrides(list(args.live_launch_guard_revocation_reason_class_policy or []))
         consumed_ticket_rows = list_live_pilot_promotion_ticket_consumptions(str(args.promotion_ticket_consumption_log_jsonl_path or ""))
         revoked_ticket_rows = list_live_pilot_promotion_ticket_revocations(str(args.promotion_ticket_revocation_log_jsonl_path or ""))
@@ -4966,6 +5122,7 @@ def _main() -> int:
             prelive_go_no_go_report=prelive_guard_obj,
             promotion_ticket=ticket_guard_obj,
             launch_intent_manifest=launch_intent_guard_obj,
+            launch_authorization_packet=launch_authorization_packet_obj,
             requested_mode=str(args.mode or ""),
             requested_risk_profile_preset=str(args.risk_profile_preset or ""),
             require_prelive_go_no_go=bool(args.live_launch_guard_require_prelive),
@@ -4974,10 +5131,12 @@ def _main() -> int:
             require_unused_ticket=bool(args.live_launch_guard_require_unused_ticket),
             require_unrevoked_ticket=bool(args.live_launch_guard_require_unrevoked_ticket),
             require_launch_intent=bool(args.live_launch_guard_require_launch_intent),
+            require_launch_authorization_packet=bool(args.live_launch_guard_require_authorization_packet),
             revocation_reason_class_policy_overrides=revocation_policy_overrides,
             required_ticket_action=str(args.live_launch_guard_ticket_action or "approve_live_test"),
             max_prelive_age_seconds=float(args.live_launch_guard_max_prelive_age_seconds or 3600.0),
             max_launch_intent_age_seconds=float(args.live_launch_guard_max_launch_intent_age_seconds or 1800.0),
+            max_launch_authorization_packet_age_seconds=float(args.live_launch_guard_max_authorization_packet_age_seconds or 900.0),
             consumed_tickets=consumed_ticket_rows,
             revoked_tickets=revoked_ticket_rows,
         )
@@ -5024,17 +5183,25 @@ def _main() -> int:
         else:
             ticket_state_consistency_report = {}
         if str(args.launch_authorization_packet_path or "").strip():
-            write_live_pilot_launch_authorization_packet(
-                build_live_pilot_launch_authorization_packet(
-                    prelive_go_no_go_report=prelive_guard_obj,
-                    promotion_ticket=ticket_guard_obj,
-                    launch_intent_manifest=launch_intent_guard_obj,
-                    live_launch_guard_report=live_guard,
-                    ticket_state_consistency_report=ticket_state_consistency_report,
-                    revocation_audit_report=revocation_audit_report,
-                    ticket_lifecycle_timeline=ticket_lifecycle_timeline,
+            launch_authorization_packet_out = build_live_pilot_launch_authorization_packet(
+                prelive_go_no_go_report=prelive_guard_obj,
+                promotion_ticket=ticket_guard_obj,
+                launch_intent_manifest=launch_intent_guard_obj,
+                live_launch_guard_report=live_guard,
+                ticket_state_consistency_report=ticket_state_consistency_report,
+                revocation_audit_report=revocation_audit_report,
+                ticket_lifecycle_timeline=ticket_lifecycle_timeline,
+            )
+            write_live_pilot_launch_authorization_packet(launch_authorization_packet_out, str(args.launch_authorization_packet_path))
+        else:
+            launch_authorization_packet_out = {}
+        if str(args.launch_authorization_freshness_envelope_path or "").strip():
+            write_live_pilot_launch_authorization_freshness_envelope(
+                build_live_pilot_launch_authorization_freshness_envelope(
+                    launch_authorization_packet=(launch_authorization_packet_out or launch_authorization_packet_obj),
+                    max_packet_age_seconds=float(args.live_launch_guard_max_authorization_packet_age_seconds or 900.0),
                 ),
-                str(args.launch_authorization_packet_path),
+                str(args.launch_authorization_freshness_envelope_path),
             )
         if str(args.live_launch_guard_report_path or "").strip():
             write_live_launch_guard_report(live_guard, str(args.live_launch_guard_report_path))
