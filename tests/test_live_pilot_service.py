@@ -75,6 +75,8 @@ from src.live.live_pilot_service import (
     write_live_pilot_launch_authorization_packet_approval_token_audit_summary,
     build_live_pilot_launch_authorization_chain_report,
     write_live_pilot_launch_authorization_chain_report,
+    build_live_pilot_launch_authorization_chain_freshness_summary,
+    write_live_pilot_launch_authorization_chain_freshness_summary,
     build_live_pilot_launch_authorization_freshness_envelope,
     write_live_pilot_launch_authorization_freshness_envelope,
     build_live_pilot_postrun_review_packet,
@@ -3023,3 +3025,40 @@ def test_launch_authorization_packet_approval_token_audit_and_chain_report(tmp_p
     md_chain = tmp_path / "launch_authorization_chain.md"
     write_live_pilot_launch_authorization_chain_report(chain, str(md_chain))
     assert "Authorization Chain Report" in md_chain.read_text(encoding="utf-8")
+
+
+def test_launch_authorization_chain_freshness_summary_and_guard_requirement(tmp_path):
+    now_ms = int(time.time() * 1000)
+    chain = {"generated_unix_ms": now_ms, "status": "ready"}
+    fresh = {"status": "pass", "stale_sources": ["launch_intent_manifest"]}
+    summary = build_live_pilot_launch_authorization_chain_freshness_summary(
+        launch_authorization_chain_report=chain,
+        launch_authorization_freshness_envelope=fresh,
+        max_chain_report_age_seconds=60.0,
+    )
+    assert summary["status"] == "pass"
+    md_path = tmp_path / "launch_auth_chain_freshness.md"
+    write_live_pilot_launch_authorization_chain_freshness_summary(summary, str(md_path))
+    assert "Chain Freshness Summary" in md_path.read_text(encoding="utf-8")
+
+    guard_allow = evaluate_live_launch_guard(
+        adapter_config={"live_send_network_enabled": True},
+        enable_live_auto_submit_window=True,
+        launch_authorization_chain_report=chain,
+        require_launch_authorization_chain_report=True,
+        max_launch_authorization_chain_report_age_seconds=60.0,
+    )
+    assert guard_allow["status"] == "allow"
+    assert guard_allow["authorization_chain_report_status"] == "ready"
+
+    stale_chain = dict(chain)
+    stale_chain["generated_unix_ms"] = now_ms - 10_000_000
+    guard_block = evaluate_live_launch_guard(
+        adapter_config={"live_send_network_enabled": True},
+        enable_live_auto_submit_window=True,
+        launch_authorization_chain_report=stale_chain,
+        require_launch_authorization_chain_report=True,
+        max_launch_authorization_chain_report_age_seconds=1.0,
+    )
+    assert guard_block["status"] == "block"
+    assert "authorization_chain_report_fresh_enough" in guard_block["required_failed_checks"]
