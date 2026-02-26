@@ -2710,6 +2710,85 @@ def write_live_pilot_launch_authorization_packet_approval_token_audit_summary(re
         p.write_text(json.dumps(report, sort_keys=True, indent=2), encoding="utf-8")
 
 
+def resolve_live_pilot_launch_authorization_chain_approval_token_latest_state(
+    *,
+    approval_token: dict[str, Any] | None = None,
+    revoked_approval_tokens: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    tok = dict(approval_token or {})
+    token_id = str(tok.get("token_id") or "")
+    token_fp = str(tok.get("token_fingerprint_sha256") or "")
+    rev_rows = [dict(x) for x in list(revoked_approval_tokens or []) if isinstance(x, dict)]
+    matching = [
+        dict(r)
+        for r in rev_rows
+        if (
+            (token_id and str(r.get("token_id") or "") == token_id)
+            or (token_fp and str(r.get("token_fingerprint_sha256") or "") == token_fp)
+        )
+    ]
+    matching.sort(key=lambda r: int(_to_int_or_none(r.get("ts_unix_ms")) or 0), reverse=True)
+    latest_revocation = dict(matching[0]) if matching else {}
+    revoked = bool(matching)
+    return {
+        "token_id": token_id,
+        "token_fingerprint_sha256": token_fp,
+        "revoked": revoked,
+        "revoked_count": len(matching),
+        "latest_state": ("revoked" if revoked else "issued"),
+        "latest_revocation": latest_revocation,
+        "revocation_reason": str(latest_revocation.get("reason") or ""),
+        "revocation_reason_class": str(latest_revocation.get("reason_class") or ""),
+    }
+
+
+def build_live_pilot_launch_authorization_chain_approval_token_audit_summary(
+    *,
+    approval_token: dict[str, Any] | None = None,
+    revoked_approval_tokens: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    tok = dict(approval_token or {})
+    state = resolve_live_pilot_launch_authorization_chain_approval_token_latest_state(
+        approval_token=tok,
+        revoked_approval_tokens=revoked_approval_tokens,
+    )
+    rev_rows = [dict(x) for x in list(revoked_approval_tokens or []) if isinstance(x, dict)]
+    class_counts: dict[str, int] = {}
+    sev_counts: dict[str, int] = {}
+    for row in rev_rows:
+        rclass = str(row.get("reason_class") or classify_live_pilot_promotion_ticket_revocation_reason(str(row.get("reason") or "")).get("reason_class") or "other")
+        sev = str(row.get("severity") or classify_live_pilot_promotion_ticket_revocation_reason(str(row.get("reason") or "")).get("severity") or "warning")
+        class_counts[rclass] = int(class_counts.get(rclass, 0)) + 1
+        sev_counts[sev] = int(sev_counts.get(sev, 0)) + 1
+    return {
+        "generated_unix_ms": int(time.time() * 1000),
+        "token_id": str(tok.get("token_id") or ""),
+        "chain_report_fingerprint_sha256": str(tok.get("chain_report_fingerprint_sha256") or ""),
+        "token_state": state,
+        "revocation_events_total": len(rev_rows),
+        "revocation_reason_class_counts": class_counts,
+        "revocation_severity_counts": sev_counts,
+    }
+
+
+def write_live_pilot_launch_authorization_chain_approval_token_audit_summary(report: dict[str, Any], path_str: str) -> None:
+    p = Path(path_str)
+    if p.suffix.lower() in {".md", ".markdown"}:
+        st = dict(report.get("token_state") or {})
+        lines = [
+            "# Launch Authorization Chain Approval Token Audit",
+            "",
+            f"- token_id: `{report.get('token_id', '')}`",
+            f"- latest_state: `{st.get('latest_state', '')}`",
+            f"- revoked: `{bool(st.get('revoked', False))}`",
+            f"- revocation_reason_class: `{st.get('revocation_reason_class', '')}`",
+            f"- revocation_events_total: `{report.get('revocation_events_total', 0)}`",
+        ]
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    else:
+        p.write_text(json.dumps(report, sort_keys=True, indent=2), encoding="utf-8")
+
+
 def evaluate_live_launch_guard(
     *,
     adapter_config: dict[str, Any] | None = None,
@@ -3898,6 +3977,89 @@ def write_live_pilot_launch_authorization_chain_approval_token(report: dict[str,
             f"- expires_unix_ms: `{report.get('expires_unix_ms', 0)}`",
             f"- token_fingerprint_sha256: `{report.get('token_fingerprint_sha256', '')}`",
         ]
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    else:
+        p.write_text(json.dumps(report, sort_keys=True, indent=2), encoding="utf-8")
+
+
+def build_live_pilot_launch_authorization_chain_of_chain_report(
+    *,
+    launch_authorization_chain_report: dict[str, Any] | None = None,
+    launch_authorization_chain_approval_token: dict[str, Any] | None = None,
+    launch_authorization_chain_approval_token_audit_summary: dict[str, Any] | None = None,
+    live_launch_guard_report: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    chain = dict(launch_authorization_chain_report or {})
+    tok = dict(launch_authorization_chain_approval_token or {})
+    tok_audit = dict(launch_authorization_chain_approval_token_audit_summary or {})
+    guard = dict(live_launch_guard_report or {})
+    checks = [
+        {"name": "chain_report_present", "required": True, "ok": bool(chain), "actual": bool(chain)},
+        {"name": "chain_report_status_ready", "required": True, "ok": str(chain.get("status") or "") == "ready", "actual": str(chain.get("status") or "")},
+        {"name": "chain_approval_token_present", "required": True, "ok": bool(tok), "actual": bool(tok)},
+        {
+            "name": "chain_approval_token_matches_chain",
+            "required": True,
+            "ok": bool(tok)
+            and bool(chain)
+            and str(tok.get("chain_report_fingerprint_sha256") or "") == str(chain.get("chain_report_fingerprint_sha256") or ""),
+            "actual": {
+                "token_chain_report_fingerprint_sha256": str(tok.get("chain_report_fingerprint_sha256") or ""),
+                "chain_report_fingerprint_sha256": str(chain.get("chain_report_fingerprint_sha256") or ""),
+            },
+        },
+        {"name": "chain_approval_token_not_revoked", "required": True, "ok": not bool(((tok_audit.get("token_state") or {}).get("revoked", False))), "actual": bool(((tok_audit.get("token_state") or {}).get("revoked", False)))},
+        {"name": "guard_allow", "required": False, "ok": str(guard.get("status") or "") == "allow", "actual": str(guard.get("status") or "")},
+    ]
+    failed_required = [c["name"] for c in checks if bool(c.get("required", False)) and not bool(c.get("ok", False))]
+    status = "ready" if not failed_required else "blocked"
+    out = {
+        "generated_unix_ms": int(time.time() * 1000),
+        "status": status,
+        "failed_required_checks": failed_required,
+        "summary": {
+            "chain_status": str(chain.get("status") or ""),
+            "chain_report_fingerprint_sha256": str(chain.get("chain_report_fingerprint_sha256") or ""),
+            "chain_approval_token_id": str(tok.get("token_id") or ""),
+            "chain_approval_token_revoked": bool(((tok_audit.get("token_state") or {}).get("revoked", False))),
+            "guard_status": str(guard.get("status") or ""),
+            "guard_required_failed_checks": list(guard.get("required_failed_checks", []) or []),
+        },
+        "checks": checks,
+    }
+    s = dict(out.get("summary") or {})
+    out["binding"] = {
+        "chain_report_fingerprint_sha256": str(s.get("chain_report_fingerprint_sha256", "")),
+        "chain_approval_token_id": str(s.get("chain_approval_token_id", "")),
+        "chain_approval_token_revoked": bool(s.get("chain_approval_token_revoked", False)),
+        "guard_status": str(s.get("guard_status", "")),
+        "guard_required_failed_checks": list(s.get("guard_required_failed_checks", []) or []),
+    }
+    fp_src = json.dumps({k: v for k, v in out.items() if k != "chain_of_chain_report_fingerprint_sha256"}, sort_keys=True)
+    out["chain_of_chain_report_fingerprint_sha256"] = hashlib.sha256(fp_src.encode("utf-8")).hexdigest()
+    return out
+
+
+def write_live_pilot_launch_authorization_chain_of_chain_report(report: dict[str, Any], path_str: str) -> None:
+    p = Path(path_str)
+    if p.suffix.lower() in {".md", ".markdown"}:
+        s = dict(report.get("summary") or {})
+        lines = [
+            "# Live Pilot Launch Authorization Chain-of-Chain Report",
+            "",
+            f"- status: `{report.get('status', '')}`",
+            f"- chain_of_chain_report_fingerprint_sha256: `{report.get('chain_of_chain_report_fingerprint_sha256', '')}`",
+            f"- failed_required_checks: `{', '.join(list(report.get('failed_required_checks', []) or [])) or '-'}`",
+            f"- chain_status: `{s.get('chain_status', '')}`",
+            f"- chain_approval_token_id: `{s.get('chain_approval_token_id', '')}`",
+            f"- chain_approval_token_revoked: `{bool(s.get('chain_approval_token_revoked', False))}`",
+            f"- guard_status: `{s.get('guard_status', '')}`",
+            "",
+            "## Checks",
+            "",
+        ]
+        for c in [dict(x) for x in list(report.get("checks") or []) if isinstance(x, dict)]:
+            lines.append(f"- {c.get('name','')}: `{'pass' if c.get('ok') else 'fail'}` required=`{bool(c.get('required', False))}` actual=`{c.get('actual')}`")
         p.write_text("\n".join(lines) + "\n", encoding="utf-8")
     else:
         p.write_text(json.dumps(report, sort_keys=True, indent=2), encoding="utf-8")
@@ -5800,6 +5962,8 @@ def _main() -> int:
     p.add_argument("--launch-authorization-chain-freshness-summary-path", default="")
     p.add_argument("--launch-authorization-chain-approval-token-path", default="")
     p.add_argument("--launch-authorization-chain-approval-token-revocation-log-jsonl-path", default="")
+    p.add_argument("--launch-authorization-chain-approval-token-audit-report-path", default="")
+    p.add_argument("--launch-authorization-chain-of-chain-report-path", default="")
     p.add_argument("--launch-authorization-chain-approval-token-revoke-now", action="store_true")
     p.add_argument("--launch-authorization-chain-approval-token-revoke-reason", default="manual_revoke")
     p.add_argument("--launch-authorization-chain-approval-token-revoke-only", action="store_true")
@@ -5955,6 +6119,10 @@ def _main() -> int:
             ensure_dir_within_base(str(Path(args.launch_authorization_chain_approval_token_path).parent))
         if args.launch_authorization_chain_approval_token_revocation_log_jsonl_path:
             ensure_dir_within_base(str(Path(args.launch_authorization_chain_approval_token_revocation_log_jsonl_path).parent))
+        if args.launch_authorization_chain_approval_token_audit_report_path:
+            ensure_dir_within_base(str(Path(args.launch_authorization_chain_approval_token_audit_report_path).parent))
+        if args.launch_authorization_chain_of_chain_report_path:
+            ensure_dir_within_base(str(Path(args.launch_authorization_chain_of_chain_report_path).parent))
         if args.live_test_readiness_report_path:
             ensure_dir_within_base(str(Path(args.live_test_readiness_report_path).parent))
         if args.supervised_live_launch_runbook_path:
@@ -6193,6 +6361,17 @@ def _main() -> int:
                 str(args.launch_authorization_chain_approval_token_path),
             )
         chain_approval_token_obj_effective = _read_json_or_empty(str(args.launch_authorization_chain_approval_token_path or "")) or launch_authorization_chain_approval_token_obj
+        if str(args.launch_authorization_chain_approval_token_audit_report_path or "").strip():
+            chain_approval_token_audit_report = build_live_pilot_launch_authorization_chain_approval_token_audit_summary(
+                approval_token=chain_approval_token_obj_effective,
+                revoked_approval_tokens=revoked_chain_auth_token_rows,
+            )
+            write_live_pilot_launch_authorization_chain_approval_token_audit_summary(
+                chain_approval_token_audit_report,
+                str(args.launch_authorization_chain_approval_token_audit_report_path),
+            )
+        else:
+            chain_approval_token_audit_report = {}
         if str(args.launch_authorization_chain_freshness_summary_path or "").strip():
             chain_freshness_summary_report = build_live_pilot_launch_authorization_chain_freshness_summary(
                 launch_authorization_chain_report=(chain_report_out or launch_authorization_chain_report_obj),
@@ -6215,6 +6394,17 @@ def _main() -> int:
             write_live_pilot_live_test_readiness_report(readiness_report, str(args.live_test_readiness_report_path))
         else:
             readiness_report = {}
+        if str(args.launch_authorization_chain_of_chain_report_path or "").strip():
+            chain_of_chain_report = build_live_pilot_launch_authorization_chain_of_chain_report(
+                launch_authorization_chain_report=(chain_report_out or launch_authorization_chain_report_obj),
+                launch_authorization_chain_approval_token=chain_approval_token_obj_effective,
+                launch_authorization_chain_approval_token_audit_summary=chain_approval_token_audit_report,
+                live_launch_guard_report=live_guard,
+            )
+            write_live_pilot_launch_authorization_chain_of_chain_report(
+                chain_of_chain_report,
+                str(args.launch_authorization_chain_of_chain_report_path),
+            )
         if str(args.supervised_live_launch_runbook_path or "").strip():
             if not readiness_report and str(args.live_test_readiness_report_path or "").strip():
                 readiness_report = _read_json_or_empty(str(args.live_test_readiness_report_path or ""))
