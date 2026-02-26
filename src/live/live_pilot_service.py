@@ -2340,6 +2340,144 @@ def list_live_pilot_promotion_ticket_revocations(revocation_log_jsonl_path: str)
     return [dict(x) for x in _read_jsonl_rows(str(revocation_log_jsonl_path or "")) if isinstance(x, dict) and str(x.get("event_type") or "") == "live_pilot_promotion_ticket_revoked"]
 
 
+def resolve_live_pilot_promotion_ticket_latest_state(
+    *,
+    ticket: dict[str, Any] | None = None,
+    consumed_tickets: list[dict[str, Any]] | None = None,
+    revoked_tickets: list[dict[str, Any]] | None = None,
+    revocation_reason_class_policy_overrides: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    t = dict(ticket or {})
+    ticket_id = str(t.get("ticket_id") or "")
+    ticket_fp = str(t.get("ticket_fingerprint_sha256") or "")
+    consumed_rows = [dict(x) for x in list(consumed_tickets or []) if isinstance(x, dict)]
+    revoked_rows = [dict(x) for x in list(revoked_tickets or []) if isinstance(x, dict)]
+    matching_consumed = [
+        dict(r)
+        for r in consumed_rows
+        if (
+            (ticket_id and str(r.get("ticket_id") or "") == ticket_id)
+            or (ticket_fp and str(r.get("ticket_fingerprint_sha256") or "") == ticket_fp)
+        )
+    ]
+    matching_revoked = [
+        dict(r)
+        for r in revoked_rows
+        if (
+            (ticket_id and str(r.get("ticket_id") or "") == ticket_id)
+            or (ticket_fp and str(r.get("ticket_fingerprint_sha256") or "") == ticket_fp)
+        )
+    ]
+    matching_consumed.sort(key=lambda r: int(_to_int_or_none(r.get("ts_unix_ms")) or 0), reverse=True)
+    matching_revoked.sort(key=lambda r: int(_to_int_or_none(r.get("ts_unix_ms")) or 0), reverse=True)
+    latest_consumption = dict(matching_consumed[0]) if matching_consumed else {}
+    latest_revocation = dict(matching_revoked[0]) if matching_revoked else {}
+    rev_reason = str(latest_revocation.get("reason") or "")
+    rev_reason_class = str(latest_revocation.get("reason_class") or "")
+    if latest_revocation and not rev_reason_class:
+        rev_reason_class = str(classify_live_pilot_promotion_ticket_revocation_reason(rev_reason).get("reason_class") or "other")
+    policy = {
+        str(k).strip().lower(): str(v).strip().lower()
+        for k, v in dict(revocation_reason_class_policy_overrides or {}).items()
+        if str(k).strip() and str(v).strip().lower() in {"allow", "block"}
+    }
+    revocation_policy_action = str(policy.get(rev_reason_class.lower()) or "block") if latest_revocation else "block"
+    revoked = bool(matching_revoked)
+    consumed = bool(matching_consumed)
+    effective_revoked = bool(revoked and revocation_policy_action != "allow")
+    events = []
+    if latest_consumption:
+        events.append({"kind": "consumed", "ts_unix_ms": int(_to_int_or_none(latest_consumption.get("ts_unix_ms")) or 0)})
+    if latest_revocation:
+        events.append({"kind": "revoked", "ts_unix_ms": int(_to_int_or_none(latest_revocation.get("ts_unix_ms")) or 0)})
+    events.sort(key=lambda e: int(e.get("ts_unix_ms") or 0), reverse=True)
+    latest_event_kind = str((events[0] if events else {}).get("kind") or "none")
+    latest_state = "issued"
+    if effective_revoked:
+        latest_state = "revoked"
+    elif consumed:
+        latest_state = "consumed"
+    elif revoked and not effective_revoked:
+        latest_state = "revoked_waived"
+    return {
+        "ticket_id": ticket_id,
+        "ticket_fingerprint_sha256": ticket_fp,
+        "consumed_count": len(matching_consumed),
+        "revoked_count": len(matching_revoked),
+        "consumed": consumed,
+        "revoked": revoked,
+        "effective_revoked": effective_revoked,
+        "latest_event_kind": latest_event_kind,
+        "latest_state": latest_state,
+        "latest_consumption": latest_consumption,
+        "latest_revocation": latest_revocation,
+        "revocation_reason": rev_reason,
+        "revocation_reason_class": rev_reason_class,
+        "revocation_policy_action": revocation_policy_action,
+    }
+
+
+def build_live_pilot_promotion_ticket_revocation_audit_summary(
+    *,
+    ticket: dict[str, Any] | None = None,
+    consumed_tickets: list[dict[str, Any]] | None = None,
+    revoked_tickets: list[dict[str, Any]] | None = None,
+    revocation_reason_class_policy_overrides: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    t = dict(ticket or {})
+    state = resolve_live_pilot_promotion_ticket_latest_state(
+        ticket=t,
+        consumed_tickets=consumed_tickets,
+        revoked_tickets=revoked_tickets,
+        revocation_reason_class_policy_overrides=revocation_reason_class_policy_overrides,
+    )
+    rev_rows = [dict(x) for x in list(revoked_tickets or []) if isinstance(x, dict)]
+    class_counts: dict[str, int] = {}
+    sev_counts: dict[str, int] = {}
+    for row in rev_rows:
+        rclass = str(row.get("reason_class") or classify_live_pilot_promotion_ticket_revocation_reason(str(row.get("reason") or "")).get("reason_class") or "other")
+        sev = str(row.get("severity") or classify_live_pilot_promotion_ticket_revocation_reason(str(row.get("reason") or "")).get("severity") or "warning")
+        class_counts[rclass] = int(class_counts.get(rclass, 0)) + 1
+        sev_counts[sev] = int(sev_counts.get(sev, 0)) + 1
+    return {
+        "generated_unix_ms": int(time.time() * 1000),
+        "ticket_id": str(t.get("ticket_id") or ""),
+        "ticket_fingerprint_sha256": str(t.get("ticket_fingerprint_sha256") or ""),
+        "ticket_state": state,
+        "revocation_reason_class_counts": class_counts,
+        "revocation_severity_counts": sev_counts,
+        "consumption_events_total": len(list(consumed_tickets or [])),
+        "revocation_events_total": len(list(revoked_tickets or [])),
+    }
+
+
+def write_live_pilot_promotion_ticket_revocation_audit_summary(report: dict[str, Any], path_str: str) -> None:
+    p = Path(path_str)
+    if p.suffix.lower() in {".md", ".markdown"}:
+        st = dict(report.get("ticket_state") or {})
+        lines = [
+            "# Live Pilot Promotion Ticket Revocation Audit",
+            "",
+            f"- ticket_id: `{report.get('ticket_id', '')}`",
+            f"- latest_state: `{st.get('latest_state', '')}`",
+            f"- latest_event_kind: `{st.get('latest_event_kind', '')}`",
+            f"- revoked: `{bool(st.get('revoked', False))}`",
+            f"- effective_revoked: `{bool(st.get('effective_revoked', False))}`",
+            f"- revocation_reason_class: `{st.get('revocation_reason_class', '')}`",
+            f"- revocation_policy_action: `{st.get('revocation_policy_action', '')}`",
+            "",
+            "## Counts",
+            "",
+            f"- consumption_events_total: `{report.get('consumption_events_total', 0)}`",
+            f"- revocation_events_total: `{report.get('revocation_events_total', 0)}`",
+            f"- revocation_reason_class_counts: `{json.dumps(report.get('revocation_reason_class_counts', {}), sort_keys=True)}`",
+            f"- revocation_severity_counts: `{json.dumps(report.get('revocation_severity_counts', {}), sort_keys=True)}`",
+        ]
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    else:
+        p.write_text(json.dumps(report, sort_keys=True, indent=2), encoding="utf-8")
+
+
 def classify_live_pilot_promotion_ticket_revocation_reason(reason: str) -> dict[str, str]:
     text = str(reason or "").strip().lower()
     if text in {"security_compromise", "credential_compromise", "unauthorized_use", "suspected_compromise"}:
@@ -2629,6 +2767,160 @@ def evaluate_live_launch_guard(
         "ticket_revocation_policy_action": ticket_revocation_policy_action,
         "summary": ("live_launch_guard_allow" if allowed else f"live_launch_guard_block:{','.join(required_failed)}"),
     }
+
+
+def build_live_pilot_ticket_state_consistency_report(
+    *,
+    promotion_ticket: dict[str, Any] | None = None,
+    launch_intent_manifest: dict[str, Any] | None = None,
+    prelive_go_no_go_report: dict[str, Any] | None = None,
+    consumed_tickets: list[dict[str, Any]] | None = None,
+    revoked_tickets: list[dict[str, Any]] | None = None,
+    revocation_reason_class_policy_overrides: dict[str, str] | None = None,
+    launch_guard_report: dict[str, Any] | None = None,
+    max_prelive_age_seconds: float = 3600.0,
+    max_launch_intent_age_seconds: float = 1800.0,
+) -> dict[str, Any]:
+    ticket = dict(promotion_ticket or {})
+    intent = dict(launch_intent_manifest or {})
+    go_no_go = dict(prelive_go_no_go_report or {})
+    guard = dict(launch_guard_report or {})
+    now_ms = int(time.time() * 1000)
+    ticket_state = resolve_live_pilot_promotion_ticket_latest_state(
+        ticket=ticket,
+        consumed_tickets=consumed_tickets,
+        revoked_tickets=revoked_tickets,
+        revocation_reason_class_policy_overrides=revocation_reason_class_policy_overrides,
+    )
+    intent_scope = dict(intent.get("scope") or {})
+    prelive_age_ms = _to_int_or_none(go_no_go.get("generated_unix_ms"))
+    intent_age_ms = _to_int_or_none(intent.get("generated_unix_ms"))
+    checks: list[dict[str, Any]] = []
+    checks.append({"name": "ticket_present", "ok": bool(ticket), "required": True, "actual": bool(ticket)})
+    checks.append({"name": "intent_present", "ok": bool(intent), "required": True, "actual": bool(intent)})
+    checks.append(
+        {
+            "name": "ticket_intent_scope_hash_matches_intent",
+            "ok": bool(ticket)
+            and bool(intent)
+            and str(ticket.get("intent_scope_hash_sha256") or "") == str(intent.get("scope_hash_sha256") or ""),
+            "required": True,
+            "actual": {
+                "ticket": str(ticket.get("intent_scope_hash_sha256") or ""),
+                "intent": str(intent.get("scope_hash_sha256") or ""),
+            },
+        }
+    )
+    checks.append(
+        {
+            "name": "ticket_intent_id_matches_intent",
+            "ok": bool(ticket) and bool(intent) and str(ticket.get("intent_id") or "") == str(intent.get("intent_id") or ""),
+            "required": True,
+            "actual": {"ticket": str(ticket.get("intent_id") or ""), "intent": str(intent.get("intent_id") or "")},
+        }
+    )
+    checks.append(
+        {
+            "name": "ticket_not_expired",
+            "ok": (_to_int_or_none(ticket.get("expires_unix_ms")) or 0) >= now_ms,
+            "required": True,
+            "actual": _to_int_or_none(ticket.get("expires_unix_ms")),
+        }
+    )
+    checks.append(
+        {
+            "name": "prelive_status_go",
+            "ok": str(go_no_go.get("status") or "") == "go",
+            "required": False,
+            "actual": str(go_no_go.get("status") or ""),
+        }
+    )
+    checks.append(
+        {
+            "name": "prelive_fresh_enough",
+            "ok": (prelive_age_ms is not None and (now_ms - int(prelive_age_ms)) <= int(max(0.0, float(max_prelive_age_seconds)) * 1000.0)),
+            "required": False,
+            "actual": (None if prelive_age_ms is None else max(0, now_ms - int(prelive_age_ms))),
+        }
+    )
+    checks.append(
+        {
+            "name": "launch_intent_fresh_enough",
+            "ok": (intent_age_ms is not None and (now_ms - int(intent_age_ms)) <= int(max(0.0, float(max_launch_intent_age_seconds)) * 1000.0)),
+            "required": False,
+            "actual": (None if intent_age_ms is None else max(0, now_ms - int(intent_age_ms))),
+        }
+    )
+    checks.append(
+        {
+            "name": "ticket_state_not_effectively_revoked",
+            "ok": not bool(ticket_state.get("effective_revoked", False)),
+            "required": True,
+            "actual": {
+                "latest_state": str(ticket_state.get("latest_state") or ""),
+                "effective_revoked": bool(ticket_state.get("effective_revoked", False)),
+                "revocation_reason_class": str(ticket_state.get("revocation_reason_class") or ""),
+                "revocation_policy_action": str(ticket_state.get("revocation_policy_action") or ""),
+            },
+        }
+    )
+    checks.append(
+        {
+            "name": "launch_guard_consistent_with_ticket_state",
+            "ok": (
+                (not guard)
+                or (
+                    bool(guard.get("ticket_effectively_revoked", False)) == bool(ticket_state.get("effective_revoked", False))
+                    and str(guard.get("ticket_revocation_policy_action") or "") == str(ticket_state.get("revocation_policy_action") or "")
+                )
+            ),
+            "required": False,
+            "actual": {
+                "guard_ticket_effectively_revoked": bool(guard.get("ticket_effectively_revoked", False)) if guard else None,
+                "resolved_ticket_effectively_revoked": bool(ticket_state.get("effective_revoked", False)),
+                "guard_policy_action": str(guard.get("ticket_revocation_policy_action") or "") if guard else "",
+                "resolved_policy_action": str(ticket_state.get("revocation_policy_action") or ""),
+            },
+        }
+    )
+    failed_required = [c["name"] for c in checks if bool(c.get("required", False)) and not bool(c.get("ok", False))]
+    status = "pass" if not failed_required else "fail"
+    return {
+        "generated_unix_ms": now_ms,
+        "status": status,
+        "failed_required_checks": failed_required,
+        "ticket_id": str(ticket.get("ticket_id") or ""),
+        "intent_id": str(intent.get("intent_id") or ""),
+        "ticket_state": ticket_state,
+        "scope": {
+            "mode": str(intent_scope.get("mode") or ""),
+            "risk_profile_preset": str(intent_scope.get("risk_profile_preset") or ""),
+            "live_send_network_enabled": bool(intent_scope.get("live_send_network_enabled", False)),
+            "enable_live_auto_submit_window": bool(intent_scope.get("enable_live_auto_submit_window", False)),
+        },
+        "checks": checks,
+    }
+
+
+def write_live_pilot_ticket_state_consistency_report(report: dict[str, Any], path_str: str) -> None:
+    p = Path(path_str)
+    if p.suffix.lower() in {".md", ".markdown"}:
+        lines = [
+            "# Live Pilot Ticket State Consistency Report",
+            "",
+            f"- status: `{report.get('status', '')}`",
+            f"- ticket_id: `{report.get('ticket_id', '')}`",
+            f"- intent_id: `{report.get('intent_id', '')}`",
+            f"- failed_required_checks: `{', '.join(list(report.get('failed_required_checks', []) or [])) or '-'}`",
+            "",
+            "## Checks",
+            "",
+        ]
+        for c in [dict(x) for x in list(report.get("checks") or []) if isinstance(x, dict)]:
+            lines.append(f"- {c.get('name','')}: `{'pass' if c.get('ok') else 'fail'}` required=`{bool(c.get('required', False))}` actual=`{c.get('actual')}`")
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    else:
+        p.write_text(json.dumps(report, sort_keys=True, indent=2), encoding="utf-8")
 
 
 def write_live_launch_guard_report(report: dict[str, Any], path_str: str) -> None:
@@ -4301,12 +4593,14 @@ def _main() -> int:
     p.add_argument("--promotion-ticket-expires-seconds", type=float, default=3600.0)
     p.add_argument("--promotion-ticket-consumption-log-jsonl-path", default="")
     p.add_argument("--promotion-ticket-revocation-log-jsonl-path", default="")
+    p.add_argument("--promotion-ticket-revocation-audit-report-path", default="")
     p.add_argument("--promotion-ticket-revoke-now", action="store_true")
     p.add_argument("--promotion-ticket-revoke-reason", default="manual_revoke")
     p.add_argument("--promotion-ticket-revoke-only", action="store_true")
     p.add_argument("--launch-intent-manifest-path", default="")
     p.add_argument("--launch-intent-expires-seconds", type=float, default=1800.0)
     p.add_argument("--live-launch-guard-report-path", default="")
+    p.add_argument("--ticket-state-consistency-report-path", default="")
     p.add_argument("--live-launch-guard-enforce", action="store_true")
     p.add_argument("--live-launch-guard-require-prelive", action="store_true")
     p.add_argument("--live-launch-guard-require-bundle-pass", action="store_true")
@@ -4414,10 +4708,14 @@ def _main() -> int:
             ensure_dir_within_base(str(Path(args.promotion_ticket_consumption_log_jsonl_path).parent))
         if args.promotion_ticket_revocation_log_jsonl_path:
             ensure_dir_within_base(str(Path(args.promotion_ticket_revocation_log_jsonl_path).parent))
+        if args.promotion_ticket_revocation_audit_report_path:
+            ensure_dir_within_base(str(Path(args.promotion_ticket_revocation_audit_report_path).parent))
         if args.launch_intent_manifest_path:
             ensure_dir_within_base(str(Path(args.launch_intent_manifest_path).parent))
         if args.live_launch_guard_report_path:
             ensure_dir_within_base(str(Path(args.live_launch_guard_report_path).parent))
+        if args.ticket_state_consistency_report_path:
+            ensure_dir_within_base(str(Path(args.ticket_state_consistency_report_path).parent))
         if args.postrun_review_packet_path:
             ensure_dir_within_base(str(Path(args.postrun_review_packet_path).parent))
         if args.archive_rotation_dir:
@@ -4459,6 +4757,9 @@ def _main() -> int:
         prelive_guard_obj = _read_json_or_empty(str(args.prelive_go_no_go_report_path or ""))
         ticket_guard_obj = _read_json_or_empty(str(args.promotion_ticket_path or ""))
         launch_intent_guard_obj = _read_json_or_empty(str(args.launch_intent_manifest_path or ""))
+        revocation_policy_overrides = _parse_simple_policy_overrides(list(args.live_launch_guard_revocation_reason_class_policy or []))
+        consumed_ticket_rows = list_live_pilot_promotion_ticket_consumptions(str(args.promotion_ticket_consumption_log_jsonl_path or ""))
+        revoked_ticket_rows = list_live_pilot_promotion_ticket_revocations(str(args.promotion_ticket_revocation_log_jsonl_path or ""))
         live_guard = evaluate_live_launch_guard(
             adapter_config=(adapter_config if isinstance(adapter_config, dict) else None),
             enable_live_auto_submit_window=bool(args.enable_live_auto_submit_window),
@@ -4473,13 +4774,38 @@ def _main() -> int:
             require_unused_ticket=bool(args.live_launch_guard_require_unused_ticket),
             require_unrevoked_ticket=bool(args.live_launch_guard_require_unrevoked_ticket),
             require_launch_intent=bool(args.live_launch_guard_require_launch_intent),
-            revocation_reason_class_policy_overrides=_parse_simple_policy_overrides(list(args.live_launch_guard_revocation_reason_class_policy or [])),
+            revocation_reason_class_policy_overrides=revocation_policy_overrides,
             required_ticket_action=str(args.live_launch_guard_ticket_action or "approve_live_test"),
             max_prelive_age_seconds=float(args.live_launch_guard_max_prelive_age_seconds or 3600.0),
             max_launch_intent_age_seconds=float(args.live_launch_guard_max_launch_intent_age_seconds or 1800.0),
-            consumed_tickets=list_live_pilot_promotion_ticket_consumptions(str(args.promotion_ticket_consumption_log_jsonl_path or "")),
-            revoked_tickets=list_live_pilot_promotion_ticket_revocations(str(args.promotion_ticket_revocation_log_jsonl_path or "")),
+            consumed_tickets=consumed_ticket_rows,
+            revoked_tickets=revoked_ticket_rows,
         )
+        if str(args.promotion_ticket_revocation_audit_report_path or "").strip():
+            write_live_pilot_promotion_ticket_revocation_audit_summary(
+                build_live_pilot_promotion_ticket_revocation_audit_summary(
+                    ticket=ticket_guard_obj,
+                    consumed_tickets=consumed_ticket_rows,
+                    revoked_tickets=revoked_ticket_rows,
+                    revocation_reason_class_policy_overrides=revocation_policy_overrides,
+                ),
+                str(args.promotion_ticket_revocation_audit_report_path),
+            )
+        if str(args.ticket_state_consistency_report_path or "").strip():
+            write_live_pilot_ticket_state_consistency_report(
+                build_live_pilot_ticket_state_consistency_report(
+                    promotion_ticket=ticket_guard_obj,
+                    launch_intent_manifest=launch_intent_guard_obj,
+                    prelive_go_no_go_report=prelive_guard_obj,
+                    consumed_tickets=consumed_ticket_rows,
+                    revoked_tickets=revoked_ticket_rows,
+                    revocation_reason_class_policy_overrides=revocation_policy_overrides,
+                    launch_guard_report=live_guard,
+                    max_prelive_age_seconds=float(args.live_launch_guard_max_prelive_age_seconds or 3600.0),
+                    max_launch_intent_age_seconds=float(args.live_launch_guard_max_launch_intent_age_seconds or 1800.0),
+                ),
+                str(args.ticket_state_consistency_report_path),
+            )
         if str(args.live_launch_guard_report_path or "").strip():
             write_live_launch_guard_report(live_guard, str(args.live_launch_guard_report_path))
         if str(live_guard.get("status") or "") != "allow":

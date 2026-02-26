@@ -54,9 +54,14 @@ from src.live.live_pilot_service import (
     list_live_pilot_promotion_ticket_consumptions,
     consume_live_pilot_promotion_ticket,
     list_live_pilot_promotion_ticket_revocations,
+    resolve_live_pilot_promotion_ticket_latest_state,
+    build_live_pilot_promotion_ticket_revocation_audit_summary,
+    write_live_pilot_promotion_ticket_revocation_audit_summary,
     revoke_live_pilot_promotion_ticket,
     evaluate_live_launch_guard,
     write_live_launch_guard_report,
+    build_live_pilot_ticket_state_consistency_report,
+    write_live_pilot_ticket_state_consistency_report,
     build_live_pilot_postrun_review_packet,
     write_live_pilot_postrun_review_packet,
     rotate_live_pilot_artifacts_by_glob,
@@ -2495,3 +2500,92 @@ def test_ticket_revocation_guard_reason_class_policy_override_allows_specific_cl
     )
     assert guard_block["status"] == "block"
     assert "ticket_unrevoked" in guard_block["required_failed_checks"]
+
+
+def test_ticket_revocation_audit_summary_and_latest_state_resolver(tmp_path):
+    ticket = build_live_pilot_promotion_ticket(
+        operator_id="main_user",
+        approval_action="approve_live_test",
+        prelive_go_no_go_report={"status": "go", "failed_required_checks": []},
+        expires_in_seconds=3600,
+    )
+    c_path = tmp_path / "ticket_consumptions.jsonl"
+    r_path = tmp_path / "ticket_revocations.jsonl"
+    consume_live_pilot_promotion_ticket(
+        consumption_log_jsonl_path=str(c_path),
+        ticket=ticket,
+        reason="live_launch_guard_allow",
+    )
+    revoke_live_pilot_promotion_ticket(
+        revocation_log_jsonl_path=str(r_path),
+        ticket=ticket,
+        operator_id="main_user",
+        reason="operator_cancelled",
+    )
+    consumed = list_live_pilot_promotion_ticket_consumptions(str(c_path))
+    revoked = list_live_pilot_promotion_ticket_revocations(str(r_path))
+
+    state_default = resolve_live_pilot_promotion_ticket_latest_state(
+        ticket=ticket,
+        consumed_tickets=consumed,
+        revoked_tickets=revoked,
+    )
+    assert state_default["revoked"] is True
+    assert state_default["effective_revoked"] is True
+    assert state_default["latest_state"] == "revoked"
+
+    state_allow = resolve_live_pilot_promotion_ticket_latest_state(
+        ticket=ticket,
+        consumed_tickets=consumed,
+        revoked_tickets=revoked,
+        revocation_reason_class_policy_overrides={"operator": "allow"},
+    )
+    assert state_allow["effective_revoked"] is False
+    assert state_allow["latest_state"] == "consumed"
+    assert state_allow["revocation_policy_action"] == "allow"
+
+    audit = build_live_pilot_promotion_ticket_revocation_audit_summary(
+        ticket=ticket,
+        consumed_tickets=consumed,
+        revoked_tickets=revoked,
+        revocation_reason_class_policy_overrides={"operator": "allow"},
+    )
+    assert audit["ticket_state"]["latest_state"] == "consumed"
+    assert audit["revocation_reason_class_counts"]["operator"] == 1
+    md_path = tmp_path / "ticket_revocation_audit.md"
+    write_live_pilot_promotion_ticket_revocation_audit_summary(audit, str(md_path))
+    assert "Promotion Ticket Revocation Audit" in md_path.read_text(encoding="utf-8")
+
+
+def test_ticket_state_consistency_report_detects_scope_mismatch(tmp_path):
+    prelive = {"status": "go", "bundle_verification_status": "pass", "generated_unix_ms": int(time.time() * 1000)}
+    intent = build_live_pilot_launch_intent_manifest(
+        mode="live_auto_tiny_one_trade",
+        risk_profile_preset="tiny_supervised",
+        enable_live_auto_submit_window=True,
+        adapter_config={"live_send_network_enabled": True},
+        prelive_go_no_go_report=prelive,
+        expires_in_seconds=1800,
+    )
+    ticket = build_live_pilot_promotion_ticket(
+        operator_id="main_user",
+        approval_action="approve_live_test",
+        risk_profile_preset="tiny_supervised",
+        prelive_go_no_go_report=prelive,
+        launch_intent_manifest=intent,
+        expires_in_seconds=3600,
+    )
+    bad_intent = dict(intent)
+    bad_intent["scope_hash_sha256"] = "bad_hash"
+
+    report = build_live_pilot_ticket_state_consistency_report(
+        promotion_ticket=ticket,
+        launch_intent_manifest=bad_intent,
+        prelive_go_no_go_report=prelive,
+    )
+    assert report["status"] == "fail"
+    assert "ticket_intent_scope_hash_matches_intent" in report["failed_required_checks"]
+
+    md_path = tmp_path / "ticket_state_consistency.md"
+    write_live_pilot_ticket_state_consistency_report(report, str(md_path))
+    assert "Ticket State Consistency Report" in md_path.read_text(encoding="utf-8")
