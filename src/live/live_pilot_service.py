@@ -4,6 +4,7 @@ import json
 import shutil
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -472,6 +473,335 @@ def sanitize_fallback_candidates(candidates: list[Any]) -> dict[str, Any]:
             "fallback_candidates_sanitized_count": len(sanitized),
             "fallback_candidates_dropped_count": int(sum(dropped_by_reason.values())),
             "fallback_candidates_dropped_by_reason": dropped_by_reason,
+        },
+    }
+
+
+def _candidate_metadata_float(md: dict[str, Any], *paths: tuple[str, ...]) -> float | None:
+    for path in paths:
+        cur: Any = md
+        ok = True
+        for key in path:
+            if not isinstance(cur, dict) or key not in cur:
+                ok = False
+                break
+            cur = cur.get(key)
+        if not ok:
+            continue
+        val = _to_float_or_none(cur)
+        if val is not None:
+            return float(val)
+    return None
+
+
+def _candidate_metadata_int(md: dict[str, Any], *paths: tuple[str, ...]) -> int | None:
+    for path in paths:
+        cur: Any = md
+        ok = True
+        for key in path:
+            if not isinstance(cur, dict) or key not in cur:
+                ok = False
+                break
+            cur = cur.get(key)
+        if not ok:
+            continue
+        val = _to_int_or_none(cur)
+        if val is not None:
+            return int(val)
+    return None
+
+
+def extract_live_pilot_candidate_features(candidate: dict[str, Any], *, now_unix_ms: int | None = None) -> dict[str, Any]:
+    cand = dict(candidate or {})
+    md = dict(cand.get("metadata") or {})
+    now_ms = int(now_unix_ms if now_unix_ms is not None else time.time() * 1000)
+
+    pair_created_at_unix_ms = _candidate_metadata_int(
+        md,
+        ("pair_created_at_unix_ms",),
+        ("pairCreatedAt",),
+        ("raw_pair", "pairCreatedAt"),
+        ("raw_pair", "pair_created_at_unix_ms"),
+    )
+    pair_age_seconds = None
+    if pair_created_at_unix_ms is not None and pair_created_at_unix_ms > 0:
+        pair_age_seconds = max(0.0, (float(now_ms) - float(pair_created_at_unix_ms)) / 1000.0)
+
+    liquidity_usd = _candidate_metadata_float(
+        md,
+        ("liquidity_usd",),
+        ("liquidity", "usd"),
+        ("raw_pair", "liquidity", "usd"),
+    )
+    volume_5m_usd = _candidate_metadata_float(
+        md,
+        ("volume_5m_usd",),
+        ("volume", "m5"),
+        ("raw_pair", "volume", "m5"),
+    )
+    volume_1h_usd = _candidate_metadata_float(
+        md,
+        ("volume_1h_usd",),
+        ("volume", "h1"),
+        ("raw_pair", "volume", "h1"),
+    )
+    price_change_5m_pct = _candidate_metadata_float(
+        md,
+        ("price_change_5m_pct",),
+        ("priceChange", "m5"),
+        ("raw_pair", "priceChange", "m5"),
+    )
+    txns_5m_buys = _candidate_metadata_int(
+        md,
+        ("txns_5m_buys",),
+        ("txns", "m5", "buys"),
+        ("raw_pair", "txns", "m5", "buys"),
+    )
+    txns_5m_sells = _candidate_metadata_int(
+        md,
+        ("txns_5m_sells",),
+        ("txns", "m5", "sells"),
+        ("raw_pair", "txns", "m5", "sells"),
+    )
+
+    probe_status = str(md.get("quote_probe_status") or md.get("probe_status") or "").strip().lower()
+    if not probe_status and md.get("probe_ok") is True:
+        probe_status = "ok"
+    if not probe_status and md.get("probe_ok") is False:
+        probe_status = "failed"
+
+    features = {
+        "token_address": str(cand.get("token_address") or "").strip(),
+        "symbol": str(cand.get("symbol") or "").strip(),
+        "usd_size": float(_to_float_or_none(cand.get("usd_size")) or 0.0),
+        "entry_price": float(_to_float_or_none(cand.get("entry_price")) or 0.0),
+        "pair_created_at_unix_ms": pair_created_at_unix_ms,
+        "pair_age_seconds": (None if pair_age_seconds is None else round(pair_age_seconds, 6)),
+        "liquidity_usd": liquidity_usd,
+        "volume_5m_usd": volume_5m_usd,
+        "volume_1h_usd": volume_1h_usd,
+        "price_change_5m_pct": price_change_5m_pct,
+        "txns_5m_buys": txns_5m_buys,
+        "txns_5m_sells": txns_5m_sells,
+        "quote_probe_status": probe_status or "",
+        "has_dexscreener_pair": bool(isinstance(md.get("raw_pair"), dict) or ("pairCreatedAt" in md)),
+        "source_provider": str(md.get("source_provider") or md.get("provider") or "").strip().lower(),
+    }
+    return features
+
+
+def score_live_pilot_discovery_candidate(
+    candidate: dict[str, Any],
+    *,
+    reliability_state: dict[str, Any] | None = None,
+    now_unix_ms: int | None = None,
+    scoring_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    cfg = dict(scoring_config or {})
+    features = extract_live_pilot_candidate_features(candidate, now_unix_ms=now_unix_ms)
+    tok = str(features.get("token_address") or "")
+    symbol = str(features.get("symbol") or "")
+
+    min_liquidity_usd = float(cfg.get("min_liquidity_usd", 1000.0) or 1000.0)
+    max_pair_age_seconds = float(cfg.get("max_pair_age_seconds", 86400.0) or 86400.0)
+    min_volume_5m_usd = float(cfg.get("min_volume_5m_usd", 0.0) or 0.0)
+    max_abs_price_change_5m_pct = float(cfg.get("max_abs_price_change_5m_pct", 80.0) or 80.0)
+
+    reject_reasons: list[str] = []
+    if not tok:
+        reject_reasons.append("missing_token_address")
+    if (features.get("liquidity_usd") is None) or (float(features.get("liquidity_usd") or 0.0) < min_liquidity_usd):
+        reject_reasons.append("liquidity_below_min")
+    if (features.get("pair_age_seconds") is not None) and (float(features.get("pair_age_seconds") or 0.0) > max_pair_age_seconds):
+        reject_reasons.append("pair_too_old")
+    if (features.get("volume_5m_usd") is not None) and (float(features.get("volume_5m_usd") or 0.0) < min_volume_5m_usd):
+        reject_reasons.append("volume_5m_below_min")
+    pchg = _to_float_or_none(features.get("price_change_5m_pct"))
+    if pchg is not None and abs(pchg) > max_abs_price_change_5m_pct:
+        reject_reasons.append("price_change_5m_too_extreme")
+
+    liq = float(features.get("liquidity_usd") or 0.0)
+    vol5 = float(features.get("volume_5m_usd") or 0.0)
+    age = _to_float_or_none(features.get("pair_age_seconds"))
+    probe_status = str(features.get("quote_probe_status") or "")
+    tx_buys = float(_to_int_or_none(features.get("txns_5m_buys")) or 0)
+    tx_sells = float(_to_int_or_none(features.get("txns_5m_sells")) or 0)
+
+    liq_score = max(0.0, min(30.0, liq / 1000.0))
+    vol_score = max(0.0, min(25.0, vol5 / 500.0))
+    freshness_score = 0.0
+    if age is None:
+        freshness_score = 2.0
+    else:
+        freshness_score = max(0.0, min(20.0, 20.0 * (1.0 - min(age, max_pair_age_seconds) / max_pair_age_seconds)))
+    probe_score = 10.0 if probe_status == "ok" else (-8.0 if probe_status == "failed" else 0.0)
+    flow_score = max(-10.0, min(10.0, (tx_buys - tx_sells) * 0.5))
+
+    cs = dict((((reliability_state or {}).get("candidate_stats") or {}).get(tok) or {}))
+    adaptive_penalty = (float(cs.get("probe_failed", 0) or 0) * 3.0) + (float(cs.get("execution_error", 0) or 0) * 4.0)
+
+    total_score = round(liq_score + vol_score + freshness_score + probe_score + flow_score - adaptive_penalty, 6)
+    eligible = len(reject_reasons) == 0
+    decision = "promote_candidate" if eligible else "reject_candidate"
+
+    return {
+        "score_schema_version": "v1.2_candidate_score_v1",
+        "token_address": tok,
+        "symbol": symbol,
+        "eligible": bool(eligible),
+        "decision": decision,
+        "reject_reasons": reject_reasons,
+        "features": features,
+        "component_scores": {
+            "liquidity_score": round(liq_score, 6),
+            "volume_5m_score": round(vol_score, 6),
+            "freshness_score": round(freshness_score, 6),
+            "probe_score": round(probe_score, 6),
+            "tx_flow_score": round(flow_score, 6),
+            "adaptive_penalty": round(adaptive_penalty, 6),
+        },
+        "score_total": total_score,
+        "thresholds": {
+            "min_liquidity_usd": min_liquidity_usd,
+            "max_pair_age_seconds": max_pair_age_seconds,
+            "min_volume_5m_usd": min_volume_5m_usd,
+            "max_abs_price_change_5m_pct": max_abs_price_change_5m_pct,
+        },
+    }
+
+
+def score_live_pilot_discovery_candidates(
+    candidates: list[dict[str, Any]],
+    *,
+    reliability_state: dict[str, Any] | None = None,
+    now_unix_ms: int | None = None,
+    scoring_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    scored = [
+        score_live_pilot_discovery_candidate(
+            c,
+            reliability_state=reliability_state,
+            now_unix_ms=now_unix_ms,
+            scoring_config=scoring_config,
+        )
+        for c in list(candidates or [])
+    ]
+    scored_sorted = sorted(scored, key=lambda s: (-float(s.get("score_total", 0.0) or 0.0), str(s.get("token_address") or "")))
+    reject_counts: dict[str, int] = {}
+    for s in scored_sorted:
+        for reason in list(s.get("reject_reasons") or []):
+            reject_counts[str(reason)] = int(reject_counts.get(str(reason), 0)) + 1
+    return {
+        "scored_candidates": scored_sorted,
+        "summary": {
+            "candidate_score_schema_version": "v1.2_candidate_score_v1",
+            "candidates_total": len(scored_sorted),
+            "candidates_eligible": sum(1 for s in scored_sorted if bool(s.get("eligible", False))),
+            "candidates_rejected": sum(1 for s in scored_sorted if not bool(s.get("eligible", False))),
+            "reject_reason_counts": reject_counts,
+            "top_candidates": [
+                {
+                    "token_address": str(s.get("token_address") or ""),
+                    "symbol": str(s.get("symbol") or ""),
+                    "score_total": float(s.get("score_total", 0.0) or 0.0),
+                    "eligible": bool(s.get("eligible", False)),
+                }
+                for s in scored_sorted[:5]
+            ],
+        },
+    }
+
+
+def select_live_pilot_promoted_candidates(
+    scored_candidates: list[dict[str, Any]],
+    *,
+    max_candidates: int = 1,
+    min_score_total: float = 0.0,
+    require_probe_ok: bool = False,
+) -> dict[str, Any]:
+    promoted: list[dict[str, Any]] = []
+    decisions: list[dict[str, Any]] = []
+    max_n = max(0, int(max_candidates))
+    for row in list(scored_candidates or []):
+        r = dict(row or {})
+        tok = str(r.get("token_address") or "")
+        sym = str(r.get("symbol") or "")
+        score_total = float(_to_float_or_none(r.get("score_total")) or 0.0)
+        eligible = bool(r.get("eligible", False))
+        features = dict(r.get("features") or {})
+        probe_status = str(features.get("quote_probe_status") or "").strip().lower()
+        reasons: list[str] = []
+        if not eligible:
+            reasons.append("scoring_not_eligible")
+        if score_total < float(min_score_total):
+            reasons.append("score_below_min")
+        if require_probe_ok and probe_status != "ok":
+            reasons.append("probe_not_ok")
+        if len(promoted) >= max_n:
+            reasons.append("promotion_capacity_reached")
+        promoted_flag = len(reasons) == 0
+        decision_row = {
+            "token_address": tok,
+            "symbol": sym,
+            "score_total": round(score_total, 6),
+            "eligible": eligible,
+            "probe_status": probe_status,
+            "promoted": promoted_flag,
+            "decision_reason": ("promoted" if promoted_flag else "rejected"),
+            "decision_reasons": reasons,
+            "scoring_reject_reasons": list(r.get("reject_reasons") or []),
+        }
+        decisions.append(decision_row)
+        if promoted_flag:
+            promoted.append(r)
+    return {
+        "promoted_candidates": promoted,
+        "summary": {
+            "promotion_filter_version": "v1.2_promotion_filter_v1",
+            "max_candidates": max_n,
+            "min_score_total": float(min_score_total),
+            "require_probe_ok": bool(require_probe_ok),
+            "candidates_considered": len(list(scored_candidates or [])),
+            "candidates_promoted": len(promoted),
+            "candidates_rejected": max(0, len(list(scored_candidates or [])) - len(promoted)),
+        },
+        "decisions": decisions,
+    }
+
+
+def build_live_pilot_scored_discovery_report(
+    candidates: list[dict[str, Any]],
+    *,
+    reliability_state: dict[str, Any] | None = None,
+    now_unix_ms: int | None = None,
+    scoring_config: dict[str, Any] | None = None,
+    promotion_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    scoring = score_live_pilot_discovery_candidates(
+        candidates,
+        reliability_state=reliability_state,
+        now_unix_ms=now_unix_ms,
+        scoring_config=scoring_config,
+    )
+    pconf = dict(promotion_config or {})
+    promotion = select_live_pilot_promoted_candidates(
+        list(scoring.get("scored_candidates") or []),
+        max_candidates=int(pconf.get("max_candidates", 1) or 1),
+        min_score_total=float(pconf.get("min_score_total", 0.0) or 0.0),
+        require_probe_ok=bool(pconf.get("require_probe_ok", False)),
+    )
+    promoted_tokens = [str((x or {}).get("token_address") or "") for x in list(promotion.get("promoted_candidates") or [])]
+    return {
+        "report_version": "v1.2_scored_discovery_report_v1",
+        "scoring": scoring,
+        "promotion": promotion,
+        "summary": {
+            "candidate_score_schema_version": "v1.2_candidate_score_v1",
+            "promotion_filter_version": "v1.2_promotion_filter_v1",
+            "candidates_total": int(((scoring.get("summary") or {}).get("candidates_total", 0) or 0)),
+            "candidates_eligible": int(((scoring.get("summary") or {}).get("candidates_eligible", 0) or 0)),
+            "candidates_promoted": int(((promotion.get("summary") or {}).get("candidates_promoted", 0) or 0)),
+            "promoted_token_addresses": promoted_tokens,
         },
     }
 
@@ -1403,6 +1733,222 @@ def write_campaign_trend_report(report: dict[str, Any], path_str: str) -> None:
         path.write_text(_render_campaign_trend_report_markdown(report), encoding="utf-8")
     else:
         path.write_text(json.dumps(report, sort_keys=True, indent=2), encoding="utf-8")
+
+
+def append_live_pilot_scored_candidate_outcome_log(
+    path_str: str,
+    *,
+    scored_discovery_report: dict[str, Any],
+    receipt: dict[str, Any] | None = None,
+    extra_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    p = Path(str(path_str or "").strip())
+    if not str(p).strip():
+        return {"ok": False, "reason": "missing_path"}
+    p.parent.mkdir(parents=True, exist_ok=True)
+
+    report = dict(scored_discovery_report or {})
+    promotion = dict(report.get("promotion") or {})
+    decisions = [dict(x) for x in list(promotion.get("decisions") or []) if isinstance(x, dict)]
+    scored_candidates = [dict(x) for x in list((report.get("scoring") or {}).get("scored_candidates") or []) if isinstance(x, dict)]
+    scored_by_token = {str(r.get("token_address") or ""): r for r in scored_candidates}
+
+    receipt_obj = dict(receipt or {})
+    rpc_status = dict(receipt_obj.get("rpc_status") or {})
+    live_summary = dict(receipt_obj.get("live_pilot_summary") or {})
+    econ = dict(live_summary.get("economics") or {})
+    truth = dict(live_summary.get("settlement_truth") or {})
+    signature = str(receipt_obj.get("signature") or live_summary.get("submitted_signature") or "")
+    conf_status = str(rpc_status.get("confirmation_status") or "")
+    chain_outcome = str(live_summary.get("chain_outcome_class") or "")
+    truth_conf = str(truth.get("confidence") or "")
+
+    rows_written = 0
+    latest_row: dict[str, Any] = {}
+    for d in decisions:
+        tok = str(d.get("token_address") or "")
+        scored = dict(scored_by_token.get(tok) or {})
+        row = {
+            "event_type": "live_pilot_scored_candidate_outcome",
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            "candidate": {
+                "token_address": tok,
+                "symbol": str(d.get("symbol") or scored.get("symbol") or ""),
+                "score_total": _to_float_or_none(d.get("score_total") if "score_total" in d else scored.get("score_total")),
+                "eligible": bool(d.get("eligible", scored.get("eligible", False))),
+                "promoted": bool(d.get("promoted", False)),
+                "decision_reason": str(d.get("decision_reason") or ""),
+                "decision_reasons": list(d.get("decision_reasons") or []),
+                "scoring_reject_reasons": list(d.get("scoring_reject_reasons") or scored.get("reject_reasons") or []),
+                "probe_status": str(d.get("probe_status") or (dict(scored.get("features") or {}).get("quote_probe_status") or "")),
+                "features": dict(scored.get("features") or {}),
+            },
+            "outcome": {
+                "signature": signature,
+                "confirmation_status": conf_status,
+                "chain_outcome_class": chain_outcome,
+                "truth_confidence": truth_conf,
+                "tx_present": bool(receipt_obj.get("tx_present", False)),
+                "fee_lamports": _to_int_or_none(receipt_obj.get("fee_lamports")),
+                "realized_slippage_bps_vs_quote": _to_float_or_none(econ.get("realized_slippage_bps_vs_quote")),
+                "quote_vs_settlement_mismatch": bool(econ.get("quote_vs_settlement_mismatch", False)),
+                "quote_vs_settlement_mismatch_class": str(econ.get("quote_vs_settlement_mismatch_class") or ""),
+            },
+            "report_meta": {
+                "report_version": str(report.get("report_version") or ""),
+                "candidate_score_schema_version": str(((report.get("summary") or {}).get("candidate_score_schema_version") or "")),
+                "promotion_filter_version": str(((report.get("summary") or {}).get("promotion_filter_version") or "")),
+            },
+            "context": dict(extra_context or {}),
+        }
+        with p.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row, separators=(",", ":"), default=str) + "\n")
+        rows_written += 1
+        latest_row = row
+    return {"ok": True, "path": str(p), "rows_written": rows_written, "latest_row": latest_row}
+
+
+def build_live_pilot_scored_candidate_calibration_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    scored_rows = [dict(r) for r in list(rows or []) if isinstance(r, dict) and str(r.get("event_type") or "") == "live_pilot_scored_candidate_outcome"]
+
+    promoted_rows = [r for r in scored_rows if bool(((r.get("candidate") or {}).get("promoted", False)))]
+    finalized_rows = [r for r in scored_rows if str(((r.get("outcome") or {}).get("confirmation_status") or "")) == "finalized"]
+    reconciled_rows = [r for r in scored_rows if str(((r.get("outcome") or {}).get("chain_outcome_class") or "")) == "live_confirmed_reconciled"]
+    truth_complete_rows = [r for r in scored_rows if str(((r.get("outcome") or {}).get("truth_confidence") or "")) == "truth_complete"]
+
+    def _avg(vals: list[float]) -> float | None:
+        return round(sum(vals) / len(vals), 6) if vals else None
+
+    def _rate(n: int, d: int) -> float | None:
+        return (round(float(n) / float(d), 6) if d > 0 else None)
+
+    mismatch_class_counts: dict[str, int] = {}
+    probe_status_counts: dict[str, int] = {}
+    promoted_probe_status_counts: dict[str, int] = {}
+    score_bands = {"lt0": 0, "0_10": 0, "10_20": 0, "20_plus": 0}
+    token_stats: dict[str, dict[str, Any]] = {}
+    slippage_all: list[float] = []
+    slippage_promoted: list[float] = []
+
+    for r in scored_rows:
+        cand = dict(r.get("candidate") or {})
+        out = dict(r.get("outcome") or {})
+        tok = str(cand.get("token_address") or "")
+        probe_status = str(cand.get("probe_status") or "")
+        score_total = float(_to_float_or_none(cand.get("score_total")) or 0.0)
+        promoted = bool(cand.get("promoted", False))
+        conf = str(out.get("confirmation_status") or "")
+        chain = str(out.get("chain_outcome_class") or "")
+        mm_class = str(out.get("quote_vs_settlement_mismatch_class") or "")
+        slip = _to_float_or_none(out.get("realized_slippage_bps_vs_quote"))
+        if slip is not None:
+            slippage_all.append(float(slip))
+            if promoted:
+                slippage_promoted.append(float(slip))
+        if mm_class:
+            mismatch_class_counts[mm_class] = int(mismatch_class_counts.get(mm_class, 0)) + 1
+        if probe_status:
+            probe_status_counts[probe_status] = int(probe_status_counts.get(probe_status, 0)) + 1
+            if promoted:
+                promoted_probe_status_counts[probe_status] = int(promoted_probe_status_counts.get(probe_status, 0)) + 1
+        if score_total < 0:
+            score_bands["lt0"] += 1
+        elif score_total < 10:
+            score_bands["0_10"] += 1
+        elif score_total < 20:
+            score_bands["10_20"] += 1
+        else:
+            score_bands["20_plus"] += 1
+        if tok:
+            ts = dict(token_stats.get(tok) or {"token_address": tok, "rows": 0, "promoted": 0, "finalized": 0, "reconciled": 0})
+            ts["rows"] = int(ts.get("rows", 0)) + 1
+            ts["promoted"] = int(ts.get("promoted", 0)) + (1 if promoted else 0)
+            ts["finalized"] = int(ts.get("finalized", 0)) + (1 if conf == "finalized" else 0)
+            ts["reconciled"] = int(ts.get("reconciled", 0)) + (1 if chain == "live_confirmed_reconciled" else 0)
+            ts["last_score_total"] = round(score_total, 6)
+            ts["last_probe_status"] = probe_status
+            token_stats[tok] = ts
+
+    promoted_finalized_rows = [r for r in promoted_rows if str(((r.get("outcome") or {}).get("confirmation_status") or "")) == "finalized"]
+    promoted_reconciled_rows = [r for r in promoted_rows if str(((r.get("outcome") or {}).get("chain_outcome_class") or "")) == "live_confirmed_reconciled"]
+    promoted_mismatch_rows = [r for r in promoted_rows if bool(((r.get("outcome") or {}).get("quote_vs_settlement_mismatch", False)))]
+
+    top_tokens = sorted(
+        list(token_stats.values()),
+        key=lambda x: (-int(x.get("finalized", 0)), -int(x.get("reconciled", 0)), -int(x.get("promoted", 0)), str(x.get("token_address") or "")),
+    )[:10]
+
+    return {
+        "ok": True,
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "rows_total": len(scored_rows),
+        "metrics": {
+            "promoted_count": len(promoted_rows),
+            "finalized_count": len(finalized_rows),
+            "reconciled_count": len(reconciled_rows),
+            "truth_complete_count": len(truth_complete_rows),
+            "promoted_finalized_count": len(promoted_finalized_rows),
+            "promoted_reconciled_count": len(promoted_reconciled_rows),
+            "promoted_quote_mismatch_count": len(promoted_mismatch_rows),
+            "promoted_finalized_rate": _rate(len(promoted_finalized_rows), len(promoted_rows)),
+            "promoted_reconciled_rate": _rate(len(promoted_reconciled_rows), len(promoted_rows)),
+            "avg_slippage_bps_all": _avg(slippage_all),
+            "avg_slippage_bps_promoted": _avg(slippage_promoted),
+            "worst_slippage_bps_all": (round(max(slippage_all), 6) if slippage_all else None),
+        },
+        "counts": {
+            "quote_mismatch_class": mismatch_class_counts,
+            "probe_status": probe_status_counts,
+            "promoted_probe_status": promoted_probe_status_counts,
+            "score_bands": score_bands,
+        },
+        "top_tokens": top_tokens,
+    }
+
+
+def write_live_pilot_scored_candidate_calibration_summary(report: dict[str, Any], path_str: str) -> None:
+    p = Path(path_str)
+    if p.suffix.lower() in {".md", ".markdown"}:
+        m = dict(report.get("metrics") or {})
+        c = dict(report.get("counts") or {})
+        top = list(report.get("top_tokens") or [])
+        lines = [
+            "# Scored Candidate Calibration Summary",
+            "",
+            f"- generated_at_utc: `{report.get('generated_at_utc')}`",
+            f"- rows_total: `{report.get('rows_total', 0)}`",
+            "",
+            "## Metrics",
+            "",
+            f"- promoted_count: `{m.get('promoted_count')}`",
+            f"- promoted_finalized_rate: `{m.get('promoted_finalized_rate')}`",
+            f"- promoted_reconciled_rate: `{m.get('promoted_reconciled_rate')}`",
+            f"- promoted_quote_mismatch_count: `{m.get('promoted_quote_mismatch_count')}`",
+            f"- avg_slippage_bps_promoted: `{m.get('avg_slippage_bps_promoted')}`",
+            f"- worst_slippage_bps_all: `{m.get('worst_slippage_bps_all')}`",
+            "",
+            "## Counts",
+            "",
+            f"- quote_mismatch_class: `{json.dumps(c.get('quote_mismatch_class') or {}, separators=(',', ':'))}`",
+            f"- probe_status: `{json.dumps(c.get('probe_status') or {}, separators=(',', ':'))}`",
+            f"- promoted_probe_status: `{json.dumps(c.get('promoted_probe_status') or {}, separators=(',', ':'))}`",
+            f"- score_bands: `{json.dumps(c.get('score_bands') or {}, separators=(',', ':'))}`",
+            "",
+            "## Top Tokens",
+            "",
+        ]
+        if not top:
+            lines.append("_No rows found._")
+        else:
+            for row in top:
+                if not isinstance(row, dict):
+                    continue
+                lines.append(
+                    f"- `{row.get('token_address')}` rows=`{row.get('rows')}` promoted=`{row.get('promoted')}` finalized=`{row.get('finalized')}` reconciled=`{row.get('reconciled')}` last_score=`{row.get('last_score_total')}`"
+                )
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    else:
+        p.write_text(json.dumps(report, sort_keys=True, indent=2), encoding="utf-8")
 
 
 def build_live_pilot_daily_operator_report(

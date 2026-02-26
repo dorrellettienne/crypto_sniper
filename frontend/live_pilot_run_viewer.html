@@ -150,7 +150,7 @@
     <section class="hero">
       <p class="eyebrow">Live Pilot Viewer</p>
       <h1>No-Send vs Live Run Status</h1>
-      <p class="sub">Load a run JSON (campaign summary adapter output or website API payload) to render a clear operator-facing view showing what the run proves, what it does not prove, and whether any transaction was actually submitted.</p>
+      <p class="sub">Load a run JSON (live receipt, daily packet, scored discovery report, calibration trend summary, or website API payload) to render a clear operator-facing view showing what the run proves, what it does not prove, and whether any transaction was actually submitted.</p>
       <div class="controls">
         <div id="dropzone" class="dropzone" role="button" tabindex="0" aria-label="Load run JSON">
           <span><strong>Drop a run JSON here</strong> or load the sample</span>
@@ -164,7 +164,7 @@
     </section>
 
     <div id="empty" class="empty">
-      Waiting for a run JSON payload. This viewer expects the `execution_mode`/`transaction` schema described in the operator UI design.
+      Waiting for a run JSON payload. This viewer supports live receipts, daily packets, scored discovery reports, calibration trend summaries, and the original run schema.
     </div>
 
     <section id="dashboard" class="dashboard" hidden>
@@ -442,6 +442,113 @@
       // Existing schema passthrough
       if (p.execution_mode || p.transaction || p.explainability) return p;
 
+      // V1.2 scored discovery report schema
+      if (p.report_version === "v1.2_scored_discovery_report_v1" && p.scoring && p.promotion) {
+        const summary = (p.summary && typeof p.summary === "object") ? p.summary : {};
+        const scoring = (p.scoring && typeof p.scoring === "object") ? p.scoring : {};
+        const promotion = (p.promotion && typeof p.promotion === "object") ? p.promotion : {};
+        const scoringSummary = (scoring.summary && typeof scoring.summary === "object") ? scoring.summary : {};
+        const promotionSummary = (promotion.summary && typeof promotion.summary === "object") ? promotion.summary : {};
+        const promoted = Array.isArray(summary.promoted_token_addresses) ? summary.promoted_token_addresses : [];
+        return {
+          run_id: `scored_discovery:${(promoted[0] || "none").slice(0, 12)}`,
+          timestamp_unix_ms: null,
+          execution_mode: "no_send",
+          execution_stage: "scored_discovery_only",
+          network: "solana",
+          status: "completed",
+          summary: {
+            candidates_total: summary.candidates_total ?? 0,
+            candidates_eligible: summary.candidates_eligible ?? 0,
+            candidates_promoted: summary.candidates_promoted ?? 0,
+            promoted_token_addresses: promoted.join(", "),
+            reject_reason_counts: JSON.stringify(scoringSummary.reject_reason_counts || {}),
+            promotion_min_score_total: promotionSummary.min_score_total,
+            promotion_require_probe_ok: promotionSummary.require_probe_ok,
+            promotion_gate_status: (summary.candidates_promoted || 0) > 0 ? "pass" : "hold",
+            live_launch_guard_status: "n/a"
+          },
+          transaction: {
+            submitted: false,
+            signature: null,
+            finalized: false,
+            fee_lamports: null,
+            realized_slippage_bps: null,
+            reconciliation_status: null
+          },
+          artifacts: {
+            scored_discovery_report_json: "data/exports/scored_discovery_report.json",
+            scored_discovery_report_md: "data/exports/scored_discovery_report.md"
+          },
+          explainability: {
+            what_this_proves: [
+              "Candidates were scored with the V1.2 rule schema",
+              "Promotion decisions and reject reasons were produced",
+              "No-send discovery ranking can be reviewed before live promotion"
+            ],
+            what_this_does_not_prove: [
+              "On-chain execution or profitability",
+              "That promoted candidates will perform well live"
+            ]
+          },
+          _source: "scored_discovery_report",
+          _raw: p
+        };
+      }
+
+      // V1.2 calibration trend summary schema
+      if (p.report_version === "v1.2_scored_candidate_calibration_trend_summary_v1" && p.overall) {
+        const overall = (p.overall && typeof p.overall === "object") ? p.overall : {};
+        const metrics = (overall.metrics && typeof overall.metrics === "object") ? overall.metrics : {};
+        const counts = (overall.counts && typeof overall.counts === "object") ? overall.counts : {};
+        return {
+          run_id: `calibration_trend:${String(p.group_by || "date")}`,
+          timestamp_unix_ms: Date.parse(p.generated_at_utc || "") || null,
+          execution_mode: "no_send",
+          execution_stage: "calibration_trend_summary",
+          network: "solana",
+          status: p.ok ? "completed" : "error",
+          summary: {
+            rows_total: p.rows_total ?? 0,
+            periods_total: Array.isArray(p.periods) ? p.periods.length : 0,
+            promoted_count: metrics.promoted_count ?? 0,
+            finalized_count: metrics.finalized_count ?? 0,
+            reconciled_count: metrics.reconciled_count ?? 0,
+            truth_complete_count: metrics.truth_complete_count ?? 0,
+            promoted_finalized_rate: metrics.promoted_finalized_rate,
+            promoted_reconciled_rate: metrics.promoted_reconciled_rate,
+            quote_mismatch_class_counts: JSON.stringify(counts.quote_mismatch_class || {}),
+            promotion_gate_status: "n/a",
+            live_launch_guard_status: "n/a"
+          },
+          transaction: {
+            submitted: false,
+            signature: null,
+            finalized: false,
+            fee_lamports: null,
+            realized_slippage_bps: metrics.avg_slippage_bps_all ?? null,
+            reconciliation_status: null
+          },
+          artifacts: {
+            calibration_trend_summary_json: "data/exports/scored_candidate_calibration_trend_summary.json",
+            calibration_trend_summary_md: "data/exports/scored_candidate_calibration_trend_summary.md"
+          },
+          explainability: {
+            what_this_proves: [
+              "Scored candidate outcomes are being accumulated over time",
+              "Calibration metrics can be reviewed by date or run label",
+              "Rule tuning can be based on stored outcome evidence"
+            ],
+            what_this_does_not_prove: [
+              "A predictive model is learning automatically",
+              "Future candidate quality without more outcome data"
+            ]
+          },
+          _source: "scored_candidate_calibration_trend_summary",
+          _raw: p
+        };
+      }
+
       // Daily packet schema
       if (p.receipt && typeof p.receipt === "object" && p.summary && typeof p.summary === "object") {
         const receipt = p.receipt || {};
@@ -594,6 +701,14 @@
         "candidates_attempted",
         "quotes_ok",
         "quotes_failed",
+        "candidates_total",
+        "candidates_eligible",
+        "candidates_promoted",
+        "promoted_count",
+        "finalized_count",
+        "reconciled_count",
+        "rows_total",
+        "periods_total",
         "promotion_gate_status",
         "operator_decision",
         "bundle_verification_status",

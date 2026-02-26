@@ -1,0 +1,118 @@
+[
+  {
+    "token_address": "DemoTok111111111111111111111111111111111111111",
+    "symbol": "DEMOA",
+    "entry_price": 0.0012,
+    "usd_size": 0.25,
+    "metadata": {
+      "source_provider": "dexscreener",
+      "quote_probe_status": "ok",
+      "raw_pair": {
+        "pairCreatedAt": 1893456000000,
+        "liquidity": {
+          "usd": 18500.0
+        },
+        "volume": {
+          "m5": 4200.0,
+          "h1": 52500.0
+        },
+        "priceChange": {
+          "m5": 4.8
+        },
+        "txns": {
+          "m5": {
+            "buys": 28,
+            "sells": 11
+          }
+        }
+      }
+    }
+  },
+  {
+    "token_address": "DemoTok222222222222222222222222222222222222222",
+    "symbol": "DEMOB",
+    "entry_price": 0.0042,
+    "usd_size": 0.25,
+    "metadata": {
+      "source_provider": "dexscreener",
+      "quote_probe_status": "ok",
+      "raw_pair": {
+        "pairCreatedAt": 1600000000000,
+        "liquidity": {
+          "usd": 24000.0
+        },
+        "volume": {
+          "m5": 5100.0,
+          "h1": 70000.0
+        },
+        "priceChange": {
+          "m5": 6.2
+        },
+        "txns": {
+          "m5": {
+            "buys": 20,
+            "sells": 18
+          }
+        }
+      }
+    }
+  },
+  {
+    "token_address": "DemoTok333333333333333333333333333333333333333",
+    "symbol": "DEMOC",
+    "entry_price": 0.0009,
+    "usd_size": 0.25,
+    "metadata": {
+      "source_provider": "dexscreener",
+      "quote_probe_status": "ok",
+      "raw_pair": {
+        "pairCreatedAt": 1893456000000,
+        "liquidity": {
+          "usd": 350.0
+        },
+        "volume": {
+          "m5": 80.0,
+          "h1": 900.0
+        },
+        "priceChange": {
+          "m5": 3.1
+        },
+        "txns": {
+          "m5": {
+            "buys": 3,
+            "sells": 1
+          }
+        }
+      }
+    }
+  },
+  {
+    "token_address": "DemoTok444444444444444444444444444444444444444",
+    "symbol": "DEMOD",
+    "entry_price": 0.0026,
+    "usd_size": 0.25,
+    "metadata": {
+      "source_provider": "dexscreener",
+      "quote_probe_status": "failed",
+      "raw_pair": {
+        "pairCreatedAt": 1893456000000,
+        "liquidity": {
+          "usd": 8200.0
+        },
+        "volume": {
+          "m5": 1400.0,
+          "h1": 18000.0
+        },
+        "priceChange": {
+          "m5": 12.5
+        },
+        "txns": {
+          "m5": {
+            "buys": 9,
+            "sells": 17
+          }
+        }
+      }
+    }
+  }
+]

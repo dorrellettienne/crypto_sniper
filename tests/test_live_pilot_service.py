@@ -6,6 +6,8 @@ from src.live.live_pilot_service import (
     adaptive_reorder_fallback_candidates,
     adaptive_reorder_provider_order,
     _apply_live_pilot_mode_preset,
+    append_live_pilot_scored_candidate_outcome_log,
+    build_live_pilot_scored_discovery_report,
     _evaluate_live_pilot_promotion_gates,
     _extract_live_submit_economics,
     _build_live_pilot_mechanical_safety_filter_from_config,
@@ -18,14 +20,20 @@ from src.live.live_pilot_service import (
     load_adaptive_reliability_state,
     _validate_live_auto_window_guardrails,
     probe_fallback_candidates_preflight,
+    extract_live_pilot_candidate_features,
     run_live_pilot_auto_window,
     run_live_pilot_auto_window_candidates,
     run_live_pilot_auto_window_from_signal_provider,
     run_live_pilot_campaign,
     run_live_pilot_campaign_schedule,
     sanitize_fallback_candidates,
+    select_live_pilot_promoted_candidates,
+    score_live_pilot_discovery_candidate,
+    score_live_pilot_discovery_candidates,
     save_adaptive_reliability_state,
     update_adaptive_reliability_state_from_campaign_report,
+    build_live_pilot_scored_candidate_calibration_summary,
+    write_live_pilot_scored_candidate_calibration_summary,
     build_live_pilot_daily_operator_report,
     append_live_pilot_operator_decision_log,
     apply_operator_acknowledgement_to_daily_report,
@@ -1797,6 +1805,265 @@ def test_sanitize_fallback_candidates_normalizes_and_drops_invalid():
     assert s["fallback_candidates_total"] == 3
     assert s["fallback_candidates_sanitized_count"] == 1
     assert s["fallback_candidates_dropped_count"] == 2
+
+
+def test_extract_live_pilot_candidate_features_reads_dexscreener_like_metadata():
+    now_ms = 1_700_000_100_000
+    cand = {
+        "token_address": "TOK1",
+        "symbol": "TOK",
+        "entry_price": 0.5,
+        "usd_size": 1.0,
+        "metadata": {
+            "source_provider": "dexscreener",
+            "raw_pair": {
+                "pairCreatedAt": now_ms - 120_000,
+                "liquidity": {"usd": 12345.67},
+                "volume": {"m5": 2222.0, "h1": 33333.0},
+                "priceChange": {"m5": 4.2},
+                "txns": {"m5": {"buys": 12, "sells": 5}},
+            },
+            "probe_ok": True,
+        },
+    }
+    f = extract_live_pilot_candidate_features(cand, now_unix_ms=now_ms)
+    assert f["token_address"] == "TOK1"
+    assert f["source_provider"] == "dexscreener"
+    assert f["has_dexscreener_pair"] is True
+    assert f["pair_age_seconds"] == 120.0
+    assert f["liquidity_usd"] == 12345.67
+    assert f["volume_5m_usd"] == 2222.0
+    assert f["volume_1h_usd"] == 33333.0
+    assert f["price_change_5m_pct"] == 4.2
+    assert f["txns_5m_buys"] == 12
+    assert f["txns_5m_sells"] == 5
+    assert f["quote_probe_status"] == "ok"
+
+
+def test_score_live_pilot_discovery_candidate_emits_schema_and_rejects_low_liquidity():
+    score = score_live_pilot_discovery_candidate(
+        {
+            "token_address": "LOW",
+            "symbol": "LOW",
+            "entry_price": 1.0,
+            "usd_size": 1.0,
+            "metadata": {"liquidity_usd": 10.0, "volume_5m_usd": 100.0},
+        },
+        scoring_config={"min_liquidity_usd": 1000.0},
+        now_unix_ms=1_700_000_000_000,
+    )
+    assert score["score_schema_version"] == "v1.2_candidate_score_v1"
+    assert score["eligible"] is False
+    assert score["decision"] == "reject_candidate"
+    assert "liquidity_below_min" in score["reject_reasons"]
+    assert "features" in score and "component_scores" in score and "thresholds" in score
+
+
+def test_score_live_pilot_discovery_candidates_ranks_and_summarizes():
+    now_ms = 1_700_000_100_000
+    candidates = [
+        {
+            "token_address": "GOOD",
+            "symbol": "GOOD",
+            "entry_price": 1.0,
+            "usd_size": 1.0,
+            "metadata": {
+                "liquidity_usd": 15000.0,
+                "volume_5m_usd": 4000.0,
+                "pair_created_at_unix_ms": now_ms - 30_000,
+                "txns": {"m5": {"buys": 10, "sells": 2}},
+                "probe_ok": True,
+            },
+        },
+        {
+            "token_address": "BAD",
+            "symbol": "BAD",
+            "entry_price": 1.0,
+            "usd_size": 1.0,
+            "metadata": {
+                "liquidity_usd": 500.0,
+                "volume_5m_usd": 50.0,
+                "pair_created_at_unix_ms": now_ms - 10_000,
+                "probe_ok": False,
+            },
+        },
+    ]
+    out = score_live_pilot_discovery_candidates(
+        candidates,
+        reliability_state={"candidate_stats": {"GOOD": {"probe_ok": 1}, "BAD": {"probe_failed": 2}}},
+        now_unix_ms=now_ms,
+        scoring_config={"min_liquidity_usd": 1000.0, "max_pair_age_seconds": 3600.0},
+    )
+    scored = out["scored_candidates"]
+    assert [s["token_address"] for s in scored] == ["GOOD", "BAD"]
+    assert scored[0]["eligible"] is True
+    assert scored[1]["eligible"] is False
+    assert out["summary"]["candidate_score_schema_version"] == "v1.2_candidate_score_v1"
+    assert out["summary"]["candidates_total"] == 2
+    assert out["summary"]["candidates_eligible"] == 1
+    assert out["summary"]["candidates_rejected"] == 1
+    assert out["summary"]["reject_reason_counts"]["liquidity_below_min"] >= 1
+
+
+def test_select_live_pilot_promoted_candidates_applies_threshold_probe_and_capacity():
+    scored = [
+        {
+            "token_address": "A",
+            "symbol": "A",
+            "eligible": True,
+            "score_total": 10.0,
+            "features": {"quote_probe_status": "ok"},
+            "reject_reasons": [],
+        },
+        {
+            "token_address": "B",
+            "symbol": "B",
+            "eligible": True,
+            "score_total": 9.0,
+            "features": {"quote_probe_status": "ok"},
+            "reject_reasons": [],
+        },
+        {
+            "token_address": "C",
+            "symbol": "C",
+            "eligible": True,
+            "score_total": 100.0,
+            "features": {"quote_probe_status": "failed"},
+            "reject_reasons": [],
+        },
+    ]
+    out = select_live_pilot_promoted_candidates(
+        scored,
+        max_candidates=1,
+        min_score_total=5.0,
+        require_probe_ok=True,
+    )
+    promoted = out["promoted_candidates"]
+    assert [r["token_address"] for r in promoted] == ["A"]
+    decisions = {d["token_address"]: d for d in out["decisions"]}
+    assert decisions["A"]["promoted"] is True
+    assert "promotion_capacity_reached" in decisions["B"]["decision_reasons"]
+    assert "probe_not_ok" in decisions["C"]["decision_reasons"]
+
+
+def test_build_live_pilot_scored_discovery_report_produces_promotion_summary():
+    now_ms = 1_700_000_100_000
+    candidates = [
+        {
+            "token_address": "PROMOTE",
+            "symbol": "PRO",
+            "entry_price": 1.0,
+            "usd_size": 1.0,
+            "metadata": {
+                "liquidity_usd": 25000.0,
+                "volume_5m_usd": 5000.0,
+                "pair_created_at_unix_ms": now_ms - 60_000,
+                "probe_ok": True,
+                "txns": {"m5": {"buys": 20, "sells": 3}},
+            },
+        },
+        {
+            "token_address": "REJECT",
+            "symbol": "REJ",
+            "entry_price": 1.0,
+            "usd_size": 1.0,
+            "metadata": {
+                "liquidity_usd": 100.0,
+                "volume_5m_usd": 5.0,
+                "pair_created_at_unix_ms": now_ms - 60_000,
+                "probe_ok": False,
+            },
+        },
+    ]
+    out = build_live_pilot_scored_discovery_report(
+        candidates,
+        now_unix_ms=now_ms,
+        promotion_config={"max_candidates": 1, "require_probe_ok": True},
+    )
+    assert out["report_version"] == "v1.2_scored_discovery_report_v1"
+    assert out["summary"]["candidates_total"] == 2
+    assert out["summary"]["candidates_promoted"] == 1
+    assert out["summary"]["promoted_token_addresses"] == ["PROMOTE"]
+    decisions = {d["token_address"]: d for d in out["promotion"]["decisions"]}
+    assert decisions["PROMOTE"]["promoted"] is True
+    assert decisions["REJECT"]["promoted"] is False
+
+
+def test_append_scored_candidate_outcome_log_and_build_calibration_summary(tmp_path):
+    scored_report = {
+        "report_version": "v1.2_scored_discovery_report_v1",
+        "summary": {
+            "candidate_score_schema_version": "v1.2_candidate_score_v1",
+            "promotion_filter_version": "v1.2_promotion_filter_v1",
+        },
+        "scoring": {
+            "scored_candidates": [
+                {
+                    "token_address": "A",
+                    "symbol": "A",
+                    "features": {"quote_probe_status": "ok", "liquidity_usd": 10000},
+                    "reject_reasons": [],
+                    "score_total": 12.5,
+                    "eligible": True,
+                },
+                {
+                    "token_address": "B",
+                    "symbol": "B",
+                    "features": {"quote_probe_status": "failed", "liquidity_usd": 100},
+                    "reject_reasons": ["liquidity_below_min"],
+                    "score_total": -2.0,
+                    "eligible": False,
+                },
+            ]
+        },
+        "promotion": {
+            "decisions": [
+                {"token_address": "A", "symbol": "A", "score_total": 12.5, "eligible": True, "promoted": True, "probe_status": "ok", "decision_reason": "promoted", "decision_reasons": []},
+                {"token_address": "B", "symbol": "B", "score_total": -2.0, "eligible": False, "promoted": False, "probe_status": "failed", "decision_reason": "rejected", "decision_reasons": ["scoring_not_eligible"], "scoring_reject_reasons": ["liquidity_below_min"]},
+            ]
+        },
+    }
+    receipt = {
+        "signature": "SIG123",
+        "tx_present": True,
+        "fee_lamports": 5000,
+        "rpc_status": {"confirmation_status": "finalized"},
+        "live_pilot_summary": {
+            "chain_outcome_class": "live_confirmed_reconciled",
+            "economics": {
+                "realized_slippage_bps_vs_quote": 4.2,
+                "quote_vs_settlement_mismatch": True,
+                "quote_vs_settlement_mismatch_class": "execution_or_route_variance",
+            },
+            "settlement_truth": {"confidence": "truth_complete"},
+        },
+    }
+    log_path = tmp_path / "candidate_outcomes.jsonl"
+    append_out = append_live_pilot_scored_candidate_outcome_log(
+        str(log_path),
+        scored_discovery_report=scored_report,
+        receipt=receipt,
+        extra_context={"run_id": "r1"},
+    )
+    assert append_out["ok"] is True
+    assert append_out["rows_written"] == 2
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(rows) == 2
+    assert rows[0]["event_type"] == "live_pilot_scored_candidate_outcome"
+    calib = build_live_pilot_scored_candidate_calibration_summary(rows)
+    assert calib["ok"] is True
+    assert calib["rows_total"] == 2
+    assert calib["metrics"]["promoted_count"] == 1
+    assert calib["metrics"]["promoted_finalized_rate"] == 1.0
+    assert calib["metrics"]["promoted_reconciled_rate"] == 1.0
+    assert calib["counts"]["probe_status"]["ok"] >= 1
+    assert calib["counts"]["score_bands"]["lt0"] >= 1
+
+    md_path = tmp_path / "candidate_calibration_summary.md"
+    write_live_pilot_scored_candidate_calibration_summary(calib, str(md_path))
+    md = md_path.read_text(encoding="utf-8")
+    assert "Scored Candidate Calibration Summary" in md
+    assert "promoted_finalized_rate" in md
 
 
 def test_probe_fallback_candidates_preflight_filters_failed_probes_and_can_fail_closed():
