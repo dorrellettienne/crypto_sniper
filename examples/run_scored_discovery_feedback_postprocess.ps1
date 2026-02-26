@@ -2,6 +2,7 @@ param(
     [string]$ExportsDir = "data/exports",
     [string]$ScoredReportJsonPath = "data/exports/scored_discovery_report.json",
     [string]$ReceiptJsonPath = "data/exports/latest_live_receipt.json",
+    [string]$StrategyTraceJsonPath = "data/exports/strategy_decision_trace.json",
     [string]$OutcomeLogJsonlPath = "data/exports/scored_candidate_outcomes.jsonl",
     [string]$CalibrationSummaryJsonPath = "data/exports/scored_candidate_calibration_summary.json",
     [string]$CalibrationSummaryMdPath = "data/exports/scored_candidate_calibration_summary.md",
@@ -23,6 +24,7 @@ if (-not (Test-Path $ReceiptJsonPath)) {
 
 $py = @'
 import argparse
+import hashlib
 import json
 from pathlib import Path
 from src.live.live_pilot_service import (
@@ -34,10 +36,29 @@ from src.live.live_pilot_service import (
 def _json(p):
     return json.loads(Path(p).read_text(encoding="utf-8"))
 
+def _exit_policy_context(strategy_trace_json_path: str) -> dict:
+    p = Path(strategy_trace_json_path)
+    if not p.exists():
+        return {}
+    try:
+        trace = _json(p)
+    except Exception:
+        return {}
+    schema = (((trace.get("strategy_decision_trace") or {}).get("exit_policy") or {}).get("schema") or {})
+    if not isinstance(schema, dict) or not schema:
+        return {}
+    raw = json.dumps(schema, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    fp = hashlib.sha256(raw).hexdigest()
+    return {
+        "exit_policy_fingerprint": fp,
+        "exit_policy_label": str(schema.get("exit_policy_version") or "v1.3_exit_policy_schema_v1"),
+    }
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--scored-report-json-path", required=True)
     ap.add_argument("--receipt-json-path", required=True)
+    ap.add_argument("--strategy-trace-json-path", default="")
     ap.add_argument("--outcome-log-jsonl-path", required=True)
     ap.add_argument("--calibration-summary-json-path", required=True)
     ap.add_argument("--calibration-summary-md-path", required=True)
@@ -46,11 +67,13 @@ def main():
 
     scored = _json(args.scored_report_json_path)
     receipt = _json(args.receipt_json_path)
+    extra_context = {"run_label": args.context_run_label}
+    extra_context.update(_exit_policy_context(args.strategy_trace_json_path or ""))
     append_res = append_live_pilot_scored_candidate_outcome_log(
         args.outcome_log_jsonl_path,
         scored_discovery_report=scored,
         receipt=receipt,
-        extra_context={"run_label": args.context_run_label},
+        extra_context=extra_context,
     )
     rows = []
     p = Path(args.outcome_log_jsonl_path)
@@ -92,6 +115,7 @@ try {
     python $tmpPy `
       --scored-report-json-path $ScoredReportJsonPath `
       --receipt-json-path $ReceiptJsonPath `
+      --strategy-trace-json-path $StrategyTraceJsonPath `
       --outcome-log-jsonl-path $OutcomeLogJsonlPath `
       --calibration-summary-json-path $CalibrationSummaryJsonPath `
       --calibration-summary-md-path $CalibrationSummaryMdPath `

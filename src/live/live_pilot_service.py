@@ -806,6 +806,280 @@ def build_live_pilot_scored_discovery_report(
     }
 
 
+def build_live_pilot_entry_rule_decisions(
+    scored_discovery_report: dict[str, Any],
+    *,
+    entry_rule_config: dict[str, Any] | None = None,
+    calibration_summary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    cfg = dict(entry_rule_config or {})
+    min_score_total = float(cfg.get("min_score_total", 10.0) or 10.0)
+    require_probe_ok = bool(cfg.get("require_probe_ok", True))
+    require_scoring_eligible = bool(cfg.get("require_scoring_eligible", True))
+    max_quote_mismatch_rate = _to_float_or_none(cfg.get("max_quote_mismatch_rate"))
+    min_promoted_reconciled_rate = _to_float_or_none(cfg.get("min_promoted_reconciled_rate"))
+
+    calibration_metrics = dict((calibration_summary or {}).get("metrics") or {})
+    promoted_quote_mismatch_count = int(calibration_metrics.get("promoted_quote_mismatch_count", 0) or 0)
+    promoted_count = int(calibration_metrics.get("promoted_count", 0) or 0)
+    promoted_reconciled_rate = _to_float_or_none(calibration_metrics.get("promoted_reconciled_rate"))
+    observed_mismatch_rate = (float(promoted_quote_mismatch_count) / float(promoted_count)) if promoted_count > 0 else None
+
+    scored_rows = list((((scored_discovery_report or {}).get("scoring") or {}).get("scored_candidates") or []))
+    decisions: list[dict[str, Any]] = []
+    enter_count = 0
+
+    for row in scored_rows:
+        r = dict(row or {})
+        features = dict(r.get("features") or {})
+        tok = str(r.get("token_address") or "")
+        sym = str(r.get("symbol") or "")
+        score_total = float(_to_float_or_none(r.get("score_total")) or 0.0)
+        scoring_eligible = bool(r.get("eligible", False))
+        probe_status = str(features.get("quote_probe_status") or "").strip().lower()
+        reasons: list[str] = []
+
+        if require_scoring_eligible and not scoring_eligible:
+            reasons.append("scoring_not_eligible")
+        if score_total < min_score_total:
+            reasons.append("entry_score_below_min")
+        if require_probe_ok and probe_status != "ok":
+            reasons.append("entry_probe_not_ok")
+        if max_quote_mismatch_rate is not None and observed_mismatch_rate is not None and observed_mismatch_rate > float(max_quote_mismatch_rate):
+            reasons.append("entry_calibration_quote_mismatch_rate_too_high")
+        if min_promoted_reconciled_rate is not None and promoted_reconciled_rate is not None and promoted_reconciled_rate < float(min_promoted_reconciled_rate):
+            reasons.append("entry_calibration_reconciled_rate_too_low")
+
+        enter = len(reasons) == 0
+        if enter:
+            enter_count += 1
+        confidence = "high" if enter and score_total >= (min_score_total + 10.0) else ("medium" if enter else "low")
+        decisions.append(
+            {
+                "token_address": tok,
+                "symbol": sym,
+                "score_total": round(score_total, 6),
+                "scoring_eligible": scoring_eligible,
+                "probe_status": probe_status,
+                "enter": enter,
+                "decision": ("enter" if enter else "skip"),
+                "decision_reasons": reasons,
+                "confidence": confidence,
+            }
+        )
+
+    return {
+        "entry_rule_version": "v1.3_entry_rule_decision_v1",
+        "summary": {
+            "candidates_evaluated": len(scored_rows),
+            "candidates_enter": enter_count,
+            "candidates_skip": max(0, len(scored_rows) - enter_count),
+            "min_score_total": min_score_total,
+            "require_probe_ok": require_probe_ok,
+            "require_scoring_eligible": require_scoring_eligible,
+            "max_quote_mismatch_rate": max_quote_mismatch_rate,
+            "observed_promoted_quote_mismatch_rate": (None if observed_mismatch_rate is None else round(observed_mismatch_rate, 6)),
+            "min_promoted_reconciled_rate": min_promoted_reconciled_rate,
+            "observed_promoted_reconciled_rate": (None if promoted_reconciled_rate is None else round(float(promoted_reconciled_rate), 6)),
+        },
+        "decisions": decisions,
+    }
+
+
+def build_live_pilot_exit_policy_schema(*, policy_config: dict[str, Any] | None = None) -> dict[str, Any]:
+    cfg = dict(policy_config or {})
+    return {
+        "exit_policy_version": "v1.3_exit_policy_schema_v1",
+        "policy_type": str(cfg.get("policy_type", "bracket_plus_time") or "bracket_plus_time"),
+        "take_profit_bps": float(cfg.get("take_profit_bps", 150.0) or 150.0),
+        "stop_loss_bps": float(cfg.get("stop_loss_bps", 100.0) or 100.0),
+        "max_hold_seconds": int(cfg.get("max_hold_seconds", 300) or 300),
+        "time_stop_action": str(cfg.get("time_stop_action", "exit_market") or "exit_market"),
+        "allow_scale_out": bool(cfg.get("allow_scale_out", False)),
+        "trailing_stop": {
+            "enabled": bool(((cfg.get("trailing_stop") or {}).get("enabled", False))),
+            "activation_bps": float((((cfg.get("trailing_stop") or {}).get("activation_bps", 120.0)) or 120.0)),
+            "trail_bps": float((((cfg.get("trailing_stop") or {}).get("trail_bps", 60.0)) or 60.0)),
+        },
+        "notes": str(cfg.get("notes", "") or ""),
+    }
+
+
+def validate_live_pilot_exit_policy_schema(policy: dict[str, Any] | None) -> dict[str, Any]:
+    p = dict(policy or {})
+    checks: list[dict[str, Any]] = []
+
+    def _check(name: str, ok: bool, actual: Any, expected: Any):
+        checks.append({"name": name, "ok": bool(ok), "actual": actual, "expected": expected})
+
+    policy_type = str(p.get("policy_type") or "")
+    tp = _to_float_or_none(p.get("take_profit_bps"))
+    sl = _to_float_or_none(p.get("stop_loss_bps"))
+    hold = _to_int_or_none(p.get("max_hold_seconds"))
+    time_stop_action = str(p.get("time_stop_action") or "")
+    trailing = dict(p.get("trailing_stop") or {})
+    trailing_enabled = bool(trailing.get("enabled", False))
+    activation_bps = _to_float_or_none(trailing.get("activation_bps"))
+    trail_bps = _to_float_or_none(trailing.get("trail_bps"))
+
+    _check("policy_type_supported", policy_type in {"bracket_plus_time", "time_only"}, policy_type, "bracket_plus_time|time_only")
+    _check("take_profit_bps_positive", (tp is not None and tp > 0), tp, "> 0")
+    _check("stop_loss_bps_positive", (sl is not None and sl > 0), sl, "> 0")
+    _check("max_hold_seconds_positive", (hold is not None and hold > 0), hold, "> 0")
+    _check("time_stop_action_supported", time_stop_action in {"exit_market", "hold", "manual_review"}, time_stop_action, "exit_market|hold|manual_review")
+    if trailing_enabled:
+        _check("trailing_activation_bps_positive", (activation_bps is not None and activation_bps > 0), activation_bps, "> 0")
+        _check("trailing_trail_bps_positive", (trail_bps is not None and trail_bps > 0), trail_bps, "> 0")
+        if activation_bps is not None and trail_bps is not None:
+            _check("trailing_activation_gt_trail", activation_bps > trail_bps, {"activation_bps": activation_bps, "trail_bps": trail_bps}, "activation_bps > trail_bps")
+    else:
+        _check("trailing_disabled_ok", True, trailing_enabled, False)
+
+    failed = [str(c.get("name") or "") for c in checks if not bool(c.get("ok", False))]
+    return {
+        "ok": len(failed) == 0,
+        "exit_policy_version": str(p.get("exit_policy_version") or ""),
+        "summary": ("exit_policy_valid" if len(failed) == 0 else ("exit_policy_invalid:" + ",".join(failed))),
+        "failed_checks": failed,
+        "checks": checks,
+    }
+
+
+def build_live_pilot_strategy_decision_trace(
+    *,
+    scored_discovery_report: dict[str, Any],
+    entry_rule_decisions: dict[str, Any],
+    exit_policy_schema: dict[str, Any],
+    exit_policy_validation: dict[str, Any] | None = None,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    exit_validation = dict(exit_policy_validation or validate_live_pilot_exit_policy_schema(exit_policy_schema))
+    scored_summary = dict((scored_discovery_report or {}).get("summary") or {})
+    entry_summary = dict((entry_rule_decisions or {}).get("summary") or {})
+    entry_rows = list((entry_rule_decisions or {}).get("decisions") or [])
+    trace_rows: list[dict[str, Any]] = []
+    enter_count = 0
+    skip_count = 0
+    for row in entry_rows:
+        d = dict(row or {})
+        enter = bool(d.get("enter", False))
+        if enter:
+            enter_count += 1
+        else:
+            skip_count += 1
+        trace_rows.append(
+            {
+                "token_address": str(d.get("token_address") or ""),
+                "symbol": str(d.get("symbol") or ""),
+                "score_total": _to_float_or_none(d.get("score_total")),
+                "decision": str(d.get("decision") or ("enter" if enter else "skip")),
+                "confidence": str(d.get("confidence") or ""),
+                "entry_decision_reasons": [str(x) for x in list(d.get("decision_reasons") or []) if str(x)],
+                "exit_policy_valid": bool(exit_validation.get("ok", False)),
+                "exit_policy_failed_checks": [str(x) for x in list(exit_validation.get("failed_checks") or []) if str(x)],
+            }
+        )
+    return {
+        "trace_version": "v1.3_strategy_decision_trace_v1",
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "context": dict(context or {}),
+        "summary": {
+            "candidates_total": int(scored_summary.get("candidates_total", len(trace_rows)) or 0),
+            "candidates_scored_eligible": int(scored_summary.get("candidates_eligible", 0) or 0),
+            "entry_candidates_evaluated": int(entry_summary.get("candidates_evaluated", len(trace_rows)) or 0),
+            "entry_candidates_enter": int(entry_summary.get("candidates_enter", enter_count) or 0),
+            "entry_candidates_skip": int(entry_summary.get("candidates_skip", skip_count) or 0),
+            "exit_policy_valid": bool(exit_validation.get("ok", False)),
+            "exit_policy_summary": str(exit_validation.get("summary") or ""),
+        },
+        "scored_discovery_report": {
+            "report_version": str((scored_discovery_report or {}).get("report_version") or ""),
+            "summary": scored_summary,
+        },
+        "entry_rule_decisions": {
+            "entry_rule_version": str((entry_rule_decisions or {}).get("entry_rule_version") or ""),
+            "summary": entry_summary,
+        },
+        "exit_policy": {
+            "schema": dict(exit_policy_schema or {}),
+            "validation": exit_validation,
+        },
+        "decision_trace": trace_rows,
+    }
+
+
+def evaluate_live_pilot_supervised_entry_promotion_guard(
+    strategy_decision_trace: dict[str, Any],
+    *,
+    guard_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    cfg = dict(guard_config or {})
+    require_exit_policy_valid = bool(cfg.get("require_exit_policy_valid", True))
+    require_entry_decision_enter = bool(cfg.get("require_entry_decision_enter", True))
+    require_confidence_at_least = str(cfg.get("require_confidence_at_least", "medium") or "medium").strip().lower()
+    max_candidates = max(0, int(cfg.get("max_candidates", 1) or 1))
+    allowed_conf = {"low": 0, "medium": 1, "high": 2}
+    min_conf_rank = allowed_conf.get(require_confidence_at_least, 1)
+
+    exit_policy_valid = bool((((strategy_decision_trace or {}).get("exit_policy") or {}).get("validation") or {}).get("ok", False))
+    trace_rows = [dict(r) for r in list((strategy_decision_trace or {}).get("decision_trace") or []) if isinstance(r, dict)]
+    decisions: list[dict[str, Any]] = []
+    promoted: list[dict[str, Any]] = []
+    reject_counts: dict[str, int] = {}
+
+    for row in trace_rows:
+        r = dict(row)
+        tok = str(r.get("token_address") or "")
+        sym = str(r.get("symbol") or "")
+        conf = str(r.get("confidence") or "").strip().lower()
+        decision = str(r.get("decision") or "").strip().lower()
+        reasons: list[str] = []
+        if require_exit_policy_valid and not exit_policy_valid:
+            reasons.append("exit_policy_invalid")
+        if require_entry_decision_enter and decision != "enter":
+            reasons.append("entry_rule_failed")
+        if allowed_conf.get(conf, -1) < min_conf_rank:
+            reasons.append("entry_confidence_below_min")
+        if len(promoted) >= max_candidates:
+            reasons.append("promotion_capacity_reached")
+        promoted_flag = len(reasons) == 0
+        if not promoted_flag:
+            for rr in reasons:
+                reject_counts[rr] = int(reject_counts.get(rr, 0)) + 1
+        out = {
+            "token_address": tok,
+            "symbol": sym,
+            "score_total": _to_float_or_none(r.get("score_total")),
+            "entry_decision": decision,
+            "confidence": conf,
+            "promoted": promoted_flag,
+            "decision_reason": ("promoted" if promoted_flag else "rejected"),
+            "decision_reasons": reasons,
+            "entry_decision_reasons": [str(x) for x in list(r.get("entry_decision_reasons") or []) if str(x)],
+        }
+        decisions.append(out)
+        if promoted_flag:
+            promoted.append(out)
+
+    return {
+        "guard_version": "v1.3_supervised_entry_promotion_guard_v1",
+        "summary": {
+            "candidates_considered": len(trace_rows),
+            "candidates_promoted": len(promoted),
+            "candidates_rejected": max(0, len(trace_rows) - len(promoted)),
+            "require_exit_policy_valid": require_exit_policy_valid,
+            "require_entry_decision_enter": require_entry_decision_enter,
+            "require_confidence_at_least": require_confidence_at_least,
+            "max_candidates": max_candidates,
+            "exit_policy_valid": exit_policy_valid,
+            "reject_reason_counts": reject_counts,
+            "promoted_token_addresses": [str(x.get("token_address") or "") for x in promoted],
+        },
+        "decisions": decisions,
+        "promoted_candidates": promoted,
+    }
+
+
 def probe_fallback_candidates_preflight(
     candidates: list[dict[str, Any]],
     *,
@@ -1903,6 +2177,482 @@ def build_live_pilot_scored_candidate_calibration_summary(rows: list[dict[str, A
             "score_bands": score_bands,
         },
         "top_tokens": top_tokens,
+    }
+
+
+def build_live_pilot_score_band_outcome_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    scored_rows = [dict(r) for r in list(rows or []) if isinstance(r, dict) and str(r.get("event_type") or "") == "live_pilot_scored_candidate_outcome"]
+    bands: list[tuple[str, float | None, float | None]] = [
+        ("lt0", None, 0.0),
+        ("0_10", 0.0, 10.0),
+        ("10_20", 10.0, 20.0),
+        ("20_plus", 20.0, None),
+    ]
+    by_band: dict[str, dict[str, Any]] = {}
+    for key, lo, hi in bands:
+        by_band[key] = {
+            "band": key,
+            "score_min_inclusive": lo,
+            "score_max_exclusive": hi,
+            "rows_total": 0,
+            "promoted_count": 0,
+            "finalized_count": 0,
+            "reconciled_count": 0,
+            "promoted_quote_mismatch_count": 0,
+            "_slippage_vals": [],
+        }
+
+    def _band_key(v: float) -> str:
+        if v < 0.0:
+            return "lt0"
+        if v < 10.0:
+            return "0_10"
+        if v < 20.0:
+            return "10_20"
+        return "20_plus"
+
+    def _rate(n: int, d: int) -> float | None:
+        return (round(float(n) / float(d), 6) if d > 0 else None)
+
+    for r in scored_rows:
+        cand = dict(r.get("candidate") or {})
+        out = dict(r.get("outcome") or {})
+        score_total = float(_to_float_or_none(cand.get("score_total")) or 0.0)
+        promoted = bool(cand.get("promoted", False))
+        conf = str(out.get("confirmation_status") or "")
+        chain = str(out.get("chain_outcome_class") or "")
+        slip = _to_float_or_none(out.get("realized_slippage_bps_vs_quote"))
+        mm = bool(out.get("quote_vs_settlement_mismatch", False))
+        k = _band_key(score_total)
+        b = dict(by_band.get(k) or {})
+        b["rows_total"] = int(b.get("rows_total", 0)) + 1
+        b["promoted_count"] = int(b.get("promoted_count", 0)) + (1 if promoted else 0)
+        b["finalized_count"] = int(b.get("finalized_count", 0)) + (1 if conf == "finalized" else 0)
+        b["reconciled_count"] = int(b.get("reconciled_count", 0)) + (1 if chain == "live_confirmed_reconciled" else 0)
+        b["promoted_quote_mismatch_count"] = int(b.get("promoted_quote_mismatch_count", 0)) + (1 if promoted and mm else 0)
+        vals = list(b.get("_slippage_vals") or [])
+        if slip is not None:
+            vals.append(float(slip))
+        b["_slippage_vals"] = vals
+        by_band[k] = b
+
+    rows_out: list[dict[str, Any]] = []
+    for key, _lo, _hi in bands:
+        b = dict(by_band.get(key) or {})
+        promoted_count = int(b.get("promoted_count", 0) or 0)
+        reconciled_count = int(b.get("reconciled_count", 0) or 0)
+        mismatch_count = int(b.get("promoted_quote_mismatch_count", 0) or 0)
+        slips = [float(v) for v in list(b.get("_slippage_vals") or [])]
+        rows_out.append(
+            {
+                "band": key,
+                "score_min_inclusive": b.get("score_min_inclusive"),
+                "score_max_exclusive": b.get("score_max_exclusive"),
+                "rows_total": int(b.get("rows_total", 0) or 0),
+                "promoted_count": promoted_count,
+                "finalized_count": int(b.get("finalized_count", 0) or 0),
+                "reconciled_count": reconciled_count,
+                "promoted_quote_mismatch_count": mismatch_count,
+                "promoted_reconciled_rate": _rate(reconciled_count, promoted_count),
+                "promoted_quote_mismatch_rate": _rate(mismatch_count, promoted_count),
+                "avg_slippage_bps": (round(sum(slips) / len(slips), 6) if slips else None),
+                "worst_slippage_bps": (round(max(slips), 6) if slips else None),
+            }
+        )
+
+    return {
+        "ok": True,
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "rows_total": len(scored_rows),
+        "score_band_outcomes": rows_out,
+    }
+
+
+def build_live_pilot_exit_policy_outcome_correlation_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    scored_rows = [dict(r) for r in list(rows or []) if isinstance(r, dict) and str(r.get("event_type") or "") == "live_pilot_scored_candidate_outcome"]
+
+    def _rate(n: int, d: int) -> float | None:
+        return (round(float(n) / float(d), 6) if d > 0 else None)
+
+    by_fp: dict[str, dict[str, Any]] = {}
+    for r in scored_rows:
+        cand = dict(r.get("candidate") or {})
+        out = dict(r.get("outcome") or {})
+        ctx = dict(r.get("context") or {})
+        fp = str(ctx.get("exit_policy_fingerprint") or "unknown")
+        label = str(ctx.get("exit_policy_label") or "")
+        promoted = bool(cand.get("promoted", False))
+        conf = str(out.get("confirmation_status") or "")
+        chain = str(out.get("chain_outcome_class") or "")
+        mm = bool(out.get("quote_vs_settlement_mismatch", False))
+        slip = _to_float_or_none(out.get("realized_slippage_bps_vs_quote"))
+        st = dict(by_fp.get(fp) or {"exit_policy_fingerprint": fp, "exit_policy_label": label, "rows_total": 0, "promoted_count": 0, "finalized_count": 0, "reconciled_count": 0, "promoted_quote_mismatch_count": 0, "_slippage_vals": []})
+        st["rows_total"] = int(st.get("rows_total", 0)) + 1
+        st["promoted_count"] = int(st.get("promoted_count", 0)) + (1 if promoted else 0)
+        st["finalized_count"] = int(st.get("finalized_count", 0)) + (1 if conf == "finalized" else 0)
+        st["reconciled_count"] = int(st.get("reconciled_count", 0)) + (1 if chain == "live_confirmed_reconciled" else 0)
+        st["promoted_quote_mismatch_count"] = int(st.get("promoted_quote_mismatch_count", 0)) + (1 if promoted and mm else 0)
+        vals = list(st.get("_slippage_vals") or [])
+        if slip is not None:
+            vals.append(float(slip))
+        st["_slippage_vals"] = vals
+        by_fp[fp] = st
+
+    rows_out: list[dict[str, Any]] = []
+    for fp, st in by_fp.items():
+        promoted_count = int(st.get("promoted_count", 0) or 0)
+        reconciled_count = int(st.get("reconciled_count", 0) or 0)
+        mismatch_count = int(st.get("promoted_quote_mismatch_count", 0) or 0)
+        slips = [float(v) for v in list(st.get("_slippage_vals") or [])]
+        rows_out.append(
+            {
+                "exit_policy_fingerprint": fp,
+                "exit_policy_label": str(st.get("exit_policy_label") or ""),
+                "rows_total": int(st.get("rows_total", 0) or 0),
+                "promoted_count": promoted_count,
+                "finalized_count": int(st.get("finalized_count", 0) or 0),
+                "reconciled_count": reconciled_count,
+                "promoted_reconciled_rate": _rate(reconciled_count, promoted_count),
+                "promoted_quote_mismatch_rate": _rate(mismatch_count, promoted_count),
+                "avg_slippage_bps": (round(sum(slips) / len(slips), 6) if slips else None),
+                "worst_slippage_bps": (round(max(slips), 6) if slips else None),
+            }
+        )
+    rows_out.sort(key=lambda x: (-(x.get("promoted_reconciled_rate") or 0.0), (x.get("promoted_quote_mismatch_rate") or 1.0), str(x.get("exit_policy_fingerprint") or "")))
+    return {
+        "ok": True,
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "rows_total": len(scored_rows),
+        "exit_policy_outcomes": rows_out,
+    }
+
+
+def build_live_pilot_token_memory_weighted_outcome_summary(
+    rows: list[dict[str, Any]],
+    *,
+    policy_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    scored_rows = [dict(r) for r in list(rows or []) if isinstance(r, dict) and str(r.get("event_type") or "") == "live_pilot_scored_candidate_outcome"]
+    policy = dict(policy_config or {})
+    half_life_days = float(_to_float_or_none(policy.get("half_life_days")) or 7.0)
+    min_weight_to_report = float(_to_float_or_none(policy.get("min_weight_to_report")) or 0.01)
+    now_ts = datetime.now(timezone.utc).timestamp()
+
+    def _rate(n: float, d: float) -> float | None:
+        return (round(float(n) / float(d), 6) if d > 0 else None)
+
+    token_stats: dict[str, dict[str, Any]] = {}
+    ln2 = 0.6931471805599453
+    for r in scored_rows:
+        cand = dict(r.get("candidate") or {})
+        out = dict(r.get("outcome") or {})
+        tok = str(cand.get("token_address") or "")
+        if not tok:
+            continue
+        ts = str(r.get("timestamp_utc") or "")
+        try:
+            age_seconds = max(0.0, now_ts - datetime.fromisoformat(ts).timestamp()) if ts else 0.0
+        except Exception:
+            age_seconds = 0.0
+        age_days = age_seconds / 86400.0
+        weight = float(pow(2.0, -(age_days / max(half_life_days, 0.001))))
+        promoted = bool(cand.get("promoted", False))
+        conf = str(out.get("confirmation_status") or "")
+        chain = str(out.get("chain_outcome_class") or "")
+        mm = bool(out.get("quote_vs_settlement_mismatch", False))
+        score_total = float(_to_float_or_none(cand.get("score_total")) or 0.0)
+        st = dict(token_stats.get(tok) or {"token_address": tok, "rows_weighted": 0.0, "promoted_weighted": 0.0, "finalized_weighted": 0.0, "reconciled_weighted": 0.0, "promoted_mismatch_weighted": 0.0, "last_score_total": None})
+        st["rows_weighted"] = float(st.get("rows_weighted", 0.0)) + weight
+        st["promoted_weighted"] = float(st.get("promoted_weighted", 0.0)) + (weight if promoted else 0.0)
+        st["finalized_weighted"] = float(st.get("finalized_weighted", 0.0)) + (weight if conf == "finalized" else 0.0)
+        st["reconciled_weighted"] = float(st.get("reconciled_weighted", 0.0)) + (weight if chain == "live_confirmed_reconciled" else 0.0)
+        st["promoted_mismatch_weighted"] = float(st.get("promoted_mismatch_weighted", 0.0)) + (weight if promoted and mm else 0.0)
+        st["last_score_total"] = round(score_total, 6)
+        token_stats[tok] = st
+
+    rows_out: list[dict[str, Any]] = []
+    for tok, st in token_stats.items():
+        rows_weighted = float(st.get("rows_weighted", 0.0) or 0.0)
+        promoted_weighted = float(st.get("promoted_weighted", 0.0) or 0.0)
+        if rows_weighted < min_weight_to_report:
+            continue
+        rows_out.append(
+            {
+                "token_address": tok,
+                "rows_weighted": round(rows_weighted, 6),
+                "promoted_weighted": round(promoted_weighted, 6),
+                "finalized_weighted": round(float(st.get("finalized_weighted", 0.0) or 0.0), 6),
+                "reconciled_weighted": round(float(st.get("reconciled_weighted", 0.0) or 0.0), 6),
+                "promoted_mismatch_weighted": round(float(st.get("promoted_mismatch_weighted", 0.0) or 0.0), 6),
+                "promoted_reconciled_rate_weighted": _rate(float(st.get("reconciled_weighted", 0.0) or 0.0), promoted_weighted),
+                "promoted_quote_mismatch_rate_weighted": _rate(float(st.get("promoted_mismatch_weighted", 0.0) or 0.0), promoted_weighted),
+                "last_score_total": st.get("last_score_total"),
+            }
+        )
+    rows_out.sort(key=lambda x: (-(x.get("rows_weighted") or 0.0), str(x.get("token_address") or "")))
+    promoted_weighted_total = sum(float(x.get("promoted_weighted") or 0.0) for x in rows_out)
+    reconciled_weighted_total = sum(float(x.get("reconciled_weighted") or 0.0) for x in rows_out)
+    mismatch_weighted_total = sum(float(x.get("promoted_mismatch_weighted") or 0.0) for x in rows_out)
+    return {
+        "ok": True,
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "rows_total": len(scored_rows),
+        "tokens_total": len(rows_out),
+        "policy": {"half_life_days": half_life_days, "min_weight_to_report": min_weight_to_report},
+        "aggregate_weighted": {
+            "promoted_reconciled_rate_weighted": _rate(reconciled_weighted_total, promoted_weighted_total),
+            "promoted_quote_mismatch_rate_weighted": _rate(mismatch_weighted_total, promoted_weighted_total),
+            "promoted_weighted_total": round(promoted_weighted_total, 6),
+        },
+        "token_outcomes_weighted": rows_out,
+    }
+
+
+def recommend_live_pilot_entry_rule_config_from_feedback(
+    *,
+    calibration_summary: dict[str, Any] | None,
+    score_band_outcome_summary: dict[str, Any] | None = None,
+    token_memory_weighted_summary: dict[str, Any] | None = None,
+    base_entry_rule_config: dict[str, Any] | None = None,
+    policy_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    base = dict(base_entry_rule_config or {})
+    cfg = dict(base)
+    policy = dict(policy_config or {})
+    min_history_rows = int(_to_int_or_none(policy.get("min_history_rows")) or 10)
+    max_mismatch_rate = _to_float_or_none(policy.get("max_promoted_quote_mismatch_rate"))
+    if max_mismatch_rate is None:
+        max_mismatch_rate = 0.30
+    min_reconciled_rate = _to_float_or_none(policy.get("min_promoted_reconciled_rate"))
+    if min_reconciled_rate is None:
+        min_reconciled_rate = 0.65
+    boost_score_step = float(_to_float_or_none(policy.get("raise_min_score_step")) or 5.0)
+    reasons: list[str] = []
+    calib = dict(calibration_summary or {})
+    metrics = dict(calib.get("metrics") or {})
+    promoted_count = int(_to_int_or_none(metrics.get("promoted_count")) or 0)
+    promoted_reconciled_rate = _to_float_or_none(metrics.get("promoted_reconciled_rate"))
+    promoted_mm_count = int(_to_int_or_none(metrics.get("promoted_quote_mismatch_count")) or 0)
+    mismatch_rate = (float(promoted_mm_count) / float(promoted_count)) if promoted_count > 0 else None
+
+    current_min_score = float(_to_float_or_none(cfg.get("min_score_total")) or 0.0)
+    current_require_probe_ok = bool(cfg.get("require_probe_ok", False))
+
+    if promoted_count < min_history_rows:
+        reasons.append("insufficient_history_rows")
+    else:
+        if (mismatch_rate is not None and mismatch_rate > float(max_mismatch_rate)) or (
+            promoted_reconciled_rate is not None and promoted_reconciled_rate < float(min_reconciled_rate)
+        ):
+            cfg["min_score_total"] = round(current_min_score + boost_score_step, 6)
+            cfg["require_probe_ok"] = True
+            reasons.append("tighten_entry_gates_from_calibration")
+
+    mem = dict(token_memory_weighted_summary or {})
+    mem_agg = dict(mem.get("aggregate_weighted") or {})
+    mem_reconciled_rate = _to_float_or_none(mem_agg.get("promoted_reconciled_rate_weighted"))
+    mem_mismatch_rate = _to_float_or_none(mem_agg.get("promoted_quote_mismatch_rate_weighted"))
+    mem_promoted_weighted_total = _to_float_or_none(mem_agg.get("promoted_weighted_total"))
+    if mem_promoted_weighted_total is not None and mem_promoted_weighted_total >= 1.0:
+        if (mem_mismatch_rate is not None and mem_mismatch_rate > float(max_mismatch_rate)) or (
+            mem_reconciled_rate is not None and mem_reconciled_rate < float(min_reconciled_rate)
+        ):
+            cfg["min_score_total"] = round(float(_to_float_or_none(cfg.get("min_score_total")) or current_min_score) + boost_score_step, 6)
+            cfg["require_probe_ok"] = True
+            reasons.append("tighten_entry_gates_from_weighted_token_memory")
+
+    bands = list((score_band_outcome_summary or {}).get("score_band_outcomes") or [])
+    preferred_floor = None
+    for b in bands:
+        if not isinstance(b, dict):
+            continue
+        promoted = int(_to_int_or_none(b.get("promoted_count")) or 0)
+        if promoted <= 0:
+            continue
+        rr = _to_float_or_none(b.get("promoted_reconciled_rate"))
+        mr = _to_float_or_none(b.get("promoted_quote_mismatch_rate"))
+        lo = _to_float_or_none(b.get("score_min_inclusive"))
+        if lo is None:
+            continue
+        if rr is not None and rr >= 0.80 and (mr is None or mr <= 0.25):
+            preferred_floor = max(float(preferred_floor or lo), float(lo))
+    if preferred_floor is not None and preferred_floor > float(_to_float_or_none(cfg.get("min_score_total")) or 0.0):
+        cfg["min_score_total"] = round(float(preferred_floor), 6)
+        reasons.append("raise_min_score_to_preferred_band_floor")
+
+    return {
+        "ok": True,
+        "recommendation_version": "v1.3_entry_rule_feedback_recommendation_v1",
+        "base_entry_rule_config": base,
+        "recommended_entry_rule_config": cfg,
+        "inputs": {
+            "promoted_count": promoted_count,
+            "promoted_reconciled_rate": promoted_reconciled_rate,
+            "promoted_quote_mismatch_rate": (round(mismatch_rate, 6) if mismatch_rate is not None else None),
+            "weighted_token_memory": {
+                "promoted_reconciled_rate_weighted": mem_reconciled_rate,
+                "promoted_quote_mismatch_rate_weighted": mem_mismatch_rate,
+                "promoted_weighted_total": mem_promoted_weighted_total,
+            },
+            "policy_config": {
+                "min_history_rows": min_history_rows,
+                "max_promoted_quote_mismatch_rate": max_mismatch_rate,
+                "min_promoted_reconciled_rate": min_reconciled_rate,
+                "raise_min_score_step": boost_score_step,
+            },
+        },
+        "recommendation_reasons": reasons,
+    }
+
+
+def recommend_live_pilot_score_band_gate_from_outcomes(
+    score_band_outcome_summary: dict[str, Any] | None,
+    *,
+    base_min_score_total: float = 10.0,
+    policy_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    summary = dict(score_band_outcome_summary or {})
+    bands = [dict(x) for x in list(summary.get("score_band_outcomes") or []) if isinstance(x, dict)]
+    policy = dict(policy_config or {})
+    min_band_promoted_count = int(_to_int_or_none(policy.get("min_band_promoted_count")) or 2)
+    min_band_reconciled_rate = float(_to_float_or_none(policy.get("min_band_reconciled_rate")) or 0.75)
+    max_band_quote_mismatch_rate = float(_to_float_or_none(policy.get("max_band_quote_mismatch_rate")) or 0.35)
+    fallback_raise_step = float(_to_float_or_none(policy.get("fallback_raise_step")) or 2.0)
+    min_floor = float(_to_float_or_none(policy.get("min_floor")) or 0.0)
+    reasons: list[str] = []
+
+    recommended_min_score_total = float(base_min_score_total)
+    selected_band = None
+    candidate_bands: list[dict[str, Any]] = []
+    promoted_total = 0
+    mismatch_total = 0
+
+    for b in bands:
+        promoted = int(_to_int_or_none(b.get("promoted_count")) or 0)
+        rr = _to_float_or_none(b.get("promoted_reconciled_rate"))
+        mr = _to_float_or_none(b.get("promoted_quote_mismatch_rate"))
+        lo = _to_float_or_none(b.get("score_min_inclusive"))
+        if lo is None:
+            continue
+        promoted_total += promoted
+        mismatch_total += int(_to_int_or_none(b.get("promoted_quote_mismatch_count")) or 0)
+        if promoted < min_band_promoted_count:
+            continue
+        if rr is None or rr < min_band_reconciled_rate:
+            continue
+        if mr is not None and mr > max_band_quote_mismatch_rate:
+            continue
+        candidate_bands.append({"band": str(b.get("band") or ""), "score_min_inclusive": float(lo), "promoted_reconciled_rate": rr, "promoted_quote_mismatch_rate": mr, "promoted_count": promoted})
+
+    if candidate_bands:
+        candidate_bands.sort(key=lambda x: (x.get("score_min_inclusive", 0.0), x.get("promoted_reconciled_rate", 0.0), -(x.get("promoted_quote_mismatch_rate") or 0.0)))
+        best = dict(candidate_bands[-1])
+        recommended_min_score_total = max(recommended_min_score_total, float(best.get("score_min_inclusive", recommended_min_score_total)))
+        selected_band = str(best.get("band") or "")
+        reasons.append("raise_min_score_from_best_score_band_outcomes")
+    else:
+        mismatch_rate = (float(mismatch_total) / float(promoted_total)) if promoted_total > 0 else None
+        if mismatch_rate is not None and mismatch_rate > max_band_quote_mismatch_rate:
+            recommended_min_score_total = float(recommended_min_score_total) + float(fallback_raise_step)
+            reasons.append("raise_min_score_from_global_mismatch_rate")
+        else:
+            reasons.append("no_score_band_floor_change")
+
+    if recommended_min_score_total < min_floor:
+        recommended_min_score_total = float(min_floor)
+
+    return {
+        "ok": True,
+        "recommendation_version": "v1.3_score_band_gate_recommendation_v1",
+        "recommended_min_score_total": round(float(recommended_min_score_total), 6),
+        "selected_band": selected_band,
+        "candidate_bands_considered": candidate_bands,
+        "inputs": {
+            "base_min_score_total": float(base_min_score_total),
+            "promoted_total": int(promoted_total),
+            "promoted_quote_mismatch_total": int(mismatch_total),
+            "policy_config": {
+                "min_band_promoted_count": min_band_promoted_count,
+                "min_band_reconciled_rate": min_band_reconciled_rate,
+                "max_band_quote_mismatch_rate": max_band_quote_mismatch_rate,
+                "fallback_raise_step": fallback_raise_step,
+                "min_floor": min_floor,
+            },
+        },
+        "recommendation_reasons": reasons,
+    }
+
+
+def recommend_live_pilot_exit_policy_fingerprint_from_outcomes(
+    exit_policy_outcome_correlation_summary: dict[str, Any] | None,
+    *,
+    policy_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    summary = dict(exit_policy_outcome_correlation_summary or {})
+    rows = [dict(x) for x in list(summary.get("exit_policy_outcomes") or []) if isinstance(x, dict)]
+    policy = dict(policy_config or {})
+    min_promoted_count = int(_to_int_or_none(policy.get("min_promoted_count")) or 2)
+    min_reconciled_rate = float(_to_float_or_none(policy.get("min_reconciled_rate")) or 0.65)
+    max_quote_mismatch_rate = float(_to_float_or_none(policy.get("max_quote_mismatch_rate")) or 0.35)
+    max_avg_slippage_bps = _to_float_or_none(policy.get("max_avg_slippage_bps"))
+    reasons: list[str] = []
+    eligible: list[dict[str, Any]] = []
+
+    for r in rows:
+        promoted = int(_to_int_or_none(r.get("promoted_count")) or 0)
+        rr = _to_float_or_none(r.get("promoted_reconciled_rate"))
+        mr = _to_float_or_none(r.get("promoted_quote_mismatch_rate"))
+        avg_slip = _to_float_or_none(r.get("avg_slippage_bps"))
+        if promoted < min_promoted_count:
+            continue
+        if rr is None or rr < min_reconciled_rate:
+            continue
+        if mr is not None and mr > max_quote_mismatch_rate:
+            continue
+        if max_avg_slippage_bps is not None and avg_slip is not None and avg_slip > float(max_avg_slippage_bps):
+            continue
+        eligible.append(dict(r))
+
+    recommended_fp = ""
+    recommended_label = ""
+    if eligible:
+        def _sort_key(x: dict[str, Any]) -> tuple[float, float, float, int]:
+            rr = _to_float_or_none(x.get("promoted_reconciled_rate"))
+            mr = _to_float_or_none(x.get("promoted_quote_mismatch_rate"))
+            avg_slip = _to_float_or_none(x.get("avg_slippage_bps"))
+            promoted = int(_to_int_or_none(x.get("promoted_count")) or 0)
+            return (
+                -(float(rr) if rr is not None else 0.0),
+                (float(mr) if mr is not None else 1.0),
+                (float(avg_slip) if avg_slip is not None else 1_000_000.0),
+                -promoted,
+            )
+        eligible.sort(
+            key=_sort_key
+        )
+        top = dict(eligible[0])
+        recommended_fp = str(top.get("exit_policy_fingerprint") or "")
+        recommended_label = str(top.get("exit_policy_label") or "")
+        reasons.append("select_exit_policy_from_best_live_outcomes")
+    else:
+        reasons.append("no_exit_policy_meets_feedback_thresholds")
+
+    return {
+        "ok": True,
+        "recommendation_version": "v1.3_exit_policy_feedback_recommendation_v1",
+        "recommended_exit_policy_fingerprint": recommended_fp,
+        "recommended_exit_policy_label": recommended_label,
+        "eligible_exit_policies": eligible,
+        "inputs": {
+            "rows_total": len(rows),
+            "policy_config": {
+                "min_promoted_count": min_promoted_count,
+                "min_reconciled_rate": min_reconciled_rate,
+                "max_quote_mismatch_rate": max_quote_mismatch_rate,
+                "max_avg_slippage_bps": max_avg_slippage_bps,
+            },
+        },
+        "recommendation_reasons": reasons,
     }
 
 

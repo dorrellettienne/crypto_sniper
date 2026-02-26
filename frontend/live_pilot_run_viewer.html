@@ -150,7 +150,7 @@
     <section class="hero">
       <p class="eyebrow">Live Pilot Viewer</p>
       <h1>No-Send vs Live Run Status</h1>
-      <p class="sub">Load a run JSON (live receipt, daily packet, scored discovery report, calibration trend summary, or website API payload) to render a clear operator-facing view showing what the run proves, what it does not prove, and whether any transaction was actually submitted.</p>
+      <p class="sub">Load a run JSON (live receipt, daily packet, scored discovery report, calibration/strategy trend summary, strategy decision trace, or website API payload) to render a clear operator-facing view showing what the run proves, what it does not prove, and whether any transaction was actually submitted.</p>
       <div class="controls">
         <div id="dropzone" class="dropzone" role="button" tabindex="0" aria-label="Load run JSON">
           <span><strong>Drop a run JSON here</strong> or load the sample</span>
@@ -164,7 +164,7 @@
     </section>
 
     <div id="empty" class="empty">
-      Waiting for a run JSON payload. This viewer supports live receipts, daily packets, scored discovery reports, calibration trend summaries, and the original run schema.
+      Waiting for a run JSON payload. This viewer supports live receipts, daily packets, V1.2/V1.3 strategy reports, trend summaries, and the original run schema.
     </div>
 
     <section id="dashboard" class="dashboard" hidden>
@@ -234,6 +234,11 @@
       </div>
 
       <div class="card span-12">
+        <div class="label">Adaptive Feedback Engine</div>
+        <div id="adaptive-rows" class="stack"></div>
+      </div>
+
+      <div class="card span-12">
         <div class="label">Artifacts</div>
         <div id="artifacts-list" class="artifact-list"></div>
       </div>
@@ -266,6 +271,7 @@
       providerHealth: document.getElementById("provider-health"),
       transactionCard: document.getElementById("transaction-card"),
       safetyRows: document.getElementById("safety-rows"),
+      adaptiveRows: document.getElementById("adaptive-rows"),
       artifactsList: document.getElementById("artifacts-list"),
       rawJson: document.getElementById("raw-json"),
     };
@@ -549,6 +555,189 @@
         };
       }
 
+      // V1.3 strategy decision trace report schema
+      if (p.report_version === "v1.3_strategy_decision_trace_report_v1" && p.strategy_decision_trace && p.supervised_entry_promotion_guard) {
+        const trace = (p.strategy_decision_trace && typeof p.strategy_decision_trace === "object") ? p.strategy_decision_trace : {};
+        const tSummary = (trace.summary && typeof trace.summary === "object") ? trace.summary : {};
+        const guard = (p.supervised_entry_promotion_guard && typeof p.supervised_entry_promotion_guard === "object") ? p.supervised_entry_promotion_guard : {};
+        const gSummary = (guard.summary && typeof guard.summary === "object") ? guard.summary : {};
+        const promoted = Array.isArray(gSummary.promoted_token_addresses) ? gSummary.promoted_token_addresses : [];
+        const exitValidation = ((((trace.exit_policy || {}).validation) && typeof ((trace.exit_policy || {}).validation) === "object") ? ((trace.exit_policy || {}).validation) : {});
+        return {
+          run_id: `strategy_trace:${(promoted[0] || "none").slice(0, 12)}`,
+          timestamp_unix_ms: Date.parse(trace.generated_at_utc || "") || null,
+          execution_mode: "no_send",
+          execution_stage: "strategy_decision_trace",
+          network: "solana",
+          status: "completed",
+          summary: {
+            candidates_total: tSummary.candidates_total ?? 0,
+            entry_candidates_enter: tSummary.entry_candidates_enter ?? 0,
+            entry_candidates_skip: tSummary.entry_candidates_skip ?? 0,
+            guard_candidates_promoted: gSummary.candidates_promoted ?? 0,
+            promoted_token_addresses: promoted.join(", "),
+            exit_policy_valid: tSummary.exit_policy_valid,
+            exit_policy_summary: tSummary.exit_policy_summary,
+            guard_reject_reason_counts: JSON.stringify(gSummary.reject_reason_counts || {}),
+            entry_adaptive_enabled: p.entry_rule_adaptive_enabled,
+            exit_policy_adaptive_enabled: p.exit_policy_adaptive_enabled,
+            exit_policy_selected_from_feedback: p.exit_policy_selected_from_feedback,
+            entry_recommended_min_score_total: (((p.entry_feedback_recommendation || {}).recommended_entry_rule_config || {}).min_score_total ?? null),
+            score_band_recommended_min_score_total: ((p.score_band_gate_recommendation || {}).recommended_min_score_total ?? null),
+            entry_recommendation_reasons: JSON.stringify((p.entry_feedback_recommendation || {}).recommendation_reasons || []),
+            score_band_recommendation_reasons: JSON.stringify((p.score_band_gate_recommendation || {}).recommendation_reasons || []),
+            exit_policy_recommended_label: ((p.exit_policy_feedback_recommendation || {}).recommended_exit_policy_label ?? ""),
+            exit_policy_recommendation_reasons: JSON.stringify((p.exit_policy_feedback_recommendation || {}).recommendation_reasons || []),
+            token_memory_promoted_reconciled_rate_weighted: (((p.token_memory_weighted_summary || {}).aggregate_weighted || {}).promoted_reconciled_rate_weighted ?? null),
+            token_memory_promoted_quote_mismatch_rate_weighted: (((p.token_memory_weighted_summary || {}).aggregate_weighted || {}).promoted_quote_mismatch_rate_weighted ?? null),
+            promotion_gate_status: (gSummary.candidates_promoted || 0) > 0 ? "pass" : "hold",
+            live_launch_guard_status: "n/a"
+          },
+          transaction: {
+            submitted: false,
+            signature: null,
+            finalized: false,
+            fee_lamports: null,
+            realized_slippage_bps: null,
+            reconciliation_status: null
+          },
+          artifacts: {
+            strategy_decision_trace_json: "data/exports/strategy_decision_trace.json",
+            strategy_decision_trace_md: "data/exports/strategy_decision_trace.md"
+          },
+          explainability: {
+            what_this_proves: [
+              "Scored candidates were evaluated by V1.3 entry rules",
+              "Exit policy validity was checked before promotion",
+              "A supervised live promotion guard decision was produced"
+            ],
+            what_this_does_not_prove: [
+              "Live trade execution or PnL",
+              "That the strategy rules are profitable over many runs"
+            ]
+          },
+          _source: "strategy_decision_trace_report",
+          _raw: p
+        };
+      }
+
+      // V1.3 strategy trace trend summary schema
+      if (p.report_version === "v1.3_strategy_decision_trace_trend_summary_v1" && p.overall) {
+        const overall = (p.overall && typeof p.overall === "object") ? p.overall : {};
+        const counts = (overall.counts && typeof overall.counts === "object") ? overall.counts : {};
+        return {
+          run_id: `strategy_trend:${String(p.group_by || "date")}`,
+          timestamp_unix_ms: Date.parse(p.generated_at_utc || "") || null,
+          execution_mode: "no_send",
+          execution_stage: "strategy_trace_trend_summary",
+          network: "solana",
+          status: p.ok ? "completed" : "error",
+          summary: {
+            rows_total: p.rows_total ?? 0,
+            periods_total: Array.isArray(p.periods) ? p.periods.length : 0,
+            traces_total: overall.traces_total ?? 0,
+            candidates_total: overall.candidates_total ?? 0,
+            enter_total: overall.enter_total ?? 0,
+            guard_promoted_total: overall.guard_promoted_total ?? 0,
+            exit_policy_invalid_total: overall.exit_policy_invalid_total ?? 0,
+            guard_reject_reason_counts: JSON.stringify(counts.guard_reject_reason_counts || {}),
+            promotion_gate_status: "n/a",
+            live_launch_guard_status: "n/a"
+          },
+          transaction: {
+            submitted: false,
+            signature: null,
+            finalized: false,
+            fee_lamports: null,
+            realized_slippage_bps: null,
+            reconciliation_status: null
+          },
+          artifacts: {
+            strategy_trace_trend_summary_json: "data/exports/strategy_decision_trace_trend_summary.json",
+            strategy_trace_trend_summary_md: "data/exports/strategy_decision_trace_trend_summary.md"
+          },
+          explainability: {
+            what_this_proves: [
+              "Strategy decision traces are being accumulated over time",
+              "Entry/guard behavior can be monitored by period or run label",
+              "Rule tuning can be guided by strategy decision telemetry"
+            ],
+            what_this_does_not_prove: [
+              "Execution outcomes or profitability without linking live receipts",
+              "A predictive model is learning automatically"
+            ]
+          },
+          _source: "strategy_decision_trace_trend_summary",
+          _raw: p
+        };
+      }
+
+      // V1.3 strategy decision review packet schema
+      if (p.report_version === "v1.3_strategy_decision_review_packet_v1" && p.summary && p.strategy_decision_trace_report) {
+        const s = (p.summary && typeof p.summary === "object") ? p.summary : {};
+        const promoted = Array.isArray(s.guard_promoted_token_addresses) ? s.guard_promoted_token_addresses : [];
+        return {
+          run_id: `strategy_review:${(promoted[0] || "none").slice(0, 12)}`,
+          timestamp_unix_ms: Date.parse(p.generated_at_utc || "") || null,
+          execution_mode: "no_send",
+          execution_stage: "strategy_review_packet",
+          network: "solana",
+          status: p.ok ? "completed" : "error",
+          summary: {
+            trace_candidates_total: s.trace_candidates_total ?? 0,
+            entry_candidates_enter: s.entry_candidates_enter ?? 0,
+            entry_candidates_skip: s.entry_candidates_skip ?? 0,
+            exit_policy_valid: s.exit_policy_valid,
+            guard_candidates_promoted: s.guard_candidates_promoted ?? 0,
+            promoted_token_addresses: promoted.join(", "),
+            strategy_trend_traces_total: s.strategy_trend_traces_total ?? 0,
+            strategy_trend_guard_promoted_total: s.strategy_trend_guard_promoted_total ?? 0,
+            calibration_rows_total: s.calibration_rows_total ?? 0,
+            calibration_promoted_reconciled_rate: s.calibration_promoted_reconciled_rate,
+            entry_adaptive_enabled: s.entry_adaptive_enabled,
+            entry_recommended_min_score_total: s.entry_recommended_min_score_total,
+            entry_recommended_require_probe_ok: s.entry_recommended_require_probe_ok,
+            entry_recommendation_reasons: JSON.stringify(s.entry_recommendation_reasons || []),
+            score_band_recommended_min_score_total: s.score_band_recommended_min_score_total,
+            score_band_recommendation_reasons: JSON.stringify(s.score_band_recommendation_reasons || []),
+            exit_policy_recommended_fingerprint: s.exit_policy_recommended_fingerprint,
+            exit_policy_recommended_label: s.exit_policy_recommended_label,
+            exit_policy_recommendation_reasons: JSON.stringify(s.exit_policy_recommendation_reasons || []),
+            token_memory_promoted_reconciled_rate_weighted: s.token_memory_promoted_reconciled_rate_weighted,
+            token_memory_promoted_quote_mismatch_rate_weighted: s.token_memory_promoted_quote_mismatch_rate_weighted,
+            promotion_gate_status: (s.guard_candidates_promoted || 0) > 0 ? "pass" : "hold",
+            live_launch_guard_status: "n/a"
+          },
+          transaction: {
+            submitted: false,
+            signature: null,
+            finalized: false,
+            fee_lamports: null,
+            realized_slippage_bps: null,
+            reconciliation_status: null
+          },
+          artifacts: {
+            strategy_decision_review_packet_json: "data/exports/strategy_decision_review_packet.json",
+            strategy_decision_review_packet_md: "data/exports/strategy_decision_review_packet.md",
+            strategy_decision_trace_json: "data/exports/strategy_decision_trace.json",
+            strategy_trace_trend_summary_json: "data/exports/strategy_decision_trace_trend_summary.json"
+          },
+          explainability: {
+            what_this_proves: [
+              "Strategy scoring, entry decisions, exit policy validation, and promotion guard outputs were combined into one review packet",
+              "Strategy trend and calibration trend snapshots can be reviewed together",
+              "Operator review can happen without calling multiple scripts manually"
+            ],
+            what_this_does_not_prove: [
+              "Live execution outcomes or profitability by itself",
+              "That strategy thresholds are optimized"
+            ]
+          },
+          _source: "strategy_decision_review_packet",
+          _raw: p
+        };
+      }
+
       // Daily packet schema
       if (p.receipt && typeof p.receipt === "object" && p.summary && typeof p.summary === "object") {
         const receipt = p.receipt || {};
@@ -709,6 +898,13 @@
         "reconciled_count",
         "rows_total",
         "periods_total",
+        "traces_total",
+        "candidates_total",
+        "entry_candidates_enter",
+        "entry_candidates_skip",
+        "guard_candidates_promoted",
+        "guard_promoted_total",
+        "exit_policy_valid",
         "promotion_gate_status",
         "operator_decision",
         "bundle_verification_status",
@@ -728,6 +924,22 @@
         ["Timestamp (unix ms)", p.timestamp_unix_ms],
         ["Source Schema", p._source || "run_view_model"]
       ]);
+
+      renderKeyValueStack(els.adaptiveRows, toRows(summary, [
+        "entry_adaptive_enabled",
+        "entry_recommended_min_score_total",
+        "entry_recommended_require_probe_ok",
+        "entry_recommendation_reasons",
+        "score_band_recommended_min_score_total",
+        "score_band_recommendation_reasons",
+        "exit_policy_adaptive_enabled",
+        "exit_policy_selected_from_feedback",
+        "exit_policy_recommended_fingerprint",
+        "exit_policy_recommended_label",
+        "exit_policy_recommendation_reasons",
+        "token_memory_promoted_reconciled_rate_weighted",
+        "token_memory_promoted_quote_mismatch_rate_weighted"
+      ]));
 
       renderArtifacts(els.artifactsList, p.artifacts);
     }

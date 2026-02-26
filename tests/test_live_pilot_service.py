@@ -8,6 +8,9 @@ from src.live.live_pilot_service import (
     _apply_live_pilot_mode_preset,
     append_live_pilot_scored_candidate_outcome_log,
     build_live_pilot_scored_discovery_report,
+    build_live_pilot_entry_rule_decisions,
+    build_live_pilot_exit_policy_schema,
+    build_live_pilot_strategy_decision_trace,
     _evaluate_live_pilot_promotion_gates,
     _extract_live_submit_economics,
     _build_live_pilot_mechanical_safety_filter_from_config,
@@ -33,6 +36,14 @@ from src.live.live_pilot_service import (
     save_adaptive_reliability_state,
     update_adaptive_reliability_state_from_campaign_report,
     build_live_pilot_scored_candidate_calibration_summary,
+    build_live_pilot_score_band_outcome_summary,
+    build_live_pilot_exit_policy_outcome_correlation_summary,
+    build_live_pilot_token_memory_weighted_outcome_summary,
+    recommend_live_pilot_exit_policy_fingerprint_from_outcomes,
+    recommend_live_pilot_score_band_gate_from_outcomes,
+    recommend_live_pilot_entry_rule_config_from_feedback,
+    validate_live_pilot_exit_policy_schema,
+    evaluate_live_pilot_supervised_entry_promotion_guard,
     write_live_pilot_scored_candidate_calibration_summary,
     build_live_pilot_daily_operator_report,
     append_live_pilot_operator_decision_log,
@@ -2064,6 +2075,282 @@ def test_append_scored_candidate_outcome_log_and_build_calibration_summary(tmp_p
     md = md_path.read_text(encoding="utf-8")
     assert "Scored Candidate Calibration Summary" in md
     assert "promoted_finalized_rate" in md
+
+
+def test_build_live_pilot_score_band_outcome_summary_and_entry_feedback_recommendation():
+    rows = [
+        {
+            "event_type": "live_pilot_scored_candidate_outcome",
+            "candidate": {"token_address": "A", "score_total": 22.0, "promoted": True},
+            "outcome": {
+                "confirmation_status": "finalized",
+                "chain_outcome_class": "live_confirmed_reconciled",
+                "quote_vs_settlement_mismatch": False,
+                "realized_slippage_bps_vs_quote": 3.2,
+            },
+        },
+        {
+            "event_type": "live_pilot_scored_candidate_outcome",
+            "candidate": {"token_address": "B", "score_total": 24.0, "promoted": True},
+            "outcome": {
+                "confirmation_status": "finalized",
+                "chain_outcome_class": "live_confirmed_reconciled",
+                "quote_vs_settlement_mismatch": False,
+                "realized_slippage_bps_vs_quote": 4.4,
+            },
+        },
+        {
+            "event_type": "live_pilot_scored_candidate_outcome",
+            "candidate": {"token_address": "C", "score_total": 8.0, "promoted": True},
+            "outcome": {
+                "confirmation_status": "confirmed",
+                "chain_outcome_class": "live_confirmation_inconclusive",
+                "quote_vs_settlement_mismatch": True,
+                "realized_slippage_bps_vs_quote": 18.0,
+            },
+        },
+    ]
+    calib = build_live_pilot_scored_candidate_calibration_summary(rows)
+    bands = build_live_pilot_score_band_outcome_summary(rows)
+    assert bands["ok"] is True
+    assert bands["rows_total"] == 3
+    band_map = {b["band"]: b for b in bands["score_band_outcomes"]}
+    assert band_map["20_plus"]["promoted_count"] == 2
+    rec = recommend_live_pilot_entry_rule_config_from_feedback(
+        calibration_summary=calib,
+        score_band_outcome_summary=bands,
+        base_entry_rule_config={"min_score_total": 10.0, "require_probe_ok": False},
+        policy_config={"min_history_rows": 1, "max_promoted_quote_mismatch_rate": 0.8, "min_promoted_reconciled_rate": 0.0},
+    )
+    assert rec["ok"] is True
+    # High-quality 20_plus band should raise score floor when adaptive recommendation is applied.
+    assert rec["recommended_entry_rule_config"]["min_score_total"] >= 20.0
+    assert "raise_min_score_to_preferred_band_floor" in rec["recommendation_reasons"]
+
+
+def test_build_live_pilot_exit_policy_outcome_correlation_summary_groups_by_fingerprint():
+    rows = [
+        {
+            "event_type": "live_pilot_scored_candidate_outcome",
+            "candidate": {"token_address": "A", "promoted": True, "score_total": 12.0},
+            "context": {"exit_policy_fingerprint": "fp1", "exit_policy_label": "v1"},
+            "outcome": {
+                "confirmation_status": "finalized",
+                "chain_outcome_class": "live_confirmed_reconciled",
+                "quote_vs_settlement_mismatch": False,
+                "realized_slippage_bps_vs_quote": 4.0,
+            },
+        },
+        {
+            "event_type": "live_pilot_scored_candidate_outcome",
+            "candidate": {"token_address": "B", "promoted": True, "score_total": 14.0},
+            "context": {"exit_policy_fingerprint": "fp1", "exit_policy_label": "v1"},
+            "outcome": {
+                "confirmation_status": "finalized",
+                "chain_outcome_class": "live_confirmed_reconciled",
+                "quote_vs_settlement_mismatch": True,
+                "realized_slippage_bps_vs_quote": 6.0,
+            },
+        },
+        {
+            "event_type": "live_pilot_scored_candidate_outcome",
+            "candidate": {"token_address": "C", "promoted": True, "score_total": 18.0},
+            "context": {"exit_policy_fingerprint": "fp2", "exit_policy_label": "v2"},
+            "outcome": {
+                "confirmation_status": "confirmed",
+                "chain_outcome_class": "live_confirmation_inconclusive",
+                "quote_vs_settlement_mismatch": True,
+                "realized_slippage_bps_vs_quote": 20.0,
+            },
+        },
+    ]
+    out = build_live_pilot_exit_policy_outcome_correlation_summary(rows)
+    assert out["ok"] is True
+    assert out["rows_total"] == 3
+    by_fp = {r["exit_policy_fingerprint"]: r for r in out["exit_policy_outcomes"]}
+    assert "fp1" in by_fp
+    assert by_fp["fp1"]["promoted_count"] == 2
+    assert by_fp["fp1"]["promoted_reconciled_rate"] == 1.0
+
+
+def test_recommend_live_pilot_score_band_gate_from_outcomes_selects_best_band_floor():
+    score_band_summary = {
+        "score_band_outcomes": [
+            {"band": "0_10", "score_min_inclusive": 0.0, "promoted_count": 4, "promoted_reconciled_rate": 0.25, "promoted_quote_mismatch_rate": 0.75, "promoted_quote_mismatch_count": 3},
+            {"band": "10_20", "score_min_inclusive": 10.0, "promoted_count": 4, "promoted_reconciled_rate": 0.75, "promoted_quote_mismatch_rate": 0.25, "promoted_quote_mismatch_count": 1},
+            {"band": "20_plus", "score_min_inclusive": 20.0, "promoted_count": 3, "promoted_reconciled_rate": 1.0, "promoted_quote_mismatch_rate": 0.0, "promoted_quote_mismatch_count": 0},
+        ]
+    }
+    out = recommend_live_pilot_score_band_gate_from_outcomes(
+        score_band_summary,
+        base_min_score_total=10.0,
+        policy_config={"min_band_promoted_count": 2, "min_band_reconciled_rate": 0.7, "max_band_quote_mismatch_rate": 0.3},
+    )
+    assert out["ok"] is True
+    assert out["recommended_min_score_total"] == 20.0
+    assert out["selected_band"] == "20_plus"
+    assert "raise_min_score_from_best_score_band_outcomes" in out["recommendation_reasons"]
+
+
+def test_recommend_live_pilot_exit_policy_fingerprint_from_outcomes_selects_best_policy():
+    summary = {
+        "exit_policy_outcomes": [
+            {"exit_policy_fingerprint": "fp_a", "exit_policy_label": "a", "promoted_count": 2, "promoted_reconciled_rate": 0.5, "promoted_quote_mismatch_rate": 0.5, "avg_slippage_bps": 9.0},
+            {"exit_policy_fingerprint": "fp_b", "exit_policy_label": "b", "promoted_count": 4, "promoted_reconciled_rate": 1.0, "promoted_quote_mismatch_rate": 0.0, "avg_slippage_bps": 5.0},
+            {"exit_policy_fingerprint": "fp_c", "exit_policy_label": "c", "promoted_count": 3, "promoted_reconciled_rate": 1.0, "promoted_quote_mismatch_rate": 0.1, "avg_slippage_bps": 4.0},
+        ]
+    }
+    out = recommend_live_pilot_exit_policy_fingerprint_from_outcomes(
+        summary,
+        policy_config={"min_promoted_count": 2, "min_reconciled_rate": 0.7, "max_quote_mismatch_rate": 0.3},
+    )
+    assert out["ok"] is True
+    assert out["recommended_exit_policy_fingerprint"] == "fp_b"
+    assert out["recommended_exit_policy_label"] == "b"
+    assert "select_exit_policy_from_best_live_outcomes" in out["recommendation_reasons"]
+
+
+def test_build_live_pilot_token_memory_weighted_outcome_summary_returns_weighted_aggregate():
+    rows = [
+        {
+            "event_type": "live_pilot_scored_candidate_outcome",
+            "timestamp_utc": "2026-02-26T20:00:00+00:00",
+            "candidate": {"token_address": "A", "promoted": True, "score_total": 20.0},
+            "outcome": {"confirmation_status": "finalized", "chain_outcome_class": "live_confirmed_reconciled", "quote_vs_settlement_mismatch": False},
+        },
+        {
+            "event_type": "live_pilot_scored_candidate_outcome",
+            "timestamp_utc": "2026-02-26T20:00:00+00:00",
+            "candidate": {"token_address": "B", "promoted": True, "score_total": 9.0},
+            "outcome": {"confirmation_status": "confirmed", "chain_outcome_class": "live_confirmation_inconclusive", "quote_vs_settlement_mismatch": True},
+        },
+    ]
+    out = build_live_pilot_token_memory_weighted_outcome_summary(rows, policy_config={"half_life_days": 7.0})
+    assert out["ok"] is True
+    assert out["tokens_total"] == 2
+    agg = out["aggregate_weighted"]
+    assert agg["promoted_weighted_total"] is not None
+    assert agg["promoted_reconciled_rate_weighted"] is not None
+    assert agg["promoted_quote_mismatch_rate_weighted"] is not None
+
+
+def test_recommend_live_pilot_entry_rule_config_from_feedback_uses_token_memory_weighted_summary():
+    rec = recommend_live_pilot_entry_rule_config_from_feedback(
+        calibration_summary={"metrics": {"promoted_count": 25, "promoted_reconciled_rate": 0.9, "promoted_quote_mismatch_count": 1}},
+        score_band_outcome_summary={"score_band_outcomes": []},
+        token_memory_weighted_summary={"aggregate_weighted": {"promoted_weighted_total": 3.0, "promoted_reconciled_rate_weighted": 0.2, "promoted_quote_mismatch_rate_weighted": 0.8}},
+        base_entry_rule_config={"min_score_total": 10.0, "require_probe_ok": False},
+        policy_config={"min_history_rows": 1, "max_promoted_quote_mismatch_rate": 0.3, "min_promoted_reconciled_rate": 0.65, "raise_min_score_step": 5.0},
+    )
+    assert rec["ok"] is True
+    assert rec["recommended_entry_rule_config"]["min_score_total"] >= 15.0
+    assert rec["recommended_entry_rule_config"]["require_probe_ok"] is True
+    assert "tighten_entry_gates_from_weighted_token_memory" in rec["recommendation_reasons"]
+
+
+def test_build_live_pilot_entry_rule_decisions_applies_rules_and_calibration():
+    scored_report = {
+        "scoring": {
+            "scored_candidates": [
+                {"token_address": "A", "symbol": "A", "score_total": 18.0, "eligible": True, "features": {"quote_probe_status": "ok"}},
+                {"token_address": "B", "symbol": "B", "score_total": 8.0, "eligible": True, "features": {"quote_probe_status": "ok"}},
+                {"token_address": "C", "symbol": "C", "score_total": 22.0, "eligible": True, "features": {"quote_probe_status": "failed"}},
+            ]
+        }
+    }
+    calibration = {"metrics": {"promoted_count": 4, "promoted_quote_mismatch_count": 1, "promoted_reconciled_rate": 0.75}}
+    out = build_live_pilot_entry_rule_decisions(
+        scored_report,
+        entry_rule_config={"min_score_total": 10.0, "require_probe_ok": True},
+        calibration_summary=calibration,
+    )
+    assert out["entry_rule_version"] == "v1.3_entry_rule_decision_v1"
+    assert out["summary"]["candidates_enter"] == 1
+    decisions = {d["token_address"]: d for d in out["decisions"]}
+    assert decisions["A"]["enter"] is True
+    assert decisions["B"]["enter"] is False
+    assert "entry_score_below_min" in decisions["B"]["decision_reasons"]
+    assert decisions["C"]["enter"] is False
+    assert "entry_probe_not_ok" in decisions["C"]["decision_reasons"]
+
+
+def test_build_and_validate_live_pilot_exit_policy_schema():
+    policy = build_live_pilot_exit_policy_schema(
+        policy_config={
+            "take_profit_bps": 180.0,
+            "stop_loss_bps": 90.0,
+            "max_hold_seconds": 600,
+            "trailing_stop": {"enabled": True, "activation_bps": 150.0, "trail_bps": 50.0},
+        }
+    )
+    assert policy["exit_policy_version"] == "v1.3_exit_policy_schema_v1"
+    valid = validate_live_pilot_exit_policy_schema(policy)
+    assert valid["ok"] is True
+    assert valid["failed_checks"] == []
+
+    bad = dict(policy)
+    bad["take_profit_bps"] = -1.0
+    bad["trailing_stop"] = {"enabled": True, "activation_bps": 20.0, "trail_bps": 40.0}
+    invalid = validate_live_pilot_exit_policy_schema(bad)
+    assert invalid["ok"] is False
+    assert "take_profit_bps_positive" in invalid["failed_checks"]
+    assert "trailing_activation_gt_trail" in invalid["failed_checks"]
+
+
+def test_build_live_pilot_strategy_decision_trace_combines_scored_entry_and_exit():
+    scored = {
+        "report_version": "v1.2_scored_discovery_report_v1",
+        "summary": {"candidates_total": 2, "candidates_eligible": 1},
+    }
+    entry = {
+        "entry_rule_version": "v1.3_entry_rule_decision_v1",
+        "summary": {"candidates_evaluated": 2, "candidates_enter": 1, "candidates_skip": 1},
+        "decisions": [
+            {"token_address": "A", "symbol": "A", "score_total": 12.0, "decision": "enter", "enter": True, "confidence": "medium", "decision_reasons": []},
+            {"token_address": "B", "symbol": "B", "score_total": 3.0, "decision": "skip", "enter": False, "confidence": "low", "decision_reasons": ["entry_score_below_min"]},
+        ],
+    }
+    policy = build_live_pilot_exit_policy_schema()
+    valid = validate_live_pilot_exit_policy_schema(policy)
+    out = build_live_pilot_strategy_decision_trace(
+        scored_discovery_report=scored,
+        entry_rule_decisions=entry,
+        exit_policy_schema=policy,
+        exit_policy_validation=valid,
+        context={"run_label": "trace_demo"},
+    )
+    assert out["trace_version"] == "v1.3_strategy_decision_trace_v1"
+    assert out["summary"]["exit_policy_valid"] is True
+    assert out["summary"]["entry_candidates_enter"] == 1
+    rows = {r["token_address"]: r for r in out["decision_trace"]}
+    assert rows["A"]["decision"] == "enter"
+    assert rows["A"]["exit_policy_valid"] is True
+    assert rows["B"]["decision"] == "skip"
+    assert "entry_score_below_min" in rows["B"]["entry_decision_reasons"]
+
+
+def test_evaluate_live_pilot_supervised_entry_promotion_guard_applies_entry_exit_and_confidence():
+    trace = {
+        "exit_policy": {"validation": {"ok": True}},
+        "decision_trace": [
+            {"token_address": "A", "symbol": "A", "score_total": 14.0, "decision": "enter", "confidence": "high", "entry_decision_reasons": []},
+            {"token_address": "B", "symbol": "B", "score_total": 11.0, "decision": "enter", "confidence": "low", "entry_decision_reasons": []},
+            {"token_address": "C", "symbol": "C", "score_total": 9.0, "decision": "skip", "confidence": "low", "entry_decision_reasons": ["entry_score_below_min"]},
+        ],
+    }
+    out = evaluate_live_pilot_supervised_entry_promotion_guard(
+        trace,
+        guard_config={"require_confidence_at_least": "medium", "max_candidates": 1},
+    )
+    assert out["guard_version"] == "v1.3_supervised_entry_promotion_guard_v1"
+    assert out["summary"]["candidates_promoted"] == 1
+    assert out["summary"]["promoted_token_addresses"] == ["A"]
+    decisions = {d["token_address"]: d for d in out["decisions"]}
+    assert decisions["A"]["promoted"] is True
+    assert decisions["B"]["promoted"] is False
+    assert "entry_confidence_below_min" in decisions["B"]["decision_reasons"]
+    assert decisions["C"]["promoted"] is False
+    assert "entry_rule_failed" in decisions["C"]["decision_reasons"]
 
 
 def test_probe_fallback_candidates_preflight_filters_failed_probes_and_can_fail_closed():

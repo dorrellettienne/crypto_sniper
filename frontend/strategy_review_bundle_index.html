@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Strategy Review Bundles Index</title>
+  <style>
+    :root { --bg:#081018; --panel:#0f1a25; --ink:#e7f0f7; --muted:#9db2c3; --line:rgba(157,178,195,.14); --good:#34d399; --warn:#f59e0b; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:linear-gradient(180deg,#060c12,#081018); color:var(--ink); font:14px/1.4 "Segoe UI",Arial,sans-serif; }
+    .wrap { width:min(1100px,calc(100% - 24px)); margin:18px auto 28px; }
+    .hero,.card { background:rgba(15,26,37,.96); border:1px solid var(--line); border-radius:14px; }
+    .hero { padding:14px; }
+    .grid { display:grid; grid-template-columns:repeat(12,minmax(0,1fr)); gap:10px; margin-top:12px; }
+    .span-12 { grid-column:span 12; } .span-4 { grid-column:span 4; } .span-8 { grid-column:span 8; }
+    @media (max-width: 960px){ .span-4,.span-8{grid-column:span 12;} }
+    .card { padding:12px; }
+    .controls { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+    .btn { border:1px solid var(--line); background:#122131; color:var(--ink); border-radius:10px; padding:10px 12px; cursor:pointer; font-weight:600; }
+    input[type=file]{display:none;} .drop { flex:1 1 420px; border:1px dashed rgba(52,211,153,.22); border-radius:10px; padding:10px 12px; color:var(--muted); }
+    .label { color:var(--muted); text-transform:uppercase; letter-spacing:.08em; font-size:11px; margin-bottom:8px; }
+    .big { font-size:26px; font-weight:700; }
+    .bundle { border:1px solid rgba(157,178,195,.08); background:rgba(7,12,17,.45); border-radius:12px; padding:10px; margin-bottom:8px; }
+    .head { display:flex; justify-content:space-between; gap:8px; align-items:center; }
+    .pill { display:inline-block; padding:4px 8px; border-radius:999px; border:1px solid var(--line); background:rgba(12,22,31,.6); font-size:12px; }
+    .pill.good { border-color:rgba(52,211,153,.25); color:#c7f8e8; background:rgba(52,211,153,.08); }
+    .pill.warn { border-color:rgba(245,158,11,.25); color:#ffe3ba; background:rgba(245,158,11,.08); }
+    .rows{display:grid; gap:4px; margin-top:6px;} .row{display:flex; justify-content:space-between; gap:8px;} .muted{color:var(--muted);}
+    pre{margin:0; max-height:260px; overflow:auto; background:#09141d; border:1px solid rgba(157,178,195,.08); border-radius:10px; padding:10px;}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <h1 style="margin:0 0 8px;font-size:26px;">Strategy Review Bundles Index</h1>
+      <div class="muted">Load `data/exports/strategy_bundles/index.json` to browse packaged V1.3 strategy review packets.</div>
+      <div class="controls">
+        <div id="drop" class="drop">Drop `strategy_bundles/index.json` here or use Load JSON.</div>
+        <label class="btn" for="file-input">Load JSON</label>
+        <button id="load-sample" class="btn" type="button">Load Sample</button>
+      </div>
+      <input id="file-input" type="file" accept=".json,application/json">
+    </section>
+    <div class="grid">
+      <div class="card span-4">
+        <div class="label">Summary</div>
+        <div id="bundle-count" class="big">0</div>
+        <div id="summary" class="rows"></div>
+      </div>
+      <div class="card span-8">
+        <div class="label">Bundles</div>
+        <div id="bundles"></div>
+      </div>
+      <div class="card span-12">
+        <div class="label">Raw JSON</div>
+        <pre id="raw">{}</pre>
+      </div>
+    </div>
+  </div>
+  <script>
+    const els = {
+      drop: document.getElementById("drop"),
+      fileInput: document.getElementById("file-input"),
+      loadSample: document.getElementById("load-sample"),
+      bundleCount: document.getElementById("bundle-count"),
+      summary: document.getElementById("summary"),
+      bundles: document.getElementById("bundles"),
+      raw: document.getElementById("raw"),
+    };
+    const sample = { ok:true, report_version:"v1.3_strategy_review_bundles_index_v1", generated_at_utc:"2026-02-26T23:00:00Z", strategy_bundles_dir:"data/exports/strategy_bundles", bundle_count:1, bundles:[{ bundle_name:"strategy_review_20260226T230000Z", summary:{ guard_candidates_promoted:1, entry_candidates_enter:1, exit_policy_valid:true, promoted_token_addresses:["DemoToken111"], strategy_trend_traces_total:3 }, adaptive_override_audit:{ entry_adaptive_enabled:true, entry_min_score_total_base:10, entry_min_score_total_effective:20, entry_recommendation_reasons:["raise_min_score_to_preferred_band_floor"], score_band_recommended_min_score_total:20, exit_policy_adaptive_enabled:true, exit_policy_selected_from_feedback:true, exit_policy_recommended_label:"v1.3_exit_policy_schema_v1" }, strategy_decision_review_packet_json:{ path:"data/exports/strategy_bundles/.../strategy_decision_review_packet.json" }}] };
+    const esc = (v) => String(v ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+    const fmt = (v) => (v === null || v === undefined || v === "" ? "-" : String(v));
+    const row = (k,v) => `<div class="row"><span class="muted">${esc(k)}</span><span>${esc(fmt(v))}</span></div>`;
+    function render(idx){
+      const p = (idx && typeof idx === "object") ? idx : {};
+      const bundles = Array.isArray(p.bundles) ? p.bundles : [];
+      els.raw.textContent = JSON.stringify(p, null, 2);
+      els.bundleCount.textContent = String(p.bundle_count ?? bundles.length ?? 0);
+      els.summary.innerHTML = [row("Generated", p.generated_at_utc), row("Dir", p.strategy_bundles_dir), row("OK", p.ok)];
+      if (!bundles.length) { els.bundles.innerHTML = `<div class="bundle"><div class="muted">No strategy bundles found</div></div>`; return; }
+      els.bundles.innerHTML = bundles.map((b)=>{
+        const s = (b && typeof b.summary === "object") ? b.summary : {};
+        const promoted = Number(s.guard_candidates_promoted || 0);
+        const pillCls = promoted > 0 ? "pill good" : "pill warn";
+        const audit = (b && typeof b.adaptive_override_audit === "object") ? b.adaptive_override_audit : {};
+        return `<div class="bundle">
+          <div class="head"><div><strong>${esc(b.bundle_name || "-")}</strong></div><span class="${pillCls}">promoted=${esc(promoted)}</span></div>
+          <div class="rows">
+            ${row("entry_candidates_enter", s.entry_candidates_enter)}
+            ${row("exit_policy_valid", s.exit_policy_valid)}
+            ${row("promoted_token_addresses", JSON.stringify(s.promoted_token_addresses || []))}
+            ${row("strategy_trend_traces_total", s.strategy_trend_traces_total)}
+            ${row("entry_adaptive_enabled", audit.entry_adaptive_enabled)}
+            ${row("entry_min_score_total_base", audit.entry_min_score_total_base)}
+            ${row("entry_min_score_total_effective", audit.entry_min_score_total_effective)}
+            ${row("score_band_recommended_min_score_total", audit.score_band_recommended_min_score_total)}
+            ${row("entry_recommendation_reasons", JSON.stringify(audit.entry_recommendation_reasons || []))}
+            ${row("exit_policy_adaptive_enabled", audit.exit_policy_adaptive_enabled)}
+            ${row("exit_policy_selected_from_feedback", audit.exit_policy_selected_from_feedback)}
+            ${row("exit_policy_recommended_label", audit.exit_policy_recommended_label)}
+            ${row("exit_policy_recommendation_reasons", JSON.stringify(audit.exit_policy_recommendation_reasons || []))}
+            ${row("token_memory_promoted_reconciled_rate_weighted", audit.token_memory_promoted_reconciled_rate_weighted)}
+            ${row("token_memory_promoted_quote_mismatch_rate_weighted", audit.token_memory_promoted_quote_mismatch_rate_weighted)}
+            ${row("packet_json", ((b.strategy_decision_review_packet_json||{}).path || ""))}
+          </div>
+        </div>`;
+      }).join("");
+    }
+    function loadText(t){ try { render(JSON.parse(t)); } catch (e) { alert("Invalid JSON: " + e.message); } }
+    els.loadSample.addEventListener("click", ()=>render(sample));
+    els.fileInput.addEventListener("change", async (e)=>{ const f = e.target.files && e.target.files[0]; if (!f) return; loadText(await f.text()); });
+    els.drop.addEventListener("click", ()=>els.fileInput.click());
+    ["dragenter","dragover"].forEach((evt)=>els.drop.addEventListener(evt,(e)=>e.preventDefault()));
+    els.drop.addEventListener("drop", async (e)=>{ e.preventDefault(); const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]; if (!f) return; loadText(await f.text()); });
+    render({ ok:true, strategy_bundles_dir:"-", bundle_count:0, bundles:[] });
+  </script>
+</body>
+</html>
