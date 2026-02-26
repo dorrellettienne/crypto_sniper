@@ -1,5 +1,6 @@
 import argparse
 import json
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -1671,6 +1672,242 @@ def write_live_pilot_handoff_snapshot(report: dict[str, Any], path_str: str) -> 
         path.write_text(json.dumps(report, sort_keys=True, indent=2), encoding="utf-8")
 
 
+def validate_live_pilot_campaign_state(state: dict[str, Any], *, strict: bool = False) -> dict[str, Any]:
+    s = dict(state or {})
+    runs = [dict(x) for x in list(s.get("runs") or []) if isinstance(x, dict)]
+    errors: list[str] = []
+    warnings: list[str] = []
+    run_indexes = []
+    sigs = set()
+    for row in runs:
+        idx = _to_int_or_none(row.get("run_index"))
+        if idx is None:
+            errors.append("missing_run_index")
+            continue
+        run_indexes.append(int(idx))
+        sig = str(row.get("submitted_signature") or "")
+        if sig:
+            if sig in sigs:
+                warnings.append("duplicate_submitted_signature")
+            sigs.add(sig)
+    if run_indexes and sorted(run_indexes) != list(range(min(run_indexes), min(run_indexes) + len(run_indexes))):
+        errors.append("non_contiguous_run_indexes")
+    if len(run_indexes) != len(set(run_indexes)):
+        errors.append("duplicate_run_index")
+    target_runs = _to_int_or_none(s.get("target_runs"))
+    if target_runs is not None and int(target_runs) < len(runs):
+        errors.append("runs_exceed_target")
+    stop_reason = str(s.get("stop_reason") or "")
+    if stop_reason and target_runs is not None and len(runs) >= int(target_runs):
+        warnings.append("stop_reason_present_after_target_completed")
+    return {
+        "ok": (len(errors) == 0 if strict else len(errors) == 0),
+        "errors": sorted(set(errors)),
+        "warnings": sorted(set(warnings)),
+        "summary": {
+            "runs_count": len(runs),
+            "target_runs": (None if target_runs is None else int(target_runs)),
+            "stop_reason": stop_reason,
+        },
+    }
+
+
+def validate_live_pilot_schedule_state(state: dict[str, Any], *, strict: bool = False) -> dict[str, Any]:
+    s = dict(state or {})
+    sessions = [dict(x) for x in list(s.get("sessions") or []) if isinstance(x, dict)]
+    errors: list[str] = []
+    warnings: list[str] = []
+    idxs = []
+    campaign_ids = set()
+    for row in sessions:
+        idx = _to_int_or_none(row.get("session_index"))
+        if idx is None:
+            errors.append("missing_session_index")
+            continue
+        idxs.append(int(idx))
+        cid = str(row.get("campaign_id") or "")
+        if cid:
+            if cid in campaign_ids:
+                warnings.append("duplicate_campaign_id")
+            campaign_ids.add(cid)
+    if len(idxs) != len(set(idxs)):
+        errors.append("duplicate_session_index")
+    if idxs and sorted(idxs) != list(range(min(idxs), min(idxs) + len(idxs))):
+        errors.append("non_contiguous_session_indexes")
+    target_sessions = _to_int_or_none(s.get("target_sessions"))
+    if target_sessions is not None and int(target_sessions) < len(sessions):
+        errors.append("sessions_exceed_target")
+    stop_reason = str(s.get("stop_reason") or "")
+    if stop_reason and target_sessions is not None and len(sessions) >= int(target_sessions):
+        warnings.append("stop_reason_present_after_target_completed")
+    return {
+        "ok": (len(errors) == 0 if strict else len(errors) == 0),
+        "errors": sorted(set(errors)),
+        "warnings": sorted(set(warnings)),
+        "summary": {
+            "sessions_count": len(sessions),
+            "target_sessions": (None if target_sessions is None else int(target_sessions)),
+            "stop_reason": stop_reason,
+        },
+    }
+
+
+def build_live_pilot_run_manifest(*, args_namespace: Any, argv: list[str] | None = None, phase: str = "pre_run") -> dict[str, Any]:
+    args_dict = {}
+    if hasattr(args_namespace, "__dict__"):
+        args_dict = {str(k): v for k, v in vars(args_namespace).items()}
+    redacted = dict(args_dict)
+    for k in list(redacted.keys()):
+        if "token" in k.lower() and k.lower() not in {"token_address"}:
+            redacted[k] = "***"
+    return {
+        "generated_unix_ms": int(time.time() * 1000),
+        "phase": str(phase or ""),
+        "mode": str(redacted.get("mode") or ""),
+        "args": redacted,
+        "argv": [str(x) for x in list(argv or [])],
+        "repro_command": " ".join([str(x) for x in (["python", "-m", "src.live.live_pilot_service"] + list(argv or []))]),
+    }
+
+
+def write_live_pilot_run_manifest(report: dict[str, Any], path_str: str) -> None:
+    p = Path(path_str)
+    if p.suffix.lower() in {".md", ".markdown"}:
+        lines = [
+            "# Live Pilot Run Manifest",
+            "",
+            f"- generated_unix_ms: `{report.get('generated_unix_ms', 0)}`",
+            f"- phase: `{report.get('phase', '')}`",
+            f"- mode: `{report.get('mode', '')}`",
+            "",
+            "## Repro Command",
+            "",
+            f"`{report.get('repro_command', '')}`",
+        ]
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    else:
+        p.write_text(json.dumps(report, sort_keys=True, indent=2), encoding="utf-8")
+
+
+def verify_live_pilot_validation_bundle(
+    *,
+    artifact_index: dict[str, Any] | None = None,
+    artifact_index_path: str = "",
+) -> dict[str, Any]:
+    idx = dict(artifact_index or {})
+    if not idx and str(artifact_index_path or "").strip():
+        p = Path(artifact_index_path)
+        if p.exists() and p.suffix.lower() not in {".md", ".markdown"}:
+            try:
+                idx = json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                idx = {}
+    arts = dict(idx.get("artifacts") or {})
+    checks: list[dict[str, Any]] = []
+    for key in ("schedule_report", "schedule_state", "daily_operator_report", "alerts_jsonl", "operator_decision_log_jsonl"):
+        info = dict(arts.get(key) or {})
+        present = bool(info.get("present", False))
+        optional = key in {"alerts_jsonl", "operator_decision_log_jsonl"}
+        checks.append({"name": key, "ok": (present or optional), "present": present, "optional": optional, "path": str(info.get("path") or "")})
+    for key in ("campaign_reports", "campaign_states"):
+        rows = [dict(x) for x in list(arts.get(key) or []) if isinstance(x, dict)]
+        present_n = sum(1 for r in rows if bool(r.get("present", False)))
+        checks.append({"name": key, "ok": present_n == len(rows), "present_count": present_n, "total_count": len(rows)})
+    failed = [c["name"] for c in checks if not bool(c.get("ok", False))]
+    return {"status": ("pass" if not failed else "fail"), "checks": checks, "failed_checks": failed}
+
+
+def write_live_pilot_bundle_verification(report: dict[str, Any], path_str: str) -> None:
+    p = Path(path_str)
+    if p.suffix.lower() in {".md", ".markdown"}:
+        lines = ["# Live Pilot Validation Bundle Verification", "", f"- status: `{report.get('status', '')}`", ""]
+        for c in [dict(x) for x in list(report.get("checks") or []) if isinstance(x, dict)]:
+            lines.append(f"- {c.get('name','')}: `{'pass' if c.get('ok') else 'fail'}`")
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    else:
+        p.write_text(json.dumps(report, sort_keys=True, indent=2), encoding="utf-8")
+
+
+def build_live_pilot_session_timeline(
+    *,
+    schedule_report: dict[str, Any] | None = None,
+    alerts_rows: list[dict[str, Any]] | None = None,
+    operator_decision_rows: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    events: list[dict[str, Any]] = []
+    sched = dict(((schedule_report or {}).get("schedule_summary") or {}))
+    if sched:
+        events.append({"ts_unix_ms": 0, "event_type": "schedule_summary", "details": sched})
+    for sess in [dict(x) for x in list((schedule_report or {}).get("sessions") or []) if isinstance(x, dict)]:
+        csum = dict(sess.get("campaign_summary") or {})
+        events.append(
+            {
+                "ts_unix_ms": int(sess.get("session_index", 0) or 0),
+                "event_type": "campaign_session",
+                "details": {
+                    "session_index": sess.get("session_index"),
+                    "campaign_id": sess.get("campaign_id"),
+                    "stop_reason": csum.get("stop_reason"),
+                    "promotion_gate_status": dict(csum.get("promotion_gate_summary") or {}).get("status"),
+                },
+            }
+        )
+    for row in [dict(x) for x in list(alerts_rows or []) if isinstance(x, dict)]:
+        events.append(
+            {
+                "ts_unix_ms": int(row.get("ts_unix_ms", 0) or 0),
+                "event_type": "campaign_alert",
+                "details": {"alert_type": row.get("alert_type"), "level": row.get("level"), "message": row.get("message")},
+            }
+        )
+    for row in [dict(x) for x in list(operator_decision_rows or []) if isinstance(x, dict)]:
+        events.append(
+            {
+                "ts_unix_ms": int(row.get("ts_unix_ms", 0) or 0),
+                "event_type": "operator_decision",
+                "details": {"operator_id": row.get("operator_id"), "action": row.get("action"), "notes": row.get("notes")},
+            }
+        )
+    events_sorted = sorted(events, key=lambda x: (int(x.get("ts_unix_ms", 0) or 0), str(x.get("event_type") or "")))
+    breadcrumbs = [
+        e for e in events_sorted
+        if (e.get("event_type") == "campaign_alert" and str(((e.get("details") or {}).get("level") or "")).lower() == "critical")
+        or (e.get("event_type") == "operator_decision")
+        or (e.get("event_type") == "campaign_session" and str(((e.get("details") or {}).get("stop_reason") or "")))
+    ]
+    return {"event_count": len(events_sorted), "events": events_sorted, "incident_breadcrumbs": breadcrumbs}
+
+
+def write_live_pilot_session_timeline(report: dict[str, Any], path_str: str) -> None:
+    p = Path(path_str)
+    if p.suffix.lower() in {".md", ".markdown"}:
+        lines = ["# Live Pilot Session Timeline", "", f"- event_count: `{report.get('event_count', 0)}`", "", "## Incident Breadcrumbs", ""]
+        for e in [dict(x) for x in list(report.get("incident_breadcrumbs") or []) if isinstance(x, dict)]:
+            lines.append(f"- {e.get('event_type')}: `{json.dumps(e.get('details', {}), sort_keys=True)}`")
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    else:
+        p.write_text(json.dumps(report, sort_keys=True, indent=2), encoding="utf-8")
+
+
+def _read_jsonl_rows(path_str: str) -> list[dict[str, Any]]:
+    if not str(path_str or "").strip():
+        return []
+    p = Path(path_str)
+    if not p.exists():
+        return []
+    out = []
+    for line in p.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(row, dict):
+            out.append(row)
+    return out
+
+
 def _path_with_inserted_suffix(path_str: str, suffix: str) -> str:
     if not str(path_str or "").strip():
         return ""
@@ -1720,6 +1957,7 @@ def run_live_pilot_campaign_schedule(
     daily_operator_report_path: str = "",
     daily_operator_date_label: str = "",
     recommendation_config: dict[str, Any] | None = None,
+    resume_state_strict: bool = False,
     now_fn=time.time,
     sleep_fn=time.sleep,
 ) -> dict[str, Any]:
@@ -1738,6 +1976,9 @@ def run_live_pilot_campaign_schedule(
         loaded_id = str(loaded.get("schedule_id") or "")
         if loaded_id and loaded_id != schedule_id:
             raise ValueError("schedule_id does not match existing schedule state")
+        schedule_state_validation = validate_live_pilot_schedule_state(loaded, strict=bool(resume_state_strict))
+        if not bool(schedule_state_validation.get("ok", False)):
+            raise ValueError(f"invalid schedule state on resume: {','.join(list(schedule_state_validation.get('errors', []) or []))}")
         state = loaded
         state["schedule_id"] = loaded_id or schedule_id
         state["target_sessions"] = target_sessions
@@ -1798,6 +2039,8 @@ def run_live_pilot_campaign_schedule(
         "state_path": str(state_path) if state_path else "",
         "daily_operator_report": daily_report,
     }
+    if state_path and state_path.exists():
+        report["schedule_state_validation"] = validate_live_pilot_schedule_state(state, strict=False)
     if str(schedule_report_path or "").strip():
         _write_campaign_schedule_report(report, str(schedule_report_path))
         report["report_path"] = str(schedule_report_path)
@@ -1828,6 +2071,7 @@ def run_live_pilot_campaign(
     alert_on_campaign_stop: bool = False,
     initial_alerts: list[dict[str, Any]] | None = None,
     campaign_extra_summary: dict[str, Any] | None = None,
+    resume_state_strict: bool = False,
 ) -> dict[str, Any]:
     campaign_runs = int(campaign_runs)
     if campaign_runs <= 0:
@@ -1848,6 +2092,9 @@ def run_live_pilot_campaign(
         loaded_id = str(loaded.get("campaign_id") or "")
         if loaded_id and loaded_id != campaign_id:
             raise ValueError("campaign_id does not match existing campaign state")
+        campaign_state_validation = validate_live_pilot_campaign_state(loaded, strict=bool(resume_state_strict))
+        if not bool(campaign_state_validation.get("ok", False)):
+            raise ValueError(f"invalid campaign state on resume: {','.join(list(campaign_state_validation.get('errors', []) or []))}")
         state = loaded
         state["campaign_id"] = loaded_id or campaign_id
         state["target_runs"] = campaign_runs
@@ -1975,6 +2222,8 @@ def run_live_pilot_campaign(
         "state_path": str(state_path) if state_path else "",
         "alerts": alerts_emitted,
     }
+    if state_path and state_path.exists():
+        report["campaign_state_validation"] = validate_live_pilot_campaign_state(state, strict=False)
     if str(campaign_report_path or "").strip():
         _write_campaign_report(report, campaign_report_path)
         report["report_path"] = str(campaign_report_path)
@@ -3276,6 +3525,7 @@ def _main() -> int:
     p.add_argument("--campaign-state-json-path", default="")
     p.add_argument("--campaign-report-path", default="")
     p.add_argument("--resume-campaign", action="store_true")
+    p.add_argument("--resume-state-strict", action="store_true")
     p.add_argument("--alerts-jsonl-path", default="")
     p.add_argument("--alert-console", action="store_true")
     p.add_argument("--alert-webhook-url", default="")
@@ -3295,6 +3545,8 @@ def _main() -> int:
     p.add_argument("--handoff-operator-id", default="")
     p.add_argument("--handoff-notes", default="")
     p.add_argument("--restart-command-hint", default="")
+    p.add_argument("--run-manifest-path", default="")
+    p.add_argument("--run-manifest-label", default="")
     p.add_argument("--operator-decision-log-jsonl-path", default="")
     p.add_argument("--operator-decision-actor", default="")
     p.add_argument("--operator-decision-action", default="")
@@ -3307,6 +3559,8 @@ def _main() -> int:
     p.add_argument("--schedule-report-path", default="")
     p.add_argument("--resume-schedule", action="store_true")
     p.add_argument("--schedule-stop-on-campaign-stop", action="store_true")
+    p.add_argument("--bundle-verification-report-path", default="")
+    p.add_argument("--timeline-export-path", default="")
     p.add_argument("--discovery-provider-order", default="")
     p.add_argument("--fallback-candidate-list-json-path", default="")
     p.add_argument("--provider-failover-on-transport-error", action="store_true")
@@ -3345,6 +3599,15 @@ def _main() -> int:
     p.add_argument("--adapter-config-json-path", default="")
     args = p.parse_args()
     _apply_live_pilot_mode_preset(args)
+    if str(args.run_manifest_path or "").strip():
+        write_live_pilot_run_manifest(
+            build_live_pilot_run_manifest(
+                args_namespace=args,
+                argv=sys.argv[1:],
+                phase=(str(args.run_manifest_label or "") or "pre_run"),
+            ),
+            str(args.run_manifest_path),
+        )
 
     if not args.allow_unsafe_paths:
         ensure_dir_within_base(args.audit_log_dir)
@@ -3362,8 +3625,14 @@ def _main() -> int:
             ensure_dir_within_base(str(Path(args.artifact_index_path).parent))
         if args.handoff_snapshot_path:
             ensure_dir_within_base(str(Path(args.handoff_snapshot_path).parent))
+        if args.run_manifest_path:
+            ensure_dir_within_base(str(Path(args.run_manifest_path).parent))
         if args.operator_decision_log_jsonl_path:
             ensure_dir_within_base(str(Path(args.operator_decision_log_jsonl_path).parent))
+        if args.bundle_verification_report_path:
+            ensure_dir_within_base(str(Path(args.bundle_verification_report_path).parent))
+        if args.timeline_export_path:
+            ensure_dir_within_base(str(Path(args.timeline_export_path).parent))
         if args.schedule_state_json_path:
             ensure_dir_within_base(str(Path(args.schedule_state_json_path).parent))
         if args.schedule_report_path:
@@ -3747,6 +4016,7 @@ def _main() -> int:
                 campaign_state_json_path=(_path_with_inserted_suffix(str(args.campaign_state_json_path or ""), suffix) if suffix else str(args.campaign_state_json_path or "")),
                 campaign_report_path=(_path_with_inserted_suffix(str(args.campaign_report_path or ""), suffix) if suffix else str(args.campaign_report_path or "")),
                 resume_campaign=(bool(args.resume_campaign) if not suffix else False),
+                resume_state_strict=bool(args.resume_state_strict),
                 promotion_gate_config=((adapter_config or {}).get("live_pilot_promotion_gates") if isinstance(adapter_config, dict) else None),
                 stop_evaluator=_campaign_stop_evaluator_with_failover,
                 alert_emitter=campaign_alert_emitter,
@@ -3777,6 +4047,7 @@ def _main() -> int:
                 schedule_state_json_path=str(args.schedule_state_json_path or ""),
                 schedule_report_path=str(args.schedule_report_path or ""),
                 resume_schedule=bool(args.resume_schedule),
+                resume_state_strict=bool(args.resume_state_strict),
                 stop_on_campaign_stop_reason=bool(args.schedule_stop_on_campaign_stop),
                 daily_operator_report_path=str(args.daily_operator_report_path or ""),
                 daily_operator_date_label=str(args.daily_operator_date_label or ""),
@@ -3825,6 +4096,20 @@ def _main() -> int:
                         restart_command_hint=str(args.restart_command_hint or ""),
                     )
                     write_live_pilot_handoff_snapshot(handoff, str(args.handoff_snapshot_path))
+                if str(args.bundle_verification_report_path or "").strip():
+                    write_live_pilot_bundle_verification(
+                        verify_live_pilot_validation_bundle(artifact_index=artifact_index),
+                        str(args.bundle_verification_report_path),
+                    )
+                if str(args.timeline_export_path or "").strip():
+                    write_live_pilot_session_timeline(
+                        build_live_pilot_session_timeline(
+                            schedule_report=schedule,
+                            alerts_rows=_read_jsonl_rows(str(args.alerts_jsonl_path or "")),
+                            operator_decision_rows=_read_jsonl_rows(str(args.operator_decision_log_jsonl_path or "")),
+                        ),
+                        str(args.timeline_export_path),
+                    )
             cli_out = {
                 "schedule_summary": schedule.get("schedule_summary"),
                 "report_path": schedule.get("report_path", ""),
@@ -3832,6 +4117,8 @@ def _main() -> int:
                 "daily_operator_report_path": (str(args.daily_operator_report_path or "")),
                 "artifact_index_path": (str(args.artifact_index_path or "")),
                 "handoff_snapshot_path": (str(args.handoff_snapshot_path or "")),
+                "bundle_verification_report_path": (str(args.bundle_verification_report_path or "")),
+                "timeline_export_path": (str(args.timeline_export_path or "")),
             }
             print(json.dumps(cli_out, sort_keys=True))
             if bool(args.print_human_summary):
@@ -3886,6 +4173,20 @@ def _main() -> int:
                         restart_command_hint=str(args.restart_command_hint or ""),
                     )
                     write_live_pilot_handoff_snapshot(handoff, str(args.handoff_snapshot_path))
+                if str(args.bundle_verification_report_path or "").strip():
+                    write_live_pilot_bundle_verification(
+                        verify_live_pilot_validation_bundle(artifact_index=artifact_index),
+                        str(args.bundle_verification_report_path),
+                    )
+                if str(args.timeline_export_path or "").strip():
+                    write_live_pilot_session_timeline(
+                        build_live_pilot_session_timeline(
+                            schedule_report={"sessions": [{"session_index": 0, "campaign_id": str((campaign.get("campaign_summary") or {}).get("campaign_id") or ""), "campaign_summary": dict(campaign.get("campaign_summary") or {})}]},
+                            alerts_rows=_read_jsonl_rows(str(args.alerts_jsonl_path or "")),
+                            operator_decision_rows=_read_jsonl_rows(str(args.operator_decision_log_jsonl_path or "")),
+                        ),
+                        str(args.timeline_export_path),
+                    )
         cli_out = {
             "campaign_summary": campaign.get("campaign_summary"),
             "report_path": campaign.get("report_path", ""),
@@ -3893,6 +4194,8 @@ def _main() -> int:
             "daily_operator_report_path": (str(args.daily_operator_report_path or "")),
             "artifact_index_path": (str(args.artifact_index_path or "")),
             "handoff_snapshot_path": (str(args.handoff_snapshot_path or "")),
+            "bundle_verification_report_path": (str(args.bundle_verification_report_path or "")),
+            "timeline_export_path": (str(args.timeline_export_path or "")),
         }
         print(json.dumps(cli_out, sort_keys=True))
         if bool(args.print_human_summary):

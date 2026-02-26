@@ -33,6 +33,14 @@ from src.live.live_pilot_service import (
     write_live_pilot_artifact_index,
     build_live_pilot_handoff_snapshot,
     write_live_pilot_handoff_snapshot,
+    validate_live_pilot_campaign_state,
+    validate_live_pilot_schedule_state,
+    build_live_pilot_run_manifest,
+    write_live_pilot_run_manifest,
+    verify_live_pilot_validation_bundle,
+    write_live_pilot_bundle_verification,
+    build_live_pilot_session_timeline,
+    write_live_pilot_session_timeline,
     write_live_pilot_daily_operator_report,
     write_campaign_trend_report,
     run_live_pilot_service_loop,
@@ -2128,3 +2136,62 @@ def test_build_artifact_index_and_handoff_snapshot_writers(tmp_path):
     txt = h_path.read_text(encoding="utf-8")
     assert "Operator Hand-off Snapshot" in txt
     assert "Restart Recovery Checklist" in txt
+
+
+def test_resume_state_validators_detect_duplicate_indexes():
+    c = validate_live_pilot_campaign_state({"target_runs": 2, "runs": [{"run_index": 0}, {"run_index": 0}]})
+    s = validate_live_pilot_schedule_state({"target_sessions": 2, "sessions": [{"session_index": 0}, {"session_index": 0}]})
+    assert c["ok"] is False
+    assert "duplicate_run_index" in c["errors"]
+    assert s["ok"] is False
+    assert "duplicate_session_index" in s["errors"]
+
+
+def test_run_manifest_writer_redacts_tokens_and_includes_repro_command(tmp_path):
+    class _Args:
+        def __init__(self):
+            self.mode = "pilot_campaign_tiny_supervised"
+            self.token_address = "TOKEN123"
+            self.manual_submit_required_token = "secret"
+
+    m = build_live_pilot_run_manifest(args_namespace=_Args(), argv=["--mode", "pilot_campaign_tiny_supervised"], phase="pre_run")
+    assert "python -m src.live.live_pilot_service" in m["repro_command"]
+    assert m["args"]["manual_submit_required_token"] == "***"
+    p = tmp_path / "manifest.md"
+    write_live_pilot_run_manifest(m, str(p))
+    assert "Run Manifest" in p.read_text(encoding="utf-8")
+
+
+def test_bundle_verification_and_timeline_writers(tmp_path):
+    sched = tmp_path / "schedule.md"
+    sched.write_text("x", encoding="utf-8")
+    daily = tmp_path / "daily.md"
+    daily.write_text("x", encoding="utf-8")
+    idx = {
+        "artifacts": {
+            "schedule_report": {"path": str(sched), "present": True},
+            "schedule_state": {"path": str(tmp_path / "missing.json"), "present": False},
+            "daily_operator_report": {"path": str(daily), "present": True},
+            "alerts_jsonl": {"path": "", "present": False},
+            "operator_decision_log_jsonl": {"path": "", "present": False},
+            "campaign_reports": [],
+            "campaign_states": [],
+        }
+    }
+    v = verify_live_pilot_validation_bundle(artifact_index=idx)
+    assert v["status"] == "fail"
+    assert "schedule_state" in v["failed_checks"]
+    vp = tmp_path / "bundle_verify.md"
+    write_live_pilot_bundle_verification(v, str(vp))
+    assert "Validation Bundle Verification" in vp.read_text(encoding="utf-8")
+
+    timeline = build_live_pilot_session_timeline(
+        schedule_report={"schedule_summary": {"schedule_id": "s1"}, "sessions": [{"session_index": 0, "campaign_id": "c1", "campaign_summary": {"stop_reason": "x"}}]},
+        alerts_rows=[{"ts_unix_ms": 10, "alert_type": "a", "level": "critical", "message": "m"}],
+        operator_decision_rows=[{"ts_unix_ms": 20, "operator_id": "u", "action": "hold", "notes": "n"}],
+    )
+    assert timeline["event_count"] >= 3
+    assert any(e["event_type"] == "operator_decision" for e in timeline["incident_breadcrumbs"])
+    tp = tmp_path / "timeline.md"
+    write_live_pilot_session_timeline(timeline, str(tp))
+    assert "Session Timeline" in tp.read_text(encoding="utf-8")
