@@ -3909,6 +3909,148 @@ def write_live_pilot_launch_authorization_chain_freshness_summary(report: dict[s
         p.write_text(json.dumps(report, sort_keys=True, indent=2), encoding="utf-8")
 
 
+def build_live_pilot_live_test_readiness_report(
+    *,
+    launch_guard_report: dict[str, Any] | None = None,
+    launch_authorization_chain_report: dict[str, Any] | None = None,
+    launch_authorization_chain_freshness_summary: dict[str, Any] | None = None,
+    launch_authorization_chain_approval_token: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    guard = dict(launch_guard_report or {})
+    chain = dict(launch_authorization_chain_report or {})
+    chain_fresh = dict(launch_authorization_chain_freshness_summary or {})
+    chain_token = dict(launch_authorization_chain_approval_token or {})
+    checks = [
+        {"name": "guard_allow", "required": True, "ok": str(guard.get("status") or "") == "allow", "actual": str(guard.get("status") or "")},
+        {"name": "chain_ready", "required": True, "ok": str(chain.get("status") or "") == "ready", "actual": str(chain.get("status") or "")},
+        {"name": "chain_freshness_pass", "required": True, "ok": str(chain_fresh.get("status") or "") == "pass", "actual": str(chain_fresh.get("status") or "")},
+        {"name": "chain_approval_token_present", "required": True, "ok": bool(chain_token), "actual": bool(chain_token)},
+        {"name": "chain_approval_token_action", "required": False, "ok": str(chain_token.get("approval_action") or "") == "approve_live_launch_chain", "actual": str(chain_token.get("approval_action") or "")},
+    ]
+    failed_required = [c["name"] for c in checks if bool(c.get("required", False)) and not bool(c.get("ok", False))]
+    status = "ready" if not failed_required else "blocked"
+    return {
+        "generated_unix_ms": int(time.time() * 1000),
+        "status": status,
+        "failed_required_checks": failed_required,
+        "summary": {
+            "guard_status": str(guard.get("status") or ""),
+            "guard_required_failed_checks": list(guard.get("required_failed_checks", []) or []),
+            "chain_status": str(chain.get("status") or ""),
+            "chain_freshness_status": str(chain_fresh.get("status") or ""),
+            "chain_report_fingerprint_sha256": str(chain.get("chain_report_fingerprint_sha256") or ""),
+            "chain_approval_token_id": str(chain_token.get("token_id") or ""),
+        },
+        "checks": checks,
+    }
+
+
+def write_live_pilot_live_test_readiness_report(report: dict[str, Any], path_str: str) -> None:
+    p = Path(path_str)
+    if p.suffix.lower() in {".md", ".markdown"}:
+        s = dict(report.get("summary") or {})
+        lines = [
+            "# Live Pilot Live-Test Readiness Report",
+            "",
+            f"- status: `{report.get('status', '')}`",
+            f"- failed_required_checks: `{', '.join(list(report.get('failed_required_checks', []) or [])) or '-'}`",
+            f"- guard_status: `{s.get('guard_status', '')}`",
+            f"- chain_status: `{s.get('chain_status', '')}`",
+            f"- chain_freshness_status: `{s.get('chain_freshness_status', '')}`",
+            f"- chain_approval_token_id: `{s.get('chain_approval_token_id', '')}`",
+            "",
+            "## Checks",
+            "",
+        ]
+        for c in [dict(x) for x in list(report.get("checks") or []) if isinstance(x, dict)]:
+            lines.append(f"- {c.get('name','')}: `{'pass' if c.get('ok') else 'fail'}` required=`{bool(c.get('required', False))}` actual=`{c.get('actual')}`")
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    else:
+        p.write_text(json.dumps(report, sort_keys=True, indent=2), encoding="utf-8")
+
+
+def build_live_pilot_supervised_live_launch_runbook(
+    *,
+    live_test_readiness_report: dict[str, Any] | None = None,
+    launch_guard_report_path: str = "",
+    launch_authorization_chain_report_path: str = "",
+    launch_authorization_chain_freshness_summary_path: str = "",
+    launch_authorization_chain_approval_token_path: str = "",
+    adapter_config_json_path: str = "",
+    token_address: str = "",
+    symbol: str = "",
+    entry_price: float | None = None,
+    usd_size: float | None = None,
+    mode: str = "",
+) -> dict[str, Any]:
+    readiness = dict(live_test_readiness_report or {})
+    readiness_summary = dict(readiness.get("summary") or {})
+    command_parts = [
+        "python -m src.live.live_pilot_service",
+        f"--token-address {token_address}" if str(token_address or "").strip() else "",
+        f"--symbol {symbol}" if str(symbol or "").strip() else "",
+        f"--entry-price {entry_price}" if entry_price is not None else "",
+        f"--usd-size {usd_size}" if usd_size is not None else "",
+        f"--mode {mode}" if str(mode or "").strip() else "",
+        "--enable-live-auto-submit-window",
+        f"--adapter-config-json-path \"{adapter_config_json_path}\"" if str(adapter_config_json_path or "").strip() else "",
+        f"--launch-authorization-chain-report-path \"{launch_authorization_chain_report_path}\"" if str(launch_authorization_chain_report_path or "").strip() else "",
+        f"--launch-authorization-chain-approval-token-path \"{launch_authorization_chain_approval_token_path}\"" if str(launch_authorization_chain_approval_token_path or "").strip() else "",
+        "--live-launch-guard-enforce",
+        "--live-launch-guard-require-authorization-chain-report",
+        "--live-launch-guard-require-authorization-chain-approval-token",
+    ]
+    launch_cmd = " ".join([x for x in command_parts if str(x).strip()])
+    checklist = [
+        {"step": "Confirm readiness report status is ready", "ok": str(readiness.get("status") or "") == "ready"},
+        {"step": "Review launch guard report", "ok": bool(str(launch_guard_report_path or "").strip())},
+        {"step": "Review chain report", "ok": bool(str(launch_authorization_chain_report_path or "").strip())},
+        {"step": "Review chain freshness summary", "ok": bool(str(launch_authorization_chain_freshness_summary_path or "").strip())},
+        {"step": "Confirm chain approval token present", "ok": bool(str(launch_authorization_chain_approval_token_path or "").strip())},
+    ]
+    return {
+        "generated_unix_ms": int(time.time() * 1000),
+        "status": ("ready" if str(readiness.get("status") or "") == "ready" else "needs_review"),
+        "readiness_status": str(readiness.get("status") or ""),
+        "readiness_failed_required_checks": list(readiness.get("failed_required_checks", []) or []),
+        "readiness_summary": readiness_summary,
+        "artifact_paths": {
+            "launch_guard_report": str(launch_guard_report_path or ""),
+            "launch_authorization_chain_report": str(launch_authorization_chain_report_path or ""),
+            "launch_authorization_chain_freshness_summary": str(launch_authorization_chain_freshness_summary_path or ""),
+            "launch_authorization_chain_approval_token": str(launch_authorization_chain_approval_token_path or ""),
+        },
+        "suggested_live_launch_command": launch_cmd,
+        "checklist": checklist,
+    }
+
+
+def write_live_pilot_supervised_live_launch_runbook(report: dict[str, Any], path_str: str) -> None:
+    p = Path(path_str)
+    if p.suffix.lower() in {".md", ".markdown"}:
+        lines = [
+            "# Supervised Live Launch Runbook",
+            "",
+            f"- status: `{report.get('status', '')}`",
+            f"- readiness_status: `{report.get('readiness_status', '')}`",
+            f"- readiness_failed_required_checks: `{', '.join(list(report.get('readiness_failed_required_checks', []) or [])) or '-'}`",
+            "",
+            "## Suggested Live Launch Command",
+            "",
+            "```powershell",
+            str(report.get("suggested_live_launch_command") or ""),
+            "```",
+            "",
+            "## Checklist",
+            "",
+        ]
+        for item in [dict(x) for x in list(report.get("checklist") or []) if isinstance(x, dict)]:
+            lines.append(f"- [{'x' if bool(item.get('ok')) else ' '}] {item.get('step','')}")
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    else:
+        p.write_text(json.dumps(report, sort_keys=True, indent=2), encoding="utf-8")
+
+
 def write_live_launch_guard_report(report: dict[str, Any], path_str: str) -> None:
     p = Path(path_str)
     if p.suffix.lower() in {".md", ".markdown"}:
@@ -5603,6 +5745,8 @@ def _main() -> int:
     p.add_argument("--launch-authorization-chain-approval-token-path", default="")
     p.add_argument("--launch-authorization-chain-approval-action", default="approve_live_launch_chain")
     p.add_argument("--launch-authorization-chain-approval-expires-seconds", type=float, default=900.0)
+    p.add_argument("--live-test-readiness-report-path", default="")
+    p.add_argument("--supervised-live-launch-runbook-path", default="")
     p.add_argument("--live-launch-guard-enforce", action="store_true")
     p.add_argument("--live-launch-guard-require-prelive", action="store_true")
     p.add_argument("--live-launch-guard-require-bundle-pass", action="store_true")
@@ -5748,6 +5892,10 @@ def _main() -> int:
             ensure_dir_within_base(str(Path(args.launch_authorization_chain_freshness_summary_path).parent))
         if args.launch_authorization_chain_approval_token_path:
             ensure_dir_within_base(str(Path(args.launch_authorization_chain_approval_token_path).parent))
+        if args.live_test_readiness_report_path:
+            ensure_dir_within_base(str(Path(args.live_test_readiness_report_path).parent))
+        if args.supervised_live_launch_runbook_path:
+            ensure_dir_within_base(str(Path(args.supervised_live_launch_runbook_path).parent))
         if args.postrun_review_packet_path:
             ensure_dir_within_base(str(Path(args.postrun_review_packet_path).parent))
         if args.archive_rotation_dir:
@@ -5963,14 +6111,47 @@ def _main() -> int:
                 ),
                 str(args.launch_authorization_chain_approval_token_path),
             )
+        chain_approval_token_obj_effective = _read_json_or_empty(str(args.launch_authorization_chain_approval_token_path or "")) or launch_authorization_chain_approval_token_obj
         if str(args.launch_authorization_chain_freshness_summary_path or "").strip():
+            chain_freshness_summary_report = build_live_pilot_launch_authorization_chain_freshness_summary(
+                launch_authorization_chain_report=(chain_report_out or launch_authorization_chain_report_obj),
+                launch_authorization_freshness_envelope=freshness_envelope_report,
+                max_chain_report_age_seconds=float(args.live_launch_guard_max_authorization_chain_report_age_seconds or 900.0),
+            )
             write_live_pilot_launch_authorization_chain_freshness_summary(
-                build_live_pilot_launch_authorization_chain_freshness_summary(
-                    launch_authorization_chain_report=(chain_report_out or launch_authorization_chain_report_obj),
-                    launch_authorization_freshness_envelope=freshness_envelope_report,
-                    max_chain_report_age_seconds=float(args.live_launch_guard_max_authorization_chain_report_age_seconds or 900.0),
-                ),
+                chain_freshness_summary_report,
                 str(args.launch_authorization_chain_freshness_summary_path),
+            )
+        else:
+            chain_freshness_summary_report = {}
+        if str(args.live_test_readiness_report_path or "").strip():
+            readiness_report = build_live_pilot_live_test_readiness_report(
+                launch_guard_report=live_guard,
+                launch_authorization_chain_report=(chain_report_out or launch_authorization_chain_report_obj),
+                launch_authorization_chain_freshness_summary=chain_freshness_summary_report,
+                launch_authorization_chain_approval_token=chain_approval_token_obj_effective,
+            )
+            write_live_pilot_live_test_readiness_report(readiness_report, str(args.live_test_readiness_report_path))
+        else:
+            readiness_report = {}
+        if str(args.supervised_live_launch_runbook_path or "").strip():
+            if not readiness_report and str(args.live_test_readiness_report_path or "").strip():
+                readiness_report = _read_json_or_empty(str(args.live_test_readiness_report_path or ""))
+            write_live_pilot_supervised_live_launch_runbook(
+                build_live_pilot_supervised_live_launch_runbook(
+                    live_test_readiness_report=readiness_report,
+                    launch_guard_report_path=str(args.live_launch_guard_report_path or ""),
+                    launch_authorization_chain_report_path=str(args.launch_authorization_chain_report_path or ""),
+                    launch_authorization_chain_freshness_summary_path=str(args.launch_authorization_chain_freshness_summary_path or ""),
+                    launch_authorization_chain_approval_token_path=str(args.launch_authorization_chain_approval_token_path or ""),
+                    adapter_config_json_path=str(args.adapter_config_json_path or ""),
+                    token_address=str(args.token_address or ""),
+                    symbol=str(args.symbol or ""),
+                    entry_price=float(args.entry_price),
+                    usd_size=float(args.usd_size),
+                    mode=str(args.mode or ""),
+                ),
+                str(args.supervised_live_launch_runbook_path),
             )
         if str(args.live_launch_guard_report_path or "").strip():
             write_live_launch_guard_report(live_guard, str(args.live_launch_guard_report_path))

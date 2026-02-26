@@ -79,6 +79,10 @@ from src.live.live_pilot_service import (
     write_live_pilot_launch_authorization_chain_freshness_summary,
     build_live_pilot_launch_authorization_chain_approval_token,
     write_live_pilot_launch_authorization_chain_approval_token,
+    build_live_pilot_live_test_readiness_report,
+    write_live_pilot_live_test_readiness_report,
+    build_live_pilot_supervised_live_launch_runbook,
+    write_live_pilot_supervised_live_launch_runbook,
     build_live_pilot_launch_authorization_freshness_envelope,
     write_live_pilot_launch_authorization_freshness_envelope,
     build_live_pilot_postrun_review_packet,
@@ -3125,3 +3129,35 @@ def test_launch_authorization_chain_fingerprint_binding_and_chain_approval_token
     )
     assert guard_bad_chain["status"] == "block"
     assert "authorization_chain_report_fingerprint_valid" in guard_bad_chain["required_failed_checks"]
+
+
+def test_live_test_readiness_report_and_runbook_export(tmp_path):
+    readiness = build_live_pilot_live_test_readiness_report(
+        launch_guard_report={"status": "allow", "required_failed_checks": []},
+        launch_authorization_chain_report={"status": "ready", "chain_report_fingerprint_sha256": "cfp"},
+        launch_authorization_chain_freshness_summary={"status": "pass"},
+        launch_authorization_chain_approval_token={"token_id": "lca_123"},
+    )
+    assert readiness["status"] == "ready"
+    md_readiness = tmp_path / "readiness.md"
+    write_live_pilot_live_test_readiness_report(readiness, str(md_readiness))
+    assert "Live-Test Readiness Report" in md_readiness.read_text(encoding="utf-8")
+
+    runbook = build_live_pilot_supervised_live_launch_runbook(
+        live_test_readiness_report=readiness,
+        launch_guard_report_path="data/exports/guard.json",
+        launch_authorization_chain_report_path="data/exports/chain.json",
+        launch_authorization_chain_freshness_summary_path="data/exports/chain_fresh.json",
+        launch_authorization_chain_approval_token_path="data/exports/chain_token.json",
+        adapter_config_json_path="config/live.json",
+        token_address="So11111111111111111111111111111111111111112",
+        symbol="WSOL",
+        entry_price=1.0,
+        usd_size=1.0,
+        mode="live_auto_tiny_one_trade",
+    )
+    assert runbook["status"] == "ready"
+    assert "--live-launch-guard-require-authorization-chain-report" in runbook["suggested_live_launch_command"]
+    md_runbook = tmp_path / "runbook.md"
+    write_live_pilot_supervised_live_launch_runbook(runbook, str(md_runbook))
+    assert "Supervised Live Launch Runbook" in md_runbook.read_text(encoding="utf-8")
