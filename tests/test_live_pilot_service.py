@@ -90,8 +90,13 @@ from src.live.live_pilot_service import (
     write_live_pilot_launch_authorization_chain_of_chain_report,
     build_live_pilot_launch_authorization_chain_of_chain_approval_token,
     write_live_pilot_launch_authorization_chain_of_chain_approval_token,
+    resolve_live_pilot_launch_authorization_chain_of_chain_approval_token_latest_state,
+    build_live_pilot_launch_authorization_chain_of_chain_approval_token_audit_summary,
+    write_live_pilot_launch_authorization_chain_of_chain_approval_token_audit_summary,
     build_live_pilot_launch_authorization_chain_of_chain_freshness_summary,
     write_live_pilot_launch_authorization_chain_of_chain_freshness_summary,
+    build_live_pilot_launch_authorization_super_chain_report,
+    write_live_pilot_launch_authorization_super_chain_report,
     build_live_pilot_live_test_readiness_report,
     write_live_pilot_live_test_readiness_report,
     build_live_pilot_supervised_live_launch_runbook,
@@ -3485,6 +3490,63 @@ def test_launch_authorization_chain_of_chain_approval_token_revocation_and_guard
     assert guard["status"] == "block"
     assert guard["authorization_chain_of_chain_approval_token_revoked"] is True
     assert "authorization_chain_of_chain_approval_token_unrevoked" in guard["required_failed_checks"]
+
+
+def test_launch_authorization_chain_of_chain_approval_token_audit_and_super_chain_report(tmp_path):
+    now_ms = int(time.time() * 1000)
+    chain2 = build_live_pilot_launch_authorization_chain_of_chain_report(
+        launch_authorization_chain_report={"status": "ready", "chain_report_fingerprint_sha256": "cfp"},
+        launch_authorization_chain_approval_token={"token_id": "lca_1", "chain_report_fingerprint_sha256": "cfp"},
+        launch_authorization_chain_approval_token_audit_summary={"token_state": {"revoked": False}},
+        live_launch_guard_report={"status": "allow", "required_failed_checks": [], "generated_unix_ms": now_ms},
+    )
+    token2 = build_live_pilot_launch_authorization_chain_of_chain_approval_token(
+        launch_authorization_chain_of_chain_report=chain2,
+        operator_id="main_user",
+        approval_action="approve_live_launch_chain_of_chain",
+        expires_in_seconds=900,
+    )
+    revoked_rows = [
+        {
+            "event_type": "live_pilot_launch_authorization_chain_of_chain_approval_token_revoked",
+            "token_id": token2["token_id"],
+            "token_fingerprint_sha256": token2["token_fingerprint_sha256"],
+            "chain_of_chain_report_fingerprint_sha256": token2["chain_of_chain_report_fingerprint_sha256"],
+            "operator_id": "main_user",
+            "approval_action": token2["approval_action"],
+            "reason": "operator_cancelled",
+            "reason_class": "operator",
+            "severity": "warning",
+            "ts_unix_ms": now_ms,
+        }
+    ]
+    state = resolve_live_pilot_launch_authorization_chain_of_chain_approval_token_latest_state(
+        approval_token=token2,
+        revoked_approval_tokens=revoked_rows,
+    )
+    assert state["revoked"] is True
+    assert state["latest_state"] == "revoked"
+
+    audit = build_live_pilot_launch_authorization_chain_of_chain_approval_token_audit_summary(
+        approval_token=token2,
+        revoked_approval_tokens=revoked_rows,
+    )
+    assert audit["token_state"]["revoked"] is True
+    md_audit = tmp_path / "chain2_approval_token_audit.md"
+    write_live_pilot_launch_authorization_chain_of_chain_approval_token_audit_summary(audit, str(md_audit))
+    assert "Chain-of-Chain Approval Token Audit" in md_audit.read_text(encoding="utf-8")
+
+    super_chain = build_live_pilot_launch_authorization_super_chain_report(
+        launch_authorization_chain_of_chain_report=chain2,
+        launch_authorization_chain_of_chain_approval_token=token2,
+        launch_authorization_chain_of_chain_approval_token_audit_summary=audit,
+        live_launch_guard_report={"status": "block", "required_failed_checks": ["authorization_chain_of_chain_approval_token_unrevoked"]},
+    )
+    assert super_chain["status"] == "blocked"
+    assert "chain_of_chain_approval_token_not_revoked" in super_chain["failed_required_checks"]
+    md_super = tmp_path / "super_chain.md"
+    write_live_pilot_launch_authorization_super_chain_report(super_chain, str(md_super))
+    assert "Super-Chain Report" in md_super.read_text(encoding="utf-8")
 
 
 def test_live_test_readiness_report_and_runbook_export(tmp_path):
