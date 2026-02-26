@@ -70,6 +70,11 @@ from src.live.live_pilot_service import (
     write_live_pilot_launch_authorization_packet_approval_token,
     list_live_pilot_launch_authorization_packet_approval_token_revocations,
     revoke_live_pilot_launch_authorization_packet_approval_token,
+    resolve_live_pilot_launch_authorization_packet_approval_token_latest_state,
+    build_live_pilot_launch_authorization_packet_approval_token_audit_summary,
+    write_live_pilot_launch_authorization_packet_approval_token_audit_summary,
+    build_live_pilot_launch_authorization_chain_report,
+    write_live_pilot_launch_authorization_chain_report,
     build_live_pilot_launch_authorization_freshness_envelope,
     write_live_pilot_launch_authorization_freshness_envelope,
     build_live_pilot_postrun_review_packet,
@@ -2959,3 +2964,62 @@ def test_launch_authorization_packet_approval_token_revocation_and_guard_unrevok
     assert guard["status"] == "block"
     assert guard["authorization_packet_approval_token_revoked"] is True
     assert "authorization_packet_approval_token_unrevoked" in guard["required_failed_checks"]
+
+
+def test_launch_authorization_packet_approval_token_audit_and_chain_report(tmp_path):
+    now_ms = int(time.time() * 1000)
+    packet = {
+        "status": "authorized",
+        "ticket_id": "t1",
+        "intent_id": "i1",
+        "packet_fingerprint_sha256": "packet_fp",
+    }
+    token = build_live_pilot_launch_authorization_packet_approval_token(
+        launch_authorization_packet=packet,
+        operator_id="main_user",
+        approval_action="approve_live_launch_packet",
+        expires_in_seconds=900,
+    )
+    revoked_rows = [
+        {
+            "event_type": "live_pilot_launch_authorization_packet_approval_token_revoked",
+            "token_id": token["token_id"],
+            "token_fingerprint_sha256": token["token_fingerprint_sha256"],
+            "authorization_packet_fingerprint_sha256": token["authorization_packet_fingerprint_sha256"],
+            "operator_id": "main_user",
+            "approval_action": token["approval_action"],
+            "reason": "operator_cancelled",
+            "reason_class": "operator",
+            "severity": "warning",
+            "ts_unix_ms": now_ms,
+        }
+    ]
+    state = resolve_live_pilot_launch_authorization_packet_approval_token_latest_state(
+        approval_token=token,
+        revoked_approval_tokens=revoked_rows,
+    )
+    assert state["revoked"] is True
+    assert state["latest_state"] == "revoked"
+
+    audit = build_live_pilot_launch_authorization_packet_approval_token_audit_summary(
+        approval_token=token,
+        revoked_approval_tokens=revoked_rows,
+    )
+    assert audit["token_state"]["revoked"] is True
+    md_audit = tmp_path / "packet_approval_token_audit.md"
+    write_live_pilot_launch_authorization_packet_approval_token_audit_summary(audit, str(md_audit))
+    assert "Approval Token Audit" in md_audit.read_text(encoding="utf-8")
+
+    chain = build_live_pilot_launch_authorization_chain_report(
+        launch_authorization_packet=packet,
+        launch_authorization_packet_approval_token=token,
+        launch_authorization_packet_approval_token_audit_summary=audit,
+        promotion_ticket_revocation_audit_summary={"ticket_state": {"effective_revoked": False}},
+        live_launch_guard_report={"status": "block", "required_failed_checks": ["authorization_packet_approval_token_unrevoked"]},
+        launch_authorization_freshness_envelope={"status": "pass"},
+    )
+    assert chain["status"] == "blocked"
+    assert "packet_approval_token_not_revoked" in chain["failed_required_checks"]
+    md_chain = tmp_path / "launch_authorization_chain.md"
+    write_live_pilot_launch_authorization_chain_report(chain, str(md_chain))
+    assert "Authorization Chain Report" in md_chain.read_text(encoding="utf-8")
