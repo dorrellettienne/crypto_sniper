@@ -36,6 +36,53 @@ def _to_int_or_none(value: Any) -> int | None:
         return None
 
 
+def _build_live_settlement_truth(
+    chain_reconciliation: dict[str, Any] | None,
+    *,
+    token_address: str | None = None,
+    symbol: str | None = None,
+) -> dict[str, Any]:
+    chain_reconciliation = dict(chain_reconciliation or {})
+    normalized = dict(chain_reconciliation.get("normalized_confirmation") or {})
+    settlement = dict(chain_reconciliation.get("settlement_summary") or {})
+    token_deltas = dict(settlement.get("token_deltas_by_mint") or {})
+    token_address = str(token_address or "").strip() or None
+    owner_token_delta_raw = _to_int_or_none(token_deltas.get(token_address)) if token_address else None
+
+    normalized_status = str(normalized.get("normalized_status") or "")
+    terminal_state = {
+        "finalized": "finalized",
+        "confirmed": "confirmed_only",
+        "dropped": "dropped",
+        "expired_blockhash": "expired",
+        "rpc_inconclusive": "rpc_inconclusive",
+    }.get(normalized_status, normalized_status or "rpc_inconclusive")
+    tx_present = bool(settlement.get("tx_present", False))
+    confidence = "truth_complete" if tx_present and terminal_state in {"finalized", "confirmed_only"} else "partial"
+
+    return {
+        "available": bool(chain_reconciliation),
+        "confidence": confidence,
+        "terminal_state": terminal_state,
+        "normalized_status": normalized_status or None,
+        "terminal": bool(normalized.get("terminal", False)),
+        "retryable": bool(normalized.get("retryable", False)),
+        "outcome_class": chain_reconciliation.get("outcome_class"),
+        "terminal_reason": chain_reconciliation.get("terminal_reason"),
+        "signature": settlement.get("signature") or chain_reconciliation.get("signature"),
+        "slot": settlement.get("slot") if settlement.get("slot") is not None else chain_reconciliation.get("slot"),
+        "tx_present": tx_present,
+        "fee_lamports": _to_int_or_none(settlement.get("fee_lamports")),
+        "net_sol_delta_lamports_total": _to_int_or_none(settlement.get("net_sol_delta_lamports_total")),
+        "token_address": token_address,
+        "symbol": symbol,
+        "owner_token_delta_raw": owner_token_delta_raw,
+        "token_deltas_by_mint": token_deltas,
+        "mismatch_flags": list(chain_reconciliation.get("mismatch_flags") or []),
+        "error_summary": chain_reconciliation.get("error_summary") or "",
+    }
+
+
 def _extract_live_submit_economics(payload: dict[str, Any], *, thresholds: dict[str, Any] | None = None) -> dict[str, Any]:
     thresholds = dict(thresholds or {})
     md = payload.get("metadata") if isinstance(payload, dict) else {}
@@ -50,6 +97,7 @@ def _extract_live_submit_economics(payload: dict[str, Any], *, thresholds: dict[
     settlement = chain.get("settlement_summary")
     if not isinstance(settlement, dict):
         return {}
+    settlement_truth = chain.get("settlement_truth") if isinstance(chain.get("settlement_truth"), dict) else {}
 
     token_address = str(md.get("token_address") or "").strip()
     token_deltas = settlement.get("token_deltas_by_mint")
@@ -95,6 +143,20 @@ def _extract_live_submit_economics(payload: dict[str, Any], *, thresholds: dict[
     quote_vs_settlement_mismatch = bool(
         out_diff_bps_signed is not None and abs(float(out_diff_bps_signed)) > float(mismatch_threshold_bps)
     )
+    mismatch_class = "none"
+    setup_overhead_likely = False
+    if quote_vs_settlement_mismatch:
+        if out_diff_bps_signed is not None and float(out_diff_bps_signed) > 0:
+            mismatch_class = "favorable_quote_beat"
+        else:
+            fee_lamports_hint = _to_int_or_none(settlement.get("fee_lamports"))
+            setup_fee_threshold_lamports = int(_to_int_or_none(thresholds.get("setup_overhead_fee_lamports_threshold")) or 100_000)
+            if fee_lamports_hint is not None and fee_lamports_hint >= setup_fee_threshold_lamports:
+                mismatch_class = "setup_overhead_likely"
+                setup_overhead_likely = True
+            else:
+                mismatch_class = "execution_or_route_variance"
+    quote_vs_settlement_mismatch_effective = bool(quote_vs_settlement_mismatch and not setup_overhead_likely)
 
     fee_lamports = _to_int_or_none(settlement.get("fee_lamports"))
     fee_usd_realized_proxy = None
@@ -121,7 +183,11 @@ def _extract_live_submit_economics(payload: dict[str, Any], *, thresholds: dict[
         "quote_vs_settlement_out_diff_bps_signed": out_diff_bps_signed,
         "realized_slippage_bps_vs_quote": realized_slippage_bps_vs_quote,
         "quote_vs_settlement_mismatch": quote_vs_settlement_mismatch,
+        "quote_vs_settlement_mismatch_effective": quote_vs_settlement_mismatch_effective,
+        "quote_vs_settlement_mismatch_class": mismatch_class,
+        "setup_overhead_likely": setup_overhead_likely,
         "quote_vs_settlement_mismatch_threshold_bps": mismatch_threshold_bps,
+        "settlement_truth_confidence": settlement_truth.get("confidence"),
     }
 
 
@@ -147,7 +213,7 @@ def _rollup_update_from_economics(rollup: dict[str, Any], economics: dict[str, A
     fee_lamports = _to_int_or_none(economics.get("fee_lamports"))
     if fee_lamports is not None:
         rollup["fee_lamports_total"] = int(rollup.get("fee_lamports_total", 0)) + int(fee_lamports)
-    if bool(economics.get("quote_vs_settlement_mismatch", False)):
+    if bool(economics.get("quote_vs_settlement_mismatch_effective", economics.get("quote_vs_settlement_mismatch", False))):
         rollup["quote_vs_settlement_mismatch_count"] = int(rollup.get("quote_vs_settlement_mismatch_count", 0)) + 1
     realized_slippage_bps = _to_float_or_none(economics.get("realized_slippage_bps_vs_quote"))
     if realized_slippage_bps is not None:
@@ -5539,6 +5605,12 @@ def _maybe_attach_live_chain_reconciliation(payload: dict[str, Any], adapter: Li
         mismatch_thresholds=cfg.get("live_send_chain_reconciliation_thresholds"),
         owner_filter=cfg.get("wallet_public_key"),
     )
+    if isinstance(dispatch.get("chain_reconciliation"), dict):
+        dispatch["chain_reconciliation"]["settlement_truth"] = _build_live_settlement_truth(
+            dispatch.get("chain_reconciliation"),
+            token_address=str(md.get("token_address") or ""),
+            symbol=str(md.get("symbol") or "") if md.get("symbol") is not None else None,
+        )
     append_audit_event(audit_log_path, "live_submit_chain_reconciliation_fetch", dict(dispatch["chain_reconciliation_fetch"]))
     append_audit_event(audit_log_path, "live_submit_chain_reconciliation", dict(dispatch["chain_reconciliation"]))
 
@@ -5560,6 +5632,16 @@ def _build_live_pilot_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "tx_signature": ((chain or {}).get("settlement_summary") or {}).get("signature"),
         "solscan_tx_url": (f"https://solscan.io/tx/{dispatch.get('submitted_signature')}" if dispatch.get("submitted_signature") else None),
     }
+    settlement_truth = (chain or {}).get("settlement_truth") if isinstance((chain or {}).get("settlement_truth"), dict) else {}
+    if settlement_truth:
+        summary["settlement_truth"] = {
+            "confidence": settlement_truth.get("confidence"),
+            "terminal_state": settlement_truth.get("terminal_state"),
+            "tx_present": settlement_truth.get("tx_present"),
+            "fee_lamports": settlement_truth.get("fee_lamports"),
+            "net_sol_delta_lamports_total": settlement_truth.get("net_sol_delta_lamports_total"),
+            "owner_token_delta_raw": settlement_truth.get("owner_token_delta_raw"),
+        }
     economics = dispatch.get("economics") if isinstance(dispatch.get("economics"), dict) else {}
     if economics:
         summary["economics"] = {
@@ -5567,6 +5649,8 @@ def _build_live_pilot_summary(payload: dict[str, Any]) -> dict[str, Any]:
             "settlement_actual_out_amount_raw": economics.get("settlement_actual_out_amount_raw"),
             "realized_slippage_bps_vs_quote": economics.get("realized_slippage_bps_vs_quote"),
             "quote_vs_settlement_mismatch": economics.get("quote_vs_settlement_mismatch"),
+            "quote_vs_settlement_mismatch_effective": economics.get("quote_vs_settlement_mismatch_effective"),
+            "quote_vs_settlement_mismatch_class": economics.get("quote_vs_settlement_mismatch_class"),
             "estimated_total_cost_usd": economics.get("estimated_total_cost_usd"),
             "estimated_slippage_usd": economics.get("estimated_slippage_usd"),
             "estimated_network_fee_usd": economics.get("estimated_network_fee_usd"),
@@ -5951,6 +6035,14 @@ def _format_human_live_pilot_summary(out: dict[str, Any]) -> str:
                 f"realized_slippage_bps={econ.get('realized_slippage_bps_vs_quote')} "
                 f"quote_mismatch={econ.get('quote_vs_settlement_mismatch')} "
                 f"fee_lamports={summary.get('fee_lamports')}"
+            )
+        truth = dict(summary.get("settlement_truth") or {})
+        if truth:
+            lines.append(
+                "last_submit_truth: "
+                f"confidence={truth.get('confidence')} "
+                f"terminal_state={truth.get('terminal_state')} "
+                f"tx_present={truth.get('tx_present')}"
             )
         if summary.get("solscan_tx_url"):
             lines.append(f"solscan: {summary.get('solscan_tx_url')}")

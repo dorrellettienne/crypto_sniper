@@ -407,8 +407,12 @@ def test_run_live_pilot_service_once_auto_attaches_chain_reconciliation_and_summ
     assert out["live_pilot_summary"]["submit_reason"] == "send_raw_transaction_submitted"
     assert out["live_pilot_summary"]["submitted_signature"] == "SIG_FINAL_1"
     assert out["live_pilot_summary"]["chain_outcome_class"] == "live_confirmed_reconciled"
+    assert out["live_pilot_summary"]["settlement_truth"]["confidence"] == "truth_complete"
+    assert out["live_pilot_summary"]["settlement_truth"]["terminal_state"] == "finalized"
     assert out["live_pilot_summary"]["economics"]["quote_expected_out_amount_raw"] == 110
     assert out["live_pilot_summary"]["economics"]["settlement_actual_out_amount_raw"] == 100
+    assert out["live_pilot_summary"]["economics"]["quote_vs_settlement_mismatch_effective"] is True
+    assert out["live_pilot_summary"]["economics"]["quote_vs_settlement_mismatch_class"] == "execution_or_route_variance"
     assert out["promotion_gate_summary"]["status"] == "fail"
     assert "min_finalized_pilots" in out["promotion_gate_summary"]["failed_checks"]
 
@@ -452,7 +456,37 @@ def test_extract_live_submit_economics_computes_quote_vs_settlement_slippage():
     assert econ["quote_vs_settlement_out_diff_raw"] == -50
     assert econ["realized_slippage_bps_vs_quote"] == 500.0
     assert econ["quote_vs_settlement_mismatch"] is True
+    assert econ["quote_vs_settlement_mismatch_effective"] is True
+    assert econ["quote_vs_settlement_mismatch_class"] == "execution_or_route_variance"
     assert econ["fee_usd_realized_proxy"] == 0.0005
+
+
+def test_extract_live_submit_economics_classifies_setup_overhead_mismatch():
+    payload = {
+        "metadata": {
+            "token_address": "TOKEN_A",
+            "symbol": "TKA",
+            "usd_size": 0.25,
+            "estimated_costs": {"out_amount": "22000"},
+            "submit_dispatch": {
+                "submitted_signature": "SIG_SETUP",
+                "chain_reconciliation": {
+                    "outcome_class": "live_confirmed_reconciled",
+                    "settlement_truth": {"confidence": "truth_complete"},
+                    "settlement_summary": {
+                        "fee_lamports": 105000,
+                        "token_deltas_by_mint": {"TOKEN_A": 21600},
+                    },
+                },
+            },
+        }
+    }
+    econ = _extract_live_submit_economics(payload, thresholds={"max_quote_to_settlement_diff_bps": 0})
+    assert econ["quote_vs_settlement_mismatch"] is True
+    assert econ["setup_overhead_likely"] is True
+    assert econ["quote_vs_settlement_mismatch_effective"] is False
+    assert econ["quote_vs_settlement_mismatch_class"] == "setup_overhead_likely"
+    assert econ["settlement_truth_confidence"] == "truth_complete"
 
 
 def test_evaluate_live_pilot_promotion_gates_pass_and_fail():
