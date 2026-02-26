@@ -2703,6 +2703,9 @@ def test_launch_authorization_freshness_envelope_and_guard_requirement(tmp_path)
             "ticket_lifecycle_timeline": now_ms - 500,
         },
     }
+    packet["packet_fingerprint_sha256"] = __import__("hashlib").sha256(
+        json.dumps({k: v for k, v in packet.items() if k != "packet_fingerprint_sha256"}, sort_keys=True).encode("utf-8")
+    ).hexdigest()
     env = build_live_pilot_launch_authorization_freshness_envelope(
         launch_authorization_packet=packet,
         max_packet_age_seconds=60.0,
@@ -2733,3 +2736,81 @@ def test_launch_authorization_freshness_envelope_and_guard_requirement(tmp_path)
     )
     assert guard_block["status"] == "block"
     assert "authorization_packet_fresh_enough" in guard_block["required_failed_checks"]
+
+
+def test_launch_authorization_packet_fingerprint_and_guard_binding_checks():
+    now_ms = int(time.time() * 1000)
+    prelive = {"status": "go", "bundle_verification_status": "pass", "generated_unix_ms": now_ms}
+    intent = build_live_pilot_launch_intent_manifest(
+        mode="live_auto_tiny_one_trade",
+        risk_profile_preset="tiny_supervised",
+        enable_live_auto_submit_window=True,
+        adapter_config={"live_send_network_enabled": True},
+        prelive_go_no_go_report=prelive,
+        expires_in_seconds=1800,
+    )
+    ticket = build_live_pilot_promotion_ticket(
+        operator_id="main_user",
+        approval_action="approve_live_test",
+        risk_profile_preset="tiny_supervised",
+        prelive_go_no_go_report=prelive,
+        launch_intent_manifest=intent,
+        expires_in_seconds=3600,
+    )
+    guard_stub = {"status": "allow", "required_failed_checks": [], "generated_unix_ms": now_ms}
+    packet = build_live_pilot_launch_authorization_packet(
+        prelive_go_no_go_report=prelive,
+        promotion_ticket=ticket,
+        launch_intent_manifest=intent,
+        live_launch_guard_report=guard_stub,
+        ticket_state_consistency_report={"status": "pass", "generated_unix_ms": now_ms},
+        revocation_audit_report={"ticket_state": {"effective_revoked": False}, "generated_unix_ms": now_ms},
+        ticket_lifecycle_timeline={"ticket_state": {"latest_state": "issued"}, "generated_unix_ms": now_ms},
+    )
+    assert packet["packet_fingerprint_sha256"]
+
+    guard_ok = evaluate_live_launch_guard(
+        adapter_config={"live_send_network_enabled": True},
+        enable_live_auto_submit_window=True,
+        prelive_go_no_go_report=prelive,
+        promotion_ticket=ticket,
+        launch_intent_manifest=intent,
+        launch_authorization_packet=packet,
+        require_launch_authorization_packet=True,
+        require_launch_authorization_packet_binding=True,
+        max_launch_authorization_packet_age_seconds=3600.0,
+    )
+    assert guard_ok["status"] == "allow"
+    assert guard_ok["authorization_packet_fingerprint_valid"] is True
+
+    tampered_packet = dict(packet)
+    tampered_packet["summary"] = dict(packet["summary"])
+    tampered_packet["summary"]["guard_status"] = "block"
+    guard_bad_fp = evaluate_live_launch_guard(
+        adapter_config={"live_send_network_enabled": True},
+        enable_live_auto_submit_window=True,
+        prelive_go_no_go_report=prelive,
+        promotion_ticket=ticket,
+        launch_intent_manifest=intent,
+        launch_authorization_packet=tampered_packet,
+        require_launch_authorization_packet=True,
+        max_launch_authorization_packet_age_seconds=3600.0,
+    )
+    assert guard_bad_fp["status"] == "block"
+    assert "authorization_packet_fingerprint_valid" in guard_bad_fp["required_failed_checks"]
+
+    mismatched_ticket = dict(ticket)
+    mismatched_ticket["ticket_id"] = "different_ticket"
+    guard_bad_binding = evaluate_live_launch_guard(
+        adapter_config={"live_send_network_enabled": True},
+        enable_live_auto_submit_window=True,
+        prelive_go_no_go_report=prelive,
+        promotion_ticket=mismatched_ticket,
+        launch_intent_manifest=intent,
+        launch_authorization_packet=packet,
+        require_launch_authorization_packet=True,
+        require_launch_authorization_packet_binding=True,
+        max_launch_authorization_packet_age_seconds=3600.0,
+    )
+    assert guard_bad_binding["status"] == "block"
+    assert "authorization_packet_bound_to_current_inputs" in guard_bad_binding["required_failed_checks"]

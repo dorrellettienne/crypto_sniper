@@ -2574,6 +2574,7 @@ def evaluate_live_launch_guard(
     require_unrevoked_ticket: bool = False,
     require_launch_intent: bool = False,
     require_launch_authorization_packet: bool = False,
+    require_launch_authorization_packet_binding: bool = False,
     revocation_reason_class_policy_overrides: dict[str, str] | None = None,
     required_ticket_action: str = "approve_live_test",
     max_prelive_age_seconds: float = 3600.0,
@@ -2649,6 +2650,50 @@ def evaluate_live_launch_guard(
             "required": bool(require_launch_authorization_packet),
             "ok": auth_packet_age_ok,
             "actual": (None if auth_packet_generated_ms is None else max(0, now_ms - int(auth_packet_generated_ms))),
+        }
+    )
+    auth_packet_binding = dict(auth_packet.get("binding") or {})
+    auth_packet_fp_actual = str(auth_packet.get("packet_fingerprint_sha256") or "")
+    auth_packet_fp_expected = ""
+    if auth_packet:
+        auth_packet_fp_expected = hashlib.sha256(
+            json.dumps({k: v for k, v in auth_packet.items() if k != "packet_fingerprint_sha256"}, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+    checks.append(
+        {
+            "name": "authorization_packet_fingerprint_valid",
+            "required": bool(require_launch_authorization_packet),
+            "ok": (bool(auth_packet) and bool(auth_packet_fp_actual) and auth_packet_fp_actual == auth_packet_fp_expected),
+            "actual": {
+                "packet_fingerprint_sha256": auth_packet_fp_actual,
+                "expected_packet_fingerprint_sha256": auth_packet_fp_expected,
+            },
+        }
+    )
+    expected_packet_binding = {
+        "ticket_id": str(ticket.get("ticket_id") or ""),
+        "ticket_fingerprint_sha256": str(ticket.get("ticket_fingerprint_sha256") or ""),
+        "intent_id": str(intent.get("intent_id") or ""),
+        "intent_scope_hash_sha256": str(intent.get("scope_hash_sha256") or ""),
+        "prelive_status": str(go_no_go.get("status") or ""),
+    }
+    packet_binding_matches_current = (
+        bool(auth_packet)
+        and str(auth_packet_binding.get("ticket_id") or "") == expected_packet_binding["ticket_id"]
+        and str(auth_packet_binding.get("ticket_fingerprint_sha256") or "") == expected_packet_binding["ticket_fingerprint_sha256"]
+        and str(auth_packet_binding.get("intent_id") or "") == expected_packet_binding["intent_id"]
+        and str(auth_packet_binding.get("intent_scope_hash_sha256") or "") == expected_packet_binding["intent_scope_hash_sha256"]
+        and str(auth_packet_binding.get("prelive_status") or "") == expected_packet_binding["prelive_status"]
+    )
+    checks.append(
+        {
+            "name": "authorization_packet_bound_to_current_inputs",
+            "required": bool(require_launch_authorization_packet and require_launch_authorization_packet_binding),
+            "ok": packet_binding_matches_current,
+            "actual": {
+                "packet_binding": auth_packet_binding,
+                "expected_binding": expected_packet_binding,
+            },
         }
     )
 
@@ -2799,6 +2844,7 @@ def evaluate_live_launch_guard(
         "ticket_revocation_reason_class": latest_revocation_reason_class,
         "ticket_revocation_policy_action": ticket_revocation_policy_action,
         "authorization_packet_status": str(auth_packet.get("status") or ""),
+        "authorization_packet_fingerprint_valid": bool(auth_packet and auth_packet_fp_actual and auth_packet_fp_actual == auth_packet_fp_expected),
         "summary": ("live_launch_guard_allow" if allowed else f"live_launch_guard_block:{','.join(required_failed)}"),
     }
 
@@ -3094,7 +3140,7 @@ def build_live_pilot_launch_authorization_packet(
     ]
     failed_required = [c["name"] for c in checks if bool(c.get("required", False)) and not bool(c.get("ok", False))]
     status = "authorized" if not failed_required else "blocked"
-    return {
+    out = {
         "generated_unix_ms": int(time.time() * 1000),
         "status": status,
         "failed_required_checks": failed_required,
@@ -3128,6 +3174,18 @@ def build_live_pilot_launch_authorization_packet(
             "ticket_lifecycle_timeline": _to_int_or_none(timeline.get("generated_unix_ms")),
         },
     }
+    out["binding"] = {
+        "ticket_id": str(ticket.get("ticket_id") or ""),
+        "ticket_fingerprint_sha256": str(ticket.get("ticket_fingerprint_sha256") or ""),
+        "intent_id": str(intent.get("intent_id") or ""),
+        "intent_scope_hash_sha256": str(intent.get("scope_hash_sha256") or ""),
+        "prelive_status": str(go_no_go.get("status") or ""),
+        "guard_status": str(guard.get("status") or ""),
+        "guard_required_failed_checks": list(guard.get("required_failed_checks", []) or []),
+    }
+    fp_src = json.dumps({k: v for k, v in out.items() if k != "packet_fingerprint_sha256"}, sort_keys=True)
+    out["packet_fingerprint_sha256"] = hashlib.sha256(fp_src.encode("utf-8")).hexdigest()
+    return out
 
 
 def write_live_pilot_launch_authorization_packet(report: dict[str, Any], path_str: str) -> None:
@@ -3140,6 +3198,7 @@ def write_live_pilot_launch_authorization_packet(report: dict[str, Any], path_st
             f"- status: `{report.get('status', '')}`",
             f"- ticket_id: `{report.get('ticket_id', '')}`",
             f"- intent_id: `{report.get('intent_id', '')}`",
+            f"- packet_fingerprint_sha256: `{report.get('packet_fingerprint_sha256', '')}`",
             f"- failed_required_checks: `{', '.join(list(report.get('failed_required_checks', []) or [])) or '-'}`",
             "",
             "## Summary",
@@ -4958,6 +5017,7 @@ def _main() -> int:
     p.add_argument("--live-launch-guard-consume-ticket-on-allow", action="store_true")
     p.add_argument("--live-launch-guard-require-launch-intent", action="store_true")
     p.add_argument("--live-launch-guard-require-authorization-packet", action="store_true")
+    p.add_argument("--live-launch-guard-require-authorization-packet-binding", action="store_true")
     p.add_argument("--live-launch-guard-ticket-action", default="approve_live_test")
     p.add_argument("--live-launch-guard-max-prelive-age-seconds", type=float, default=3600.0)
     p.add_argument("--live-launch-guard-max-launch-intent-age-seconds", type=float, default=1800.0)
@@ -5132,6 +5192,7 @@ def _main() -> int:
             require_unrevoked_ticket=bool(args.live_launch_guard_require_unrevoked_ticket),
             require_launch_intent=bool(args.live_launch_guard_require_launch_intent),
             require_launch_authorization_packet=bool(args.live_launch_guard_require_authorization_packet),
+            require_launch_authorization_packet_binding=bool(args.live_launch_guard_require_authorization_packet_binding),
             revocation_reason_class_policy_overrides=revocation_policy_overrides,
             required_ticket_action=str(args.live_launch_guard_ticket_action or "approve_live_test"),
             max_prelive_age_seconds=float(args.live_launch_guard_max_prelive_age_seconds or 3600.0),
