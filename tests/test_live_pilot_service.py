@@ -46,6 +46,10 @@ from src.live.live_pilot_service import (
     write_live_pilot_promotion_step_manifest,
     build_live_pilot_prelive_go_no_go_checklist,
     write_live_pilot_prelive_go_no_go_checklist,
+    build_live_pilot_postrun_review_packet,
+    write_live_pilot_postrun_review_packet,
+    rotate_live_pilot_artifacts_by_glob,
+    write_live_pilot_archive_rotation_report,
     write_live_pilot_daily_operator_report,
     write_campaign_trend_report,
     run_live_pilot_service_loop,
@@ -2237,3 +2241,30 @@ def test_prelive_go_no_go_checklist_writer(tmp_path):
     txt = p.read_text(encoding="utf-8")
     assert "Pre-Live Go / No-Go Checklist" in txt
     assert "status: `go`" in txt
+
+
+def test_postrun_review_packet_and_archive_rotation(tmp_path, monkeypatch):
+    packet = build_live_pilot_postrun_review_packet(
+        schedule_report={"schedule_summary": {"schedule_id": "s1", "completed_sessions": 1}},
+        daily_operator_report={"latest_campaign_summary": {"campaign_id": "c1"}, "operator_decision_summary": {"recommended_action": "hold", "decision_status": "continue_supervised_validation"}},
+        artifact_index={"date_label": "2026-02-25", "artifacts": {"a": {}}},
+        handoff_snapshot={"x": 1},
+        bundle_verification={"status": "pass"},
+        timeline={"event_count": 3},
+    )
+    assert packet["summary"]["schedule_id"] == "s1"
+    pp = tmp_path / "packet.md"
+    write_live_pilot_postrun_review_packet(packet, str(pp))
+    assert "Post-Run Review Packet" in pp.read_text(encoding="utf-8")
+
+    monkeypatch.chdir(tmp_path)
+    for i in range(3):
+        f = tmp_path / f"artifact_{i}.txt"
+        f.write_text(str(i), encoding="utf-8")
+    archive_dir = tmp_path / "archive"
+    out = rotate_live_pilot_artifacts_by_glob(glob_pattern="artifact_*.txt", archive_dir=str(archive_dir), keep_latest=1)
+    assert out["matched"] == 3
+    assert out["archived"] == 2
+    rp = tmp_path / "rotation.md"
+    write_live_pilot_archive_rotation_report(out, str(rp))
+    assert "Archive Rotation Report" in rp.read_text(encoding="utf-8")

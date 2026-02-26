@@ -1,5 +1,6 @@
 import argparse
 import json
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -2093,6 +2094,122 @@ def write_live_pilot_prelive_go_no_go_checklist(report: dict[str, Any], path_str
         p.write_text(json.dumps(report, sort_keys=True, indent=2), encoding="utf-8")
 
 
+def build_live_pilot_postrun_review_packet(
+    *,
+    schedule_report: dict[str, Any] | None = None,
+    daily_operator_report: dict[str, Any] | None = None,
+    artifact_index: dict[str, Any] | None = None,
+    handoff_snapshot: dict[str, Any] | None = None,
+    bundle_verification: dict[str, Any] | None = None,
+    timeline: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    schedule = dict(schedule_report or {})
+    daily = dict(daily_operator_report or {})
+    idx = dict(artifact_index or {})
+    handoff = dict(handoff_snapshot or {})
+    bundle = dict(bundle_verification or {})
+    tl = dict(timeline or {})
+    schedule_summary = dict(schedule.get("schedule_summary") or {})
+    daily_op = dict(daily.get("operator_decision_summary") or {})
+    latest_campaign = dict(daily.get("latest_campaign_summary") or {})
+    return {
+        "generated_unix_ms": int(time.time() * 1000),
+        "summary": {
+            "schedule_id": str(schedule_summary.get("schedule_id") or ""),
+            "completed_sessions": int(schedule_summary.get("completed_sessions", 0) or 0),
+            "latest_campaign_id": str(latest_campaign.get("campaign_id") or ""),
+            "recommended_action": str(daily_op.get("recommended_action") or ""),
+            "decision_status": str(daily_op.get("decision_status") or ""),
+            "bundle_verification_status": str(bundle.get("status") or ""),
+            "timeline_event_count": int(tl.get("event_count", 0) or 0),
+        },
+        "artifact_index_summary": {
+            "date_label": str(idx.get("date_label") or ""),
+            "artifact_count_groups": len(dict(idx.get("artifacts") or {})),
+        },
+        "checkpoints": [
+            {"name": "bundle_verification", "status": str(bundle.get("status") or "")},
+            {"name": "operator_decision", "status": str(daily_op.get("decision_status") or "")},
+            {"name": "handoff_snapshot_present", "status": ("present" if bool(handoff) else "missing")},
+            {"name": "timeline_present", "status": ("present" if bool(tl) else "missing")},
+        ],
+    }
+
+
+def write_live_pilot_postrun_review_packet(report: dict[str, Any], path_str: str) -> None:
+    p = Path(path_str)
+    if p.suffix.lower() in {".md", ".markdown"}:
+        s = dict(report.get("summary") or {})
+        lines = [
+            "# Live Pilot Post-Run Review Packet",
+            "",
+            f"- schedule_id: `{s.get('schedule_id', '')}`",
+            f"- completed_sessions: `{s.get('completed_sessions', 0)}`",
+            f"- latest_campaign_id: `{s.get('latest_campaign_id', '')}`",
+            f"- recommended_action: `{s.get('recommended_action', '')}`",
+            f"- decision_status: `{s.get('decision_status', '')}`",
+            f"- bundle_verification_status: `{s.get('bundle_verification_status', '')}`",
+            f"- timeline_event_count: `{s.get('timeline_event_count', 0)}`",
+            "",
+            "## Checkpoints",
+            "",
+        ]
+        for c in [dict(x) for x in list(report.get("checkpoints") or []) if isinstance(x, dict)]:
+            lines.append(f"- {c.get('name','')}: `{c.get('status','')}`")
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    else:
+        p.write_text(json.dumps(report, sort_keys=True, indent=2), encoding="utf-8")
+
+
+def rotate_live_pilot_artifacts_by_glob(
+    *,
+    glob_pattern: str,
+    archive_dir: str,
+    keep_latest: int = 10,
+) -> dict[str, Any]:
+    pattern = str(glob_pattern or "").strip()
+    if not pattern:
+        return {"matched": 0, "kept": 0, "archived": 0, "archived_paths": []}
+    keep_latest = max(0, int(keep_latest))
+    matches = [p for p in Path(".").glob(pattern) if p.is_file()]
+    matches_sorted = sorted(matches, key=lambda p: p.stat().st_mtime, reverse=True)
+    keep = matches_sorted[:keep_latest]
+    archive = matches_sorted[keep_latest:]
+    archive_path = Path(archive_dir)
+    archive_path.mkdir(parents=True, exist_ok=True)
+    archived_paths: list[str] = []
+    for p in archive:
+        dst = archive_path / p.name
+        if dst.exists():
+            dst = archive_path / f"{p.stem}_{int(time.time()*1000)}{p.suffix}"
+        shutil.move(str(p), str(dst))
+        archived_paths.append(str(dst))
+    return {
+        "matched": len(matches_sorted),
+        "kept": len(keep),
+        "archived": len(archive),
+        "archived_paths": archived_paths,
+        "glob_pattern": pattern,
+        "archive_dir": str(archive_dir),
+    }
+
+
+def write_live_pilot_archive_rotation_report(report: dict[str, Any], path_str: str) -> None:
+    p = Path(path_str)
+    if p.suffix.lower() in {".md", ".markdown"}:
+        lines = [
+            "# Live Pilot Archive Rotation Report",
+            "",
+            f"- glob_pattern: `{report.get('glob_pattern','')}`",
+            f"- matched: `{report.get('matched',0)}`",
+            f"- kept: `{report.get('kept',0)}`",
+            f"- archived: `{report.get('archived',0)}`",
+        ]
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    else:
+        p.write_text(json.dumps(report, sort_keys=True, indent=2), encoding="utf-8")
+
+
 def _path_with_inserted_suffix(path_str: str, suffix: str) -> str:
     if not str(path_str or "").strip():
         return ""
@@ -3738,6 +3855,11 @@ def _main() -> int:
     p.add_argument("--prelive-go-no-go-report-path", default="")
     p.add_argument("--prelive-require-operator-ack", action="store_true")
     p.add_argument("--prelive-require-bundle-pass", action="store_true")
+    p.add_argument("--postrun-review-packet-path", default="")
+    p.add_argument("--archive-rotation-glob", default="")
+    p.add_argument("--archive-rotation-dir", default="")
+    p.add_argument("--archive-rotation-keep", type=int, default=10)
+    p.add_argument("--archive-rotation-report-path", default="")
     p.add_argument("--operator-decision-log-jsonl-path", default="")
     p.add_argument("--operator-decision-actor", default="")
     p.add_argument("--operator-decision-action", default="")
@@ -3822,6 +3944,12 @@ def _main() -> int:
             ensure_dir_within_base(str(Path(args.promotion_step_manifest_path).parent))
         if args.prelive_go_no_go_report_path:
             ensure_dir_within_base(str(Path(args.prelive_go_no_go_report_path).parent))
+        if args.postrun_review_packet_path:
+            ensure_dir_within_base(str(Path(args.postrun_review_packet_path).parent))
+        if args.archive_rotation_dir:
+            ensure_dir_within_base(str(args.archive_rotation_dir))
+        if args.archive_rotation_report_path:
+            ensure_dir_within_base(str(Path(args.archive_rotation_report_path).parent))
         if args.operator_decision_log_jsonl_path:
             ensure_dir_within_base(str(Path(args.operator_decision_log_jsonl_path).parent))
         if args.bundle_verification_report_path:
@@ -3876,6 +4004,7 @@ def _main() -> int:
                 daily_report = apply_operator_acknowledgement_to_daily_report(daily_report, decision_row)
             write_live_pilot_daily_operator_report(daily_report, str(args.daily_operator_report_path))
             if str(args.artifact_index_path or "").strip():
+                handoff = {}
                 artifact_index = build_live_pilot_artifact_index(
                     date_label=str(args.daily_operator_date_label or ""),
                     daily_operator_report=daily_report,
@@ -4289,6 +4418,7 @@ def _main() -> int:
                 write_live_pilot_daily_operator_report(daily_report, str(args.daily_operator_report_path))
                 schedule["daily_operator_report"] = daily_report
             if str(args.artifact_index_path or "").strip():
+                handoff = {}
                 sessions = [dict(x) for x in list(schedule.get("sessions") or []) if isinstance(x, dict)]
                 campaign_reports_for_index = [{"campaign_summary": dict((s.get("campaign_summary") or {}))} for s in sessions]
                 campaign_report_paths = [str(s.get("report_path") or "") for s in sessions if str(s.get("report_path") or "").strip()]
@@ -4325,14 +4455,17 @@ def _main() -> int:
                 else:
                     bundle_verification = verify_live_pilot_validation_bundle(artifact_index=artifact_index)
                 if str(args.timeline_export_path or "").strip():
+                    timeline_obj = build_live_pilot_session_timeline(
+                        schedule_report=schedule,
+                        alerts_rows=_read_jsonl_rows(str(args.alerts_jsonl_path or "")),
+                        operator_decision_rows=_read_jsonl_rows(str(args.operator_decision_log_jsonl_path or "")),
+                    )
                     write_live_pilot_session_timeline(
-                        build_live_pilot_session_timeline(
-                            schedule_report=schedule,
-                            alerts_rows=_read_jsonl_rows(str(args.alerts_jsonl_path or "")),
-                            operator_decision_rows=_read_jsonl_rows(str(args.operator_decision_log_jsonl_path or "")),
-                        ),
+                        timeline_obj,
                         str(args.timeline_export_path),
                     )
+                else:
+                    timeline_obj = {}
                 if str(args.promotion_step_manifest_path or "").strip() and str(args.risk_profile_preset or "").strip():
                     write_live_pilot_promotion_step_manifest(
                         build_live_pilot_promotion_step_manifest(
@@ -4350,13 +4483,33 @@ def _main() -> int:
                         build_live_pilot_prelive_go_no_go_checklist(
                             daily_operator_report=dict(schedule.get("daily_operator_report") or {}),
                             bundle_verification=bundle_verification,
-                            handoff_snapshot=(handoff if 'handoff' in locals() else {}),
+                            handoff_snapshot=handoff,
                             risk_profile_preset=str(args.risk_profile_preset or ""),
                             required_operator_ack=bool(args.prelive_require_operator_ack),
                             require_bundle_pass=bool(args.prelive_require_bundle_pass),
                         ),
                         str(args.prelive_go_no_go_report_path),
                     )
+                if str(args.postrun_review_packet_path or "").strip():
+                    write_live_pilot_postrun_review_packet(
+                        build_live_pilot_postrun_review_packet(
+                            schedule_report=schedule,
+                            daily_operator_report=dict(schedule.get("daily_operator_report") or {}),
+                            artifact_index=artifact_index,
+                            handoff_snapshot=handoff,
+                            bundle_verification=bundle_verification,
+                            timeline=timeline_obj,
+                        ),
+                        str(args.postrun_review_packet_path),
+                    )
+                if str(args.archive_rotation_glob or "").strip() and str(args.archive_rotation_dir or "").strip():
+                    rotation_report = rotate_live_pilot_artifacts_by_glob(
+                        glob_pattern=str(args.archive_rotation_glob),
+                        archive_dir=str(args.archive_rotation_dir),
+                        keep_latest=int(args.archive_rotation_keep or 0),
+                    )
+                    if str(args.archive_rotation_report_path or "").strip():
+                        write_live_pilot_archive_rotation_report(rotation_report, str(args.archive_rotation_report_path))
             cli_out = {
                 "schedule_summary": schedule.get("schedule_summary"),
                 "report_path": schedule.get("report_path", ""),
@@ -4368,6 +4521,8 @@ def _main() -> int:
                 "timeline_export_path": (str(args.timeline_export_path or "")),
                 "promotion_step_manifest_path": (str(args.promotion_step_manifest_path or "")),
                 "prelive_go_no_go_report_path": (str(args.prelive_go_no_go_report_path or "")),
+                "postrun_review_packet_path": (str(args.postrun_review_packet_path or "")),
+                "archive_rotation_report_path": (str(args.archive_rotation_report_path or "")),
             }
             print(json.dumps(cli_out, sort_keys=True))
             if bool(args.print_human_summary):
@@ -4428,14 +4583,17 @@ def _main() -> int:
                 else:
                     bundle_verification = verify_live_pilot_validation_bundle(artifact_index=artifact_index)
                 if str(args.timeline_export_path or "").strip():
+                    timeline_obj = build_live_pilot_session_timeline(
+                        schedule_report={"sessions": [{"session_index": 0, "campaign_id": str((campaign.get("campaign_summary") or {}).get("campaign_id") or ""), "campaign_summary": dict(campaign.get("campaign_summary") or {})}]},
+                        alerts_rows=_read_jsonl_rows(str(args.alerts_jsonl_path or "")),
+                        operator_decision_rows=_read_jsonl_rows(str(args.operator_decision_log_jsonl_path or "")),
+                    )
                     write_live_pilot_session_timeline(
-                        build_live_pilot_session_timeline(
-                            schedule_report={"sessions": [{"session_index": 0, "campaign_id": str((campaign.get("campaign_summary") or {}).get("campaign_id") or ""), "campaign_summary": dict(campaign.get("campaign_summary") or {})}]},
-                            alerts_rows=_read_jsonl_rows(str(args.alerts_jsonl_path or "")),
-                            operator_decision_rows=_read_jsonl_rows(str(args.operator_decision_log_jsonl_path or "")),
-                        ),
+                        timeline_obj,
                         str(args.timeline_export_path),
                     )
+                else:
+                    timeline_obj = {}
                 if str(args.promotion_step_manifest_path or "").strip() and str(args.risk_profile_preset or "").strip():
                     write_live_pilot_promotion_step_manifest(
                         build_live_pilot_promotion_step_manifest(
@@ -4453,13 +4611,32 @@ def _main() -> int:
                         build_live_pilot_prelive_go_no_go_checklist(
                             daily_operator_report=daily_report,
                             bundle_verification=bundle_verification,
-                            handoff_snapshot=(handoff if 'handoff' in locals() else {}),
+                            handoff_snapshot=handoff,
                             risk_profile_preset=str(args.risk_profile_preset or ""),
                             required_operator_ack=bool(args.prelive_require_operator_ack),
                             require_bundle_pass=bool(args.prelive_require_bundle_pass),
                         ),
                         str(args.prelive_go_no_go_report_path),
                     )
+                if str(args.postrun_review_packet_path or "").strip():
+                    write_live_pilot_postrun_review_packet(
+                        build_live_pilot_postrun_review_packet(
+                            daily_operator_report=daily_report,
+                            artifact_index=artifact_index,
+                            handoff_snapshot=handoff,
+                            bundle_verification=bundle_verification,
+                            timeline=timeline_obj,
+                        ),
+                        str(args.postrun_review_packet_path),
+                    )
+                if str(args.archive_rotation_glob or "").strip() and str(args.archive_rotation_dir or "").strip():
+                    rotation_report = rotate_live_pilot_artifacts_by_glob(
+                        glob_pattern=str(args.archive_rotation_glob),
+                        archive_dir=str(args.archive_rotation_dir),
+                        keep_latest=int(args.archive_rotation_keep or 0),
+                    )
+                    if str(args.archive_rotation_report_path or "").strip():
+                        write_live_pilot_archive_rotation_report(rotation_report, str(args.archive_rotation_report_path))
         cli_out = {
             "campaign_summary": campaign.get("campaign_summary"),
             "report_path": campaign.get("report_path", ""),
@@ -4471,6 +4648,8 @@ def _main() -> int:
             "timeline_export_path": (str(args.timeline_export_path or "")),
             "promotion_step_manifest_path": (str(args.promotion_step_manifest_path or "")),
             "prelive_go_no_go_report_path": (str(args.prelive_go_no_go_report_path or "")),
+            "postrun_review_packet_path": (str(args.postrun_review_packet_path or "")),
+            "archive_rotation_report_path": (str(args.archive_rotation_report_path or "")),
         }
         print(json.dumps(cli_out, sort_keys=True))
         if bool(args.print_human_summary):
