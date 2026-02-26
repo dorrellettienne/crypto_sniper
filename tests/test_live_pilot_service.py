@@ -3244,11 +3244,23 @@ def test_launch_authorization_chain_approval_token_audit_and_chain_of_chain_repo
 
 def test_launch_authorization_chain_of_chain_freshness_summary_and_guard_requirement(tmp_path):
     now_ms = int(time.time() * 1000)
-    chain_of_chain = {
-        "generated_unix_ms": now_ms,
-        "status": "ready",
-        "summary": {"chain_status": "ready"},
-    }
+    chain_of_chain = build_live_pilot_launch_authorization_chain_of_chain_report(
+        launch_authorization_chain_report={
+            "status": "ready",
+            "chain_report_fingerprint_sha256": "cfp1",
+        },
+        launch_authorization_chain_approval_token={
+            "token_id": "lca_1",
+            "chain_report_fingerprint_sha256": "cfp1",
+        },
+        launch_authorization_chain_approval_token_audit_summary={"token_state": {"revoked": False}},
+        live_launch_guard_report={"status": "allow", "required_failed_checks": [], "generated_unix_ms": now_ms},
+    )
+    chain_of_chain["status"] = "ready"
+    chain_of_chain["generated_unix_ms"] = now_ms
+    chain_of_chain["chain_of_chain_report_fingerprint_sha256"] = __import__("hashlib").sha256(
+        json.dumps({k: v for k, v in chain_of_chain.items() if k != "chain_of_chain_report_fingerprint_sha256"}, sort_keys=True).encode("utf-8")
+    ).hexdigest()
     summary = build_live_pilot_launch_authorization_chain_of_chain_freshness_summary(
         launch_authorization_chain_of_chain_report=chain_of_chain,
         launch_authorization_chain_freshness_summary={"status": "pass"},
@@ -3280,6 +3292,76 @@ def test_launch_authorization_chain_of_chain_freshness_summary_and_guard_require
     )
     assert guard_block["status"] == "block"
     assert "authorization_chain_of_chain_report_fresh_enough" in guard_block["required_failed_checks"]
+
+
+def test_launch_authorization_chain_of_chain_fingerprint_and_guard_binding_checks():
+    now_ms = int(time.time() * 1000)
+    chain = build_live_pilot_launch_authorization_chain_report(
+        launch_authorization_packet={"status": "authorized", "packet_fingerprint_sha256": "p1"},
+        launch_authorization_packet_approval_token={"token_id": "pat1", "authorization_packet_fingerprint_sha256": "p1"},
+        launch_authorization_packet_approval_token_audit_summary={"token_state": {"revoked": False}},
+        promotion_ticket_revocation_audit_summary={"ticket_state": {"effective_revoked": False}},
+        live_launch_guard_report={"status": "allow", "required_failed_checks": [], "generated_unix_ms": now_ms},
+        launch_authorization_freshness_envelope={"status": "pass", "generated_unix_ms": now_ms},
+    )
+    chain_token = build_live_pilot_launch_authorization_chain_approval_token(
+        launch_authorization_chain_report=chain,
+        operator_id="main_user",
+        approval_action="approve_live_launch_chain",
+        expires_in_seconds=900,
+    )
+    chain2 = build_live_pilot_launch_authorization_chain_of_chain_report(
+        launch_authorization_chain_report=chain,
+        launch_authorization_chain_approval_token=chain_token,
+        launch_authorization_chain_approval_token_audit_summary={"token_state": {"revoked": False}},
+        live_launch_guard_report={"status": "allow", "required_failed_checks": [], "generated_unix_ms": now_ms},
+    )
+    assert chain2["chain_of_chain_report_fingerprint_sha256"]
+
+    guard_ok = evaluate_live_launch_guard(
+        adapter_config={"live_send_network_enabled": True},
+        enable_live_auto_submit_window=True,
+        launch_authorization_chain_report=chain,
+        launch_authorization_chain_approval_token=chain_token,
+        launch_authorization_chain_of_chain_report=chain2,
+        require_launch_authorization_chain_of_chain_report=True,
+        require_launch_authorization_chain_of_chain_report_binding=True,
+        max_launch_authorization_chain_report_age_seconds=3600.0,
+        max_launch_authorization_chain_approval_token_age_seconds=3600.0,
+        max_launch_authorization_chain_of_chain_report_age_seconds=3600.0,
+    )
+    assert guard_ok["status"] == "allow"
+    assert guard_ok["authorization_chain_of_chain_report_fingerprint_valid"] is True
+
+    tampered_chain2 = dict(chain2)
+    tampered_chain2["summary"] = dict(chain2["summary"])
+    tampered_chain2["summary"]["guard_status"] = "block"
+    guard_bad_fp = evaluate_live_launch_guard(
+        adapter_config={"live_send_network_enabled": True},
+        enable_live_auto_submit_window=True,
+        launch_authorization_chain_report=chain,
+        launch_authorization_chain_approval_token=chain_token,
+        launch_authorization_chain_of_chain_report=tampered_chain2,
+        require_launch_authorization_chain_of_chain_report=True,
+        max_launch_authorization_chain_of_chain_report_age_seconds=3600.0,
+    )
+    assert guard_bad_fp["status"] == "block"
+    assert "authorization_chain_of_chain_report_fingerprint_valid" in guard_bad_fp["required_failed_checks"]
+
+    other_chain_token = dict(chain_token)
+    other_chain_token["token_id"] = "different_chain_token"
+    guard_bad_binding = evaluate_live_launch_guard(
+        adapter_config={"live_send_network_enabled": True},
+        enable_live_auto_submit_window=True,
+        launch_authorization_chain_report=chain,
+        launch_authorization_chain_approval_token=other_chain_token,
+        launch_authorization_chain_of_chain_report=chain2,
+        require_launch_authorization_chain_of_chain_report=True,
+        require_launch_authorization_chain_of_chain_report_binding=True,
+        max_launch_authorization_chain_of_chain_report_age_seconds=3600.0,
+    )
+    assert guard_bad_binding["status"] == "block"
+    assert "authorization_chain_of_chain_report_bound_to_current_inputs" in guard_bad_binding["required_failed_checks"]
 
 
 def test_live_test_readiness_report_and_runbook_export(tmp_path):
