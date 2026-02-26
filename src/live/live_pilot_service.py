@@ -2923,6 +2923,200 @@ def write_live_pilot_ticket_state_consistency_report(report: dict[str, Any], pat
         p.write_text(json.dumps(report, sort_keys=True, indent=2), encoding="utf-8")
 
 
+def build_live_pilot_promotion_ticket_lifecycle_timeline(
+    *,
+    promotion_ticket: dict[str, Any] | None = None,
+    consumed_tickets: list[dict[str, Any]] | None = None,
+    revoked_tickets: list[dict[str, Any]] | None = None,
+    launch_guard_report: dict[str, Any] | None = None,
+    revocation_reason_class_policy_overrides: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    ticket = dict(promotion_ticket or {})
+    consumed_rows = [dict(x) for x in list(consumed_tickets or []) if isinstance(x, dict)]
+    revoked_rows = [dict(x) for x in list(revoked_tickets or []) if isinstance(x, dict)]
+    guard = dict(launch_guard_report or {})
+    state = resolve_live_pilot_promotion_ticket_latest_state(
+        ticket=ticket,
+        consumed_tickets=consumed_rows,
+        revoked_tickets=revoked_rows,
+        revocation_reason_class_policy_overrides=revocation_reason_class_policy_overrides,
+    )
+    events: list[dict[str, Any]] = []
+    if ticket:
+        events.append(
+            {
+                "event_type": "ticket_issued",
+                "ts_unix_ms": int(_to_int_or_none(ticket.get("issued_unix_ms")) or 0),
+                "details": {
+                    "ticket_id": str(ticket.get("ticket_id") or ""),
+                    "approval_action": str(ticket.get("approval_action") or ""),
+                    "operator_id": str(ticket.get("operator_id") or ""),
+                    "expires_unix_ms": _to_int_or_none(ticket.get("expires_unix_ms")),
+                },
+            }
+        )
+    for row in consumed_rows:
+        events.append(
+            {
+                "event_type": "ticket_consumed",
+                "ts_unix_ms": int(_to_int_or_none(row.get("ts_unix_ms")) or 0),
+                "details": {
+                    "reason": str(row.get("reason") or ""),
+                    "operator_id": str(row.get("operator_id") or ""),
+                    "approval_action": str(row.get("approval_action") or ""),
+                },
+            }
+        )
+    for row in revoked_rows:
+        reason_meta = classify_live_pilot_promotion_ticket_revocation_reason(str(row.get("reason") or ""))
+        events.append(
+            {
+                "event_type": "ticket_revoked",
+                "ts_unix_ms": int(_to_int_or_none(row.get("ts_unix_ms")) or 0),
+                "details": {
+                    "reason": str(row.get("reason") or ""),
+                    "reason_class": str(row.get("reason_class") or reason_meta.get("reason_class") or ""),
+                    "severity": str(row.get("severity") or reason_meta.get("severity") or ""),
+                    "operator_id": str(row.get("operator_id") or ""),
+                },
+            }
+        )
+    if guard:
+        events.append(
+            {
+                "event_type": "launch_guard_evaluated",
+                "ts_unix_ms": int(time.time() * 1000),
+                "details": {
+                    "status": str(guard.get("status") or ""),
+                    "live_launch_requested": bool(guard.get("live_launch_requested", False)),
+                    "required_failed_checks": list(guard.get("required_failed_checks", []) or []),
+                    "ticket_revoked": bool(guard.get("ticket_revoked", False)),
+                    "ticket_effectively_revoked": bool(guard.get("ticket_effectively_revoked", False)),
+                    "ticket_revocation_policy_action": str(guard.get("ticket_revocation_policy_action") or ""),
+                },
+            }
+        )
+    events.sort(key=lambda e: (int(e.get("ts_unix_ms") or 0), str(e.get("event_type") or "")))
+    return {
+        "generated_unix_ms": int(time.time() * 1000),
+        "ticket_id": str(ticket.get("ticket_id") or ""),
+        "ticket_fingerprint_sha256": str(ticket.get("ticket_fingerprint_sha256") or ""),
+        "event_count": len(events),
+        "latest_state": str(state.get("latest_state") or ""),
+        "ticket_state": state,
+        "events": events,
+    }
+
+
+def write_live_pilot_promotion_ticket_lifecycle_timeline(report: dict[str, Any], path_str: str) -> None:
+    p = Path(path_str)
+    if p.suffix.lower() in {".md", ".markdown"}:
+        lines = [
+            "# Live Pilot Promotion Ticket Lifecycle Timeline",
+            "",
+            f"- ticket_id: `{report.get('ticket_id', '')}`",
+            f"- latest_state: `{report.get('latest_state', '')}`",
+            f"- event_count: `{report.get('event_count', 0)}`",
+            "",
+            "## Events",
+            "",
+        ]
+        for e in [dict(x) for x in list(report.get("events") or []) if isinstance(x, dict)]:
+            lines.append(f"- {e.get('event_type','')}: ts=`{e.get('ts_unix_ms',0)}` details=`{json.dumps(e.get('details', {}), sort_keys=True)}`")
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    else:
+        p.write_text(json.dumps(report, sort_keys=True, indent=2), encoding="utf-8")
+
+
+def build_live_pilot_launch_authorization_packet(
+    *,
+    prelive_go_no_go_report: dict[str, Any] | None = None,
+    promotion_ticket: dict[str, Any] | None = None,
+    launch_intent_manifest: dict[str, Any] | None = None,
+    live_launch_guard_report: dict[str, Any] | None = None,
+    ticket_state_consistency_report: dict[str, Any] | None = None,
+    revocation_audit_report: dict[str, Any] | None = None,
+    ticket_lifecycle_timeline: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    go_no_go = dict(prelive_go_no_go_report or {})
+    ticket = dict(promotion_ticket or {})
+    intent = dict(launch_intent_manifest or {})
+    guard = dict(live_launch_guard_report or {})
+    consistency = dict(ticket_state_consistency_report or {})
+    audit = dict(revocation_audit_report or {})
+    timeline = dict(ticket_lifecycle_timeline or {})
+    checks = [
+        {"name": "prelive_go", "required": True, "ok": str(go_no_go.get("status") or "") == "go", "actual": str(go_no_go.get("status") or "")},
+        {"name": "ticket_present", "required": True, "ok": bool(ticket), "actual": bool(ticket)},
+        {"name": "launch_intent_present", "required": True, "ok": bool(intent), "actual": bool(intent)},
+        {"name": "live_launch_guard_allow", "required": True, "ok": str(guard.get("status") or "") == "allow", "actual": str(guard.get("status") or "")},
+        {"name": "ticket_state_consistency_pass", "required": True, "ok": str(consistency.get("status") or "") == "pass", "actual": str(consistency.get("status") or "")},
+        {
+            "name": "revocation_not_effective",
+            "required": True,
+            "ok": not bool(((audit.get("ticket_state") or {}).get("effective_revoked", False))),
+            "actual": bool(((audit.get("ticket_state") or {}).get("effective_revoked", False))),
+        },
+    ]
+    failed_required = [c["name"] for c in checks if bool(c.get("required", False)) and not bool(c.get("ok", False))]
+    status = "authorized" if not failed_required else "blocked"
+    return {
+        "generated_unix_ms": int(time.time() * 1000),
+        "status": status,
+        "failed_required_checks": failed_required,
+        "ticket_id": str(ticket.get("ticket_id") or ""),
+        "intent_id": str(intent.get("intent_id") or ""),
+        "summary": {
+            "prelive_status": str(go_no_go.get("status") or ""),
+            "guard_status": str(guard.get("status") or ""),
+            "guard_required_failed_checks": list(guard.get("required_failed_checks", []) or []),
+            "ticket_consistency_status": str(consistency.get("status") or ""),
+            "ticket_latest_state": str((timeline.get("ticket_state") or {}).get("latest_state") or (audit.get("ticket_state") or {}).get("latest_state") or ""),
+            "ticket_effectively_revoked": bool(((audit.get("ticket_state") or {}).get("effective_revoked", False))),
+        },
+        "checks": checks,
+        "artifact_refs": {
+            "prelive_go_no_go_report_present": bool(go_no_go),
+            "promotion_ticket_present": bool(ticket),
+            "launch_intent_manifest_present": bool(intent),
+            "live_launch_guard_report_present": bool(guard),
+            "ticket_state_consistency_report_present": bool(consistency),
+            "revocation_audit_report_present": bool(audit),
+            "ticket_lifecycle_timeline_present": bool(timeline),
+        },
+    }
+
+
+def write_live_pilot_launch_authorization_packet(report: dict[str, Any], path_str: str) -> None:
+    p = Path(path_str)
+    if p.suffix.lower() in {".md", ".markdown"}:
+        s = dict(report.get("summary") or {})
+        lines = [
+            "# Live Pilot Launch Authorization Packet",
+            "",
+            f"- status: `{report.get('status', '')}`",
+            f"- ticket_id: `{report.get('ticket_id', '')}`",
+            f"- intent_id: `{report.get('intent_id', '')}`",
+            f"- failed_required_checks: `{', '.join(list(report.get('failed_required_checks', []) or [])) or '-'}`",
+            "",
+            "## Summary",
+            "",
+            f"- prelive_status: `{s.get('prelive_status', '')}`",
+            f"- guard_status: `{s.get('guard_status', '')}`",
+            f"- ticket_consistency_status: `{s.get('ticket_consistency_status', '')}`",
+            f"- ticket_latest_state: `{s.get('ticket_latest_state', '')}`",
+            f"- ticket_effectively_revoked: `{bool(s.get('ticket_effectively_revoked', False))}`",
+            "",
+            "## Checks",
+            "",
+        ]
+        for c in [dict(x) for x in list(report.get("checks") or []) if isinstance(x, dict)]:
+            lines.append(f"- {c.get('name','')}: `{'pass' if c.get('ok') else 'fail'}` required=`{bool(c.get('required', False))}` actual=`{c.get('actual')}`")
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    else:
+        p.write_text(json.dumps(report, sort_keys=True, indent=2), encoding="utf-8")
+
+
 def write_live_launch_guard_report(report: dict[str, Any], path_str: str) -> None:
     p = Path(path_str)
     if p.suffix.lower() in {".md", ".markdown"}:
@@ -4594,6 +4788,7 @@ def _main() -> int:
     p.add_argument("--promotion-ticket-consumption-log-jsonl-path", default="")
     p.add_argument("--promotion-ticket-revocation-log-jsonl-path", default="")
     p.add_argument("--promotion-ticket-revocation-audit-report-path", default="")
+    p.add_argument("--promotion-ticket-lifecycle-timeline-path", default="")
     p.add_argument("--promotion-ticket-revoke-now", action="store_true")
     p.add_argument("--promotion-ticket-revoke-reason", default="manual_revoke")
     p.add_argument("--promotion-ticket-revoke-only", action="store_true")
@@ -4601,6 +4796,7 @@ def _main() -> int:
     p.add_argument("--launch-intent-expires-seconds", type=float, default=1800.0)
     p.add_argument("--live-launch-guard-report-path", default="")
     p.add_argument("--ticket-state-consistency-report-path", default="")
+    p.add_argument("--launch-authorization-packet-path", default="")
     p.add_argument("--live-launch-guard-enforce", action="store_true")
     p.add_argument("--live-launch-guard-require-prelive", action="store_true")
     p.add_argument("--live-launch-guard-require-bundle-pass", action="store_true")
@@ -4710,12 +4906,16 @@ def _main() -> int:
             ensure_dir_within_base(str(Path(args.promotion_ticket_revocation_log_jsonl_path).parent))
         if args.promotion_ticket_revocation_audit_report_path:
             ensure_dir_within_base(str(Path(args.promotion_ticket_revocation_audit_report_path).parent))
+        if args.promotion_ticket_lifecycle_timeline_path:
+            ensure_dir_within_base(str(Path(args.promotion_ticket_lifecycle_timeline_path).parent))
         if args.launch_intent_manifest_path:
             ensure_dir_within_base(str(Path(args.launch_intent_manifest_path).parent))
         if args.live_launch_guard_report_path:
             ensure_dir_within_base(str(Path(args.live_launch_guard_report_path).parent))
         if args.ticket_state_consistency_report_path:
             ensure_dir_within_base(str(Path(args.ticket_state_consistency_report_path).parent))
+        if args.launch_authorization_packet_path:
+            ensure_dir_within_base(str(Path(args.launch_authorization_packet_path).parent))
         if args.postrun_review_packet_path:
             ensure_dir_within_base(str(Path(args.postrun_review_packet_path).parent))
         if args.archive_rotation_dir:
@@ -4782,29 +4982,59 @@ def _main() -> int:
             revoked_tickets=revoked_ticket_rows,
         )
         if str(args.promotion_ticket_revocation_audit_report_path or "").strip():
+            revocation_audit_report = build_live_pilot_promotion_ticket_revocation_audit_summary(
+                ticket=ticket_guard_obj,
+                consumed_tickets=consumed_ticket_rows,
+                revoked_tickets=revoked_ticket_rows,
+                revocation_reason_class_policy_overrides=revocation_policy_overrides,
+            )
             write_live_pilot_promotion_ticket_revocation_audit_summary(
-                build_live_pilot_promotion_ticket_revocation_audit_summary(
-                    ticket=ticket_guard_obj,
-                    consumed_tickets=consumed_ticket_rows,
-                    revoked_tickets=revoked_ticket_rows,
-                    revocation_reason_class_policy_overrides=revocation_policy_overrides,
-                ),
+                revocation_audit_report,
                 str(args.promotion_ticket_revocation_audit_report_path),
             )
+        else:
+            revocation_audit_report = {}
+        if str(args.promotion_ticket_lifecycle_timeline_path or "").strip():
+            ticket_lifecycle_timeline = build_live_pilot_promotion_ticket_lifecycle_timeline(
+                promotion_ticket=ticket_guard_obj,
+                consumed_tickets=consumed_ticket_rows,
+                revoked_tickets=revoked_ticket_rows,
+                launch_guard_report=live_guard,
+                revocation_reason_class_policy_overrides=revocation_policy_overrides,
+            )
+            write_live_pilot_promotion_ticket_lifecycle_timeline(ticket_lifecycle_timeline, str(args.promotion_ticket_lifecycle_timeline_path))
+        else:
+            ticket_lifecycle_timeline = {}
         if str(args.ticket_state_consistency_report_path or "").strip():
+            ticket_state_consistency_report = build_live_pilot_ticket_state_consistency_report(
+                promotion_ticket=ticket_guard_obj,
+                launch_intent_manifest=launch_intent_guard_obj,
+                prelive_go_no_go_report=prelive_guard_obj,
+                consumed_tickets=consumed_ticket_rows,
+                revoked_tickets=revoked_ticket_rows,
+                revocation_reason_class_policy_overrides=revocation_policy_overrides,
+                launch_guard_report=live_guard,
+                max_prelive_age_seconds=float(args.live_launch_guard_max_prelive_age_seconds or 3600.0),
+                max_launch_intent_age_seconds=float(args.live_launch_guard_max_launch_intent_age_seconds or 1800.0),
+            )
             write_live_pilot_ticket_state_consistency_report(
-                build_live_pilot_ticket_state_consistency_report(
+                ticket_state_consistency_report,
+                str(args.ticket_state_consistency_report_path),
+            )
+        else:
+            ticket_state_consistency_report = {}
+        if str(args.launch_authorization_packet_path or "").strip():
+            write_live_pilot_launch_authorization_packet(
+                build_live_pilot_launch_authorization_packet(
+                    prelive_go_no_go_report=prelive_guard_obj,
                     promotion_ticket=ticket_guard_obj,
                     launch_intent_manifest=launch_intent_guard_obj,
-                    prelive_go_no_go_report=prelive_guard_obj,
-                    consumed_tickets=consumed_ticket_rows,
-                    revoked_tickets=revoked_ticket_rows,
-                    revocation_reason_class_policy_overrides=revocation_policy_overrides,
-                    launch_guard_report=live_guard,
-                    max_prelive_age_seconds=float(args.live_launch_guard_max_prelive_age_seconds or 3600.0),
-                    max_launch_intent_age_seconds=float(args.live_launch_guard_max_launch_intent_age_seconds or 1800.0),
+                    live_launch_guard_report=live_guard,
+                    ticket_state_consistency_report=ticket_state_consistency_report,
+                    revocation_audit_report=revocation_audit_report,
+                    ticket_lifecycle_timeline=ticket_lifecycle_timeline,
                 ),
-                str(args.ticket_state_consistency_report_path),
+                str(args.launch_authorization_packet_path),
             )
         if str(args.live_launch_guard_report_path or "").strip():
             write_live_launch_guard_report(live_guard, str(args.live_launch_guard_report_path))

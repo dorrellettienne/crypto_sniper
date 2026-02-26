@@ -62,6 +62,10 @@ from src.live.live_pilot_service import (
     write_live_launch_guard_report,
     build_live_pilot_ticket_state_consistency_report,
     write_live_pilot_ticket_state_consistency_report,
+    build_live_pilot_promotion_ticket_lifecycle_timeline,
+    write_live_pilot_promotion_ticket_lifecycle_timeline,
+    build_live_pilot_launch_authorization_packet,
+    write_live_pilot_launch_authorization_packet,
     build_live_pilot_postrun_review_packet,
     write_live_pilot_postrun_review_packet,
     rotate_live_pilot_artifacts_by_glob,
@@ -2589,3 +2593,94 @@ def test_ticket_state_consistency_report_detects_scope_mismatch(tmp_path):
     md_path = tmp_path / "ticket_state_consistency.md"
     write_live_pilot_ticket_state_consistency_report(report, str(md_path))
     assert "Ticket State Consistency Report" in md_path.read_text(encoding="utf-8")
+
+
+def test_ticket_lifecycle_timeline_and_launch_authorization_packet(tmp_path):
+    now_ms = int(time.time() * 1000)
+    prelive = {"status": "go", "bundle_verification_status": "pass", "generated_unix_ms": now_ms}
+    intent = build_live_pilot_launch_intent_manifest(
+        mode="live_auto_tiny_one_trade",
+        risk_profile_preset="tiny_supervised",
+        enable_live_auto_submit_window=True,
+        adapter_config={"live_send_network_enabled": True},
+        prelive_go_no_go_report=prelive,
+        expires_in_seconds=1800,
+    )
+    ticket = build_live_pilot_promotion_ticket(
+        operator_id="main_user",
+        approval_action="approve_live_test",
+        risk_profile_preset="tiny_supervised",
+        prelive_go_no_go_report=prelive,
+        launch_intent_manifest=intent,
+        expires_in_seconds=3600,
+    )
+    consumed = [
+        {
+            "event_type": "live_pilot_promotion_ticket_consumed",
+            "ticket_id": ticket["ticket_id"],
+            "ticket_fingerprint_sha256": ticket["ticket_fingerprint_sha256"],
+            "ts_unix_ms": now_ms + 10,
+            "reason": "live_launch_guard_allow",
+        }
+    ]
+    revoked = [
+        {
+            "event_type": "live_pilot_promotion_ticket_revoked",
+            "ticket_id": ticket["ticket_id"],
+            "ticket_fingerprint_sha256": ticket["ticket_fingerprint_sha256"],
+            "ts_unix_ms": now_ms + 20,
+            "reason": "operator_cancelled",
+            "reason_class": "operator",
+            "severity": "warning",
+        }
+    ]
+    guard = {
+        "status": "allow",
+        "live_launch_requested": True,
+        "required_failed_checks": [],
+        "ticket_revoked": True,
+        "ticket_effectively_revoked": False,
+        "ticket_revocation_policy_action": "allow",
+    }
+    timeline = build_live_pilot_promotion_ticket_lifecycle_timeline(
+        promotion_ticket=ticket,
+        consumed_tickets=consumed,
+        revoked_tickets=revoked,
+        launch_guard_report=guard,
+        revocation_reason_class_policy_overrides={"operator": "allow"},
+    )
+    assert timeline["event_count"] >= 4
+    assert timeline["latest_state"] in {"revoked_waived", "consumed"}
+    md_timeline = tmp_path / "ticket_lifecycle_timeline.md"
+    write_live_pilot_promotion_ticket_lifecycle_timeline(timeline, str(md_timeline))
+    assert "Ticket Lifecycle Timeline" in md_timeline.read_text(encoding="utf-8")
+
+    audit = build_live_pilot_promotion_ticket_revocation_audit_summary(
+        ticket=ticket,
+        consumed_tickets=consumed,
+        revoked_tickets=revoked,
+        revocation_reason_class_policy_overrides={"operator": "allow"},
+    )
+    consistency = build_live_pilot_ticket_state_consistency_report(
+        promotion_ticket=ticket,
+        launch_intent_manifest=intent,
+        prelive_go_no_go_report=prelive,
+        consumed_tickets=consumed,
+        revoked_tickets=revoked,
+        revocation_reason_class_policy_overrides={"operator": "allow"},
+        launch_guard_report=guard,
+    )
+    packet = build_live_pilot_launch_authorization_packet(
+        prelive_go_no_go_report=prelive,
+        promotion_ticket=ticket,
+        launch_intent_manifest=intent,
+        live_launch_guard_report=guard,
+        ticket_state_consistency_report=consistency,
+        revocation_audit_report=audit,
+        ticket_lifecycle_timeline=timeline,
+    )
+    assert packet["status"] == "authorized"
+    assert packet["failed_required_checks"] == []
+    md_packet = tmp_path / "launch_authorization_packet.md"
+    write_live_pilot_launch_authorization_packet(packet, str(md_packet))
+    assert "Launch Authorization Packet" in md_packet.read_text(encoding="utf-8")
