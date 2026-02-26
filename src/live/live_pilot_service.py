@@ -5468,28 +5468,60 @@ def _maybe_attach_live_chain_reconciliation(payload: dict[str, Any], adapter: Li
     fetch_error = ""
     status_fetched = False
     tx_fetched = False
-    try:
-        status_payload = rpc.get_signature_status(sig, search_transaction_history=True)
-        status_fetched = True
-    except Exception as exc:
-        fetch_error = f"get_signature_status_error: {exc}"
-    if not fetch_error:
+    attempts_used = 0
+    max_attempts = max(1, int(_to_int_or_none(cfg.get("live_send_chain_reconciliation_fetch_attempts")) or 6))
+    poll_interval_seconds = max(0.0, float(_to_float_or_none(cfg.get("live_send_chain_reconciliation_fetch_poll_interval_seconds")) or 0.5))
+
+    for attempt in range(1, max_attempts + 1):
+        attempts_used = attempt
+        fetch_error = ""
         try:
-            tx_payload = rpc.get_transaction(
-                sig,
-                encoding="jsonParsed",
-                commitment="confirmed",
-                max_supported_transaction_version=0,
-            )
-            tx_fetched = True
+            status_payload = rpc.get_signature_status(sig, search_transaction_history=True)
+            status_fetched = True
         except Exception as exc:
-            fetch_error = f"get_transaction_error: {exc}"
+            fetch_error = f"get_signature_status_error: {exc}"
+
+        if not fetch_error:
+            try:
+                tx_payload = rpc.get_transaction(
+                    sig,
+                    encoding="jsonParsed",
+                    commitment="confirmed",
+                    max_supported_transaction_version=0,
+                )
+                tx_fetched = tx_payload is not None
+            except Exception as exc:
+                fetch_error = f"get_transaction_error: {exc}"
+
+        # Stop early if the transaction payload is available.
+        if tx_fetched:
+            break
+
+        # If status is already finalized, one extra poll is unnecessary.
+        normalized_status = ""
+        raw_status_val = None
+        try:
+            raw_status_val = ((status_payload or {}).get("value") or [None])[0]
+        except Exception:
+            raw_status_val = None
+        if isinstance(raw_status_val, dict):
+            normalized_status = str(raw_status_val.get("confirmationStatus") or raw_status_val.get("confirmation_status") or "")
+        elif hasattr(raw_status_val, "confirmation_status"):
+            normalized_status = str(getattr(raw_status_val, "confirmation_status") or "")
+        if normalized_status.lower() == "finalized":
+            break
+
+        if attempt < max_attempts and poll_interval_seconds > 0:
+            time.sleep(poll_interval_seconds)
 
     dispatch["chain_reconciliation_fetch"] = {
         "enabled": True,
         "signature": sig,
         "status_fetched": bool(status_fetched),
         "tx_fetched": bool(tx_fetched),
+        "attempts_used": int(attempts_used),
+        "max_attempts": int(max_attempts),
+        "poll_interval_seconds": float(poll_interval_seconds),
         "error": str(fetch_error or ""),
     }
     if fetch_error:

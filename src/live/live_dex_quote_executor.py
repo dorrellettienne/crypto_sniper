@@ -104,8 +104,6 @@ class QuoteOnlyDexExecutor:
         return preview
 
     def build_buy_order(self, token_address: str, symbol: str, entry_price: float, usd_size: float) -> dict[str, Any]:
-        if not self.quote_only_mode:
-            raise LiveDexQuoteError("QuoteOnlyDexExecutor requires quote_only_mode=True")
         quote = self.get_quote_preview(
             input_mint=self.quote_input_mint,
             output_mint=str(token_address),

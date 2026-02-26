@@ -34,10 +34,14 @@ def test_quote_only_dex_executor_sell_and_stop_are_preview_only():
     assert submit["client_order_id"] == "coid_1"
 
 
-def test_quote_only_dex_executor_rejects_non_quote_only_mode():
+def test_quote_only_dex_executor_allows_buy_quote_in_non_quote_only_mode_but_rejects_sell_stop():
     ex = QuoteOnlyDexExecutor("https://quote.example", transport=lambda *args, **kwargs: {}, quote_only_mode=False)
+    buy = ex.build_buy_order("TOKEN_A", "TKA", 0.01, 10)
+    assert buy["action"] == "buy"
     with pytest.raises(LiveDexQuoteError):
-        ex.build_buy_order("TOKEN_A", "TKA", 0.01, 10)
+        ex.build_sell_order(1, 0.02)
+    with pytest.raises(LiveDexQuoteError):
+        ex.build_stop_loss_order(1, 0.1)
 
 
 def test_quote_only_dex_executor_adds_fetch_timestamp_to_preview():

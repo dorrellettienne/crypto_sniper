@@ -35,6 +35,8 @@ def _sign_with_solders(unsigned_tx_b64: str, keypair_bytes: bytes) -> tuple[str 
     try:
         import base64
         from solders.keypair import Keypair  # type: ignore
+        from solders.message import to_bytes_versioned  # type: ignore
+        from solders.signature import Signature  # type: ignore
         from solders.transaction import VersionedTransaction  # type: ignore
     except Exception:
         return None, "solders_not_installed"
@@ -43,7 +45,12 @@ def _sign_with_solders(unsigned_tx_b64: str, keypair_bytes: bytes) -> tuple[str 
     except Exception:
         return None, "invalid_unsigned_transaction_base64"
     try:
-        kp = Keypair.from_bytes(keypair_bytes)
+        if len(keypair_bytes) == 64:
+            kp = Keypair.from_bytes(keypair_bytes)
+        elif len(keypair_bytes) == 32:
+            kp = Keypair.from_seed(keypair_bytes)
+        else:
+            return None, f"invalid_keypair_bytes_len_{len(keypair_bytes)}"
     except Exception:
         return None, "invalid_keypair_bytes"
     try:
@@ -51,7 +58,18 @@ def _sign_with_solders(unsigned_tx_b64: str, keypair_bytes: bytes) -> tuple[str 
     except Exception:
         return None, "invalid_unsigned_transaction_bytes"
     try:
-        signed_tx = VersionedTransaction(unsigned_tx.message, [kp])
+        msg_bytes = to_bytes_versioned(unsigned_tx.message)
+        user_sig = kp.sign_message(msg_bytes)
+        sigs = list(getattr(unsigned_tx, "signatures", []) or [])
+        required = 1
+        try:
+            required = int(getattr(unsigned_tx.message.header, "num_required_signatures", 1) or 1)
+        except Exception:
+            required = max(1, len(sigs))
+        if len(sigs) < required:
+            sigs.extend([Signature.default()] * (required - len(sigs)))
+        sigs[0] = user_sig
+        signed_tx = VersionedTransaction.populate(unsigned_tx.message, sigs[:required])
         signed_b64 = base64.b64encode(bytes(signed_tx)).decode("utf-8")
         return signed_b64, ""
     except Exception:

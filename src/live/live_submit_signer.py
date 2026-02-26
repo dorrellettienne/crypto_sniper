@@ -58,7 +58,15 @@ def _default_command_runner(command: list[str], payload: dict[str, Any], timeout
         check=False,
     )
     if proc.returncode != 0:
-        raise RuntimeError(f"signer command failed with exit code {proc.returncode}: {proc.stderr.strip()}")
+        stdout = (proc.stdout or "").strip()
+        stderr = (proc.stderr or "").strip()
+        details = []
+        if stdout:
+            details.append(f"stdout={stdout}")
+        if stderr:
+            details.append(f"stderr={stderr}")
+        suffix = f" ({'; '.join(details)})" if details else ""
+        raise RuntimeError(f"signer command failed with exit code {proc.returncode}{suffix}")
     stdout = (proc.stdout or "").strip()
     if not stdout:
         raise RuntimeError("signer command returned empty stdout")
