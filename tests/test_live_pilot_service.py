@@ -29,6 +29,10 @@ from src.live.live_pilot_service import (
     append_live_pilot_operator_decision_log,
     apply_operator_acknowledgement_to_daily_report,
     _build_campaign_alert_emitter,
+    build_live_pilot_artifact_index,
+    write_live_pilot_artifact_index,
+    build_live_pilot_handoff_snapshot,
+    write_live_pilot_handoff_snapshot,
     write_live_pilot_daily_operator_report,
     write_campaign_trend_report,
     run_live_pilot_service_loop,
@@ -2079,3 +2083,48 @@ def test_operator_decision_log_and_acknowledgement_are_embedded_in_daily_report(
     rows = [json.loads(x) for x in log_path.read_text(encoding="utf-8").splitlines() if x.strip()]
     assert rows[0]["event_type"] == "live_pilot_operator_decision"
     assert rows[0]["action"] == "hold"
+
+
+def test_build_artifact_index_and_handoff_snapshot_writers(tmp_path):
+    daily_path = tmp_path / "daily.md"
+    daily_path.write_text("x", encoding="utf-8")
+    sched_path = tmp_path / "schedule.md"
+    sched_path.write_text("y", encoding="utf-8")
+    alert_path = tmp_path / "alerts.jsonl"
+    alert_path.write_text("", encoding="utf-8")
+    daily_report = {
+        "date_label": "2026-02-25",
+        "latest_campaign_summary": {"campaign_id": "c1", "stop_reason": ""},
+        "operator_decision_summary": {"recommended_action": "continue_tiny_pilots", "decision_status": "continue_supervised_validation"},
+    }
+    schedule_report = {"schedule_summary": {"schedule_id": "s1", "completed_sessions": 1, "stop_reason": ""}, "sessions": []}
+    idx = build_live_pilot_artifact_index(
+        date_label="2026-02-25",
+        schedule_report=schedule_report,
+        schedule_report_path=str(sched_path),
+        daily_operator_report=daily_report,
+        daily_operator_report_path=str(daily_path),
+        alerts_jsonl_path=str(alert_path),
+        campaign_reports=[{"campaign_summary": {"campaign_id": "c1"}}],
+    )
+    assert idx["artifacts"]["daily_operator_report"]["present"] is True
+    assert idx["artifacts"]["schedule_report"]["present"] is True
+    idx_path = tmp_path / "artifact_index.md"
+    write_live_pilot_artifact_index(idx, str(idx_path))
+    assert "Live Pilot Artifact Index" in idx_path.read_text(encoding="utf-8")
+
+    handoff = build_live_pilot_handoff_snapshot(
+        schedule_report=schedule_report,
+        daily_operator_report=daily_report,
+        artifact_index={"date_label": "2026-02-25", "artifacts": {"artifact_index": {"path": str(idx_path)}}},
+        handoff_operator_id="main_user",
+        shift_label="night_shift",
+        handoff_notes="All good",
+        restart_command_hint="python -m src.live.live_pilot_service ... --resume-schedule",
+    )
+    assert handoff["schedule_summary"]["schedule_id"] == "s1"
+    h_path = tmp_path / "handoff.md"
+    write_live_pilot_handoff_snapshot(handoff, str(h_path))
+    txt = h_path.read_text(encoding="utf-8")
+    assert "Operator Hand-off Snapshot" in txt
+    assert "Restart Recovery Checklist" in txt

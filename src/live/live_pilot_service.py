@@ -1494,6 +1494,183 @@ def write_live_pilot_daily_operator_report(report: dict[str, Any], path_str: str
         path.write_text(json.dumps(report, sort_keys=True, indent=2), encoding="utf-8")
 
 
+def _artifact_file_info(path_str: str) -> dict[str, Any]:
+    ptxt = str(path_str or "").strip()
+    if not ptxt:
+        return {"path": "", "present": False}
+    p = Path(ptxt)
+    if not p.exists():
+        return {"path": ptxt, "present": False}
+    st = p.stat()
+    return {
+        "path": ptxt,
+        "present": True,
+        "size_bytes": int(st.st_size),
+        "modified_unix_ms": int(st.st_mtime * 1000),
+    }
+
+
+def build_live_pilot_artifact_index(
+    *,
+    date_label: str = "",
+    schedule_report: dict[str, Any] | None = None,
+    schedule_report_path: str = "",
+    schedule_state_path: str = "",
+    daily_operator_report: dict[str, Any] | None = None,
+    daily_operator_report_path: str = "",
+    campaign_reports: list[dict[str, Any]] | None = None,
+    campaign_report_paths: list[str] | None = None,
+    campaign_state_paths: list[str] | None = None,
+    alerts_jsonl_path: str = "",
+    operator_decision_log_jsonl_path: str = "",
+) -> dict[str, Any]:
+    campaign_reports = [dict(x) for x in list(campaign_reports or []) if isinstance(x, dict)]
+    campaign_report_paths = [str(x) for x in list(campaign_report_paths or []) if str(x)]
+    campaign_state_paths = [str(x) for x in list(campaign_state_paths or []) if str(x)]
+    schedule_summary = dict(((schedule_report or {}).get("schedule_summary") or {}))
+    latest_campaign_summary = {}
+    if schedule_report and isinstance((schedule_report or {}).get("sessions"), list) and (schedule_report or {}).get("sessions"):
+        latest_campaign_summary = dict((((schedule_report or {}).get("sessions") or [])[-1] or {}).get("campaign_summary") or {})
+    elif campaign_reports:
+        latest_campaign_summary = dict(((campaign_reports[-1] or {}).get("campaign_summary") or {}))
+    daily_summary = dict((daily_operator_report or {}).get("operator_decision_summary") or {})
+    index = {
+        "date_label": str(date_label or ""),
+        "generated_unix_ms": int(time.time() * 1000),
+        "schedule_summary": schedule_summary,
+        "latest_campaign_summary": latest_campaign_summary,
+        "daily_operator_decision_summary": daily_summary,
+        "artifacts": {
+            "schedule_report": _artifact_file_info(schedule_report_path),
+            "schedule_state": _artifact_file_info(schedule_state_path),
+            "daily_operator_report": _artifact_file_info(daily_operator_report_path),
+            "alerts_jsonl": _artifact_file_info(alerts_jsonl_path),
+            "operator_decision_log_jsonl": _artifact_file_info(operator_decision_log_jsonl_path),
+            "campaign_reports": [_artifact_file_info(p) for p in campaign_report_paths],
+            "campaign_states": [_artifact_file_info(p) for p in campaign_state_paths],
+        },
+        "counts": {
+            "campaign_reports": len(campaign_reports),
+            "campaign_report_paths": len(campaign_report_paths),
+            "campaign_state_paths": len(campaign_state_paths),
+        },
+    }
+    return index
+
+
+def _render_live_pilot_artifact_index_markdown(report: dict[str, Any]) -> str:
+    arts = dict(report.get("artifacts") or {})
+    sched = dict(report.get("schedule_summary") or {})
+    op = dict(report.get("daily_operator_decision_summary") or {})
+    lines = [
+        "# Live Pilot Artifact Index",
+        "",
+        f"- date_label: `{report.get('date_label', '')}`",
+        f"- generated_unix_ms: `{report.get('generated_unix_ms', 0)}`",
+        f"- schedule_id: `{sched.get('schedule_id', '')}`",
+        f"- completed_sessions: `{sched.get('completed_sessions', 0)}`",
+        f"- recommended_action: `{op.get('recommended_action', '')}`",
+        "",
+        "## Artifacts",
+        "",
+        f"- schedule_report: `{json.dumps(arts.get('schedule_report', {}), sort_keys=True)}`",
+        f"- schedule_state: `{json.dumps(arts.get('schedule_state', {}), sort_keys=True)}`",
+        f"- daily_operator_report: `{json.dumps(arts.get('daily_operator_report', {}), sort_keys=True)}`",
+        f"- alerts_jsonl: `{json.dumps(arts.get('alerts_jsonl', {}), sort_keys=True)}`",
+        f"- operator_decision_log_jsonl: `{json.dumps(arts.get('operator_decision_log_jsonl', {}), sort_keys=True)}`",
+        f"- campaign_reports_count: `{len(list(arts.get('campaign_reports') or []))}`",
+        f"- campaign_states_count: `{len(list(arts.get('campaign_states') or []))}`",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def write_live_pilot_artifact_index(report: dict[str, Any], path_str: str) -> None:
+    path = Path(path_str)
+    if path.suffix.lower() in {".md", ".markdown"}:
+        path.write_text(_render_live_pilot_artifact_index_markdown(report), encoding="utf-8")
+    else:
+        path.write_text(json.dumps(report, sort_keys=True, indent=2), encoding="utf-8")
+
+
+def build_live_pilot_handoff_snapshot(
+    *,
+    schedule_report: dict[str, Any] | None = None,
+    daily_operator_report: dict[str, Any] | None = None,
+    artifact_index: dict[str, Any] | None = None,
+    handoff_operator_id: str = "",
+    shift_label: str = "",
+    handoff_notes: str = "",
+    restart_command_hint: str = "",
+) -> dict[str, Any]:
+    schedule_summary = dict(((schedule_report or {}).get("schedule_summary") or {}))
+    daily = dict(daily_operator_report or {})
+    latest_campaign = dict(daily.get("latest_campaign_summary") or {})
+    op = dict(daily.get("operator_decision_summary") or {})
+    checklist = [
+        {"item": "Verify provider access status (DexScreener/backup source)", "done": False},
+        {"item": "Check latest campaign stop reason and alerts", "done": False},
+        {"item": "Confirm campaign/schedule state files exist before resume", "done": False},
+        {"item": "Review operator decision log and latest acknowledgement", "done": False},
+        {"item": "Resume schedule/campaign only after confirming caps and mode", "done": False},
+    ]
+    return {
+        "generated_unix_ms": int(time.time() * 1000),
+        "shift_label": str(shift_label or ""),
+        "handoff_operator_id": str(handoff_operator_id or ""),
+        "handoff_notes": str(handoff_notes or ""),
+        "schedule_summary": schedule_summary,
+        "latest_campaign_summary": latest_campaign,
+        "operator_decision_summary": op,
+        "artifact_index_summary": {
+            "artifact_index_path": str(((artifact_index or {}).get("artifacts") or {}).get("artifact_index", {}).get("path") or ""),
+            "date_label": str((artifact_index or {}).get("date_label") or ""),
+        },
+        "restart_recovery_checklist": checklist,
+        "restart_command_hint": str(restart_command_hint or ""),
+    }
+
+
+def _render_live_pilot_handoff_snapshot_markdown(report: dict[str, Any]) -> str:
+    sched = dict(report.get("schedule_summary") or {})
+    latest = dict(report.get("latest_campaign_summary") or {})
+    op = dict(report.get("operator_decision_summary") or {})
+    checklist = [dict(x) for x in list(report.get("restart_recovery_checklist") or []) if isinstance(x, dict)]
+    lines = [
+        "# Live Pilot Operator Hand-off Snapshot",
+        "",
+        f"- shift_label: `{report.get('shift_label', '')}`",
+        f"- handoff_operator_id: `{report.get('handoff_operator_id', '')}`",
+        f"- generated_unix_ms: `{report.get('generated_unix_ms', 0)}`",
+        f"- handoff_notes: `{report.get('handoff_notes', '')}`",
+        "",
+        "## Current State",
+        "",
+        f"- schedule_id: `{sched.get('schedule_id', '')}`",
+        f"- schedule_stop_reason: `{sched.get('stop_reason', '') or '-'}`",
+        f"- completed_sessions: `{sched.get('completed_sessions', 0)}`",
+        f"- latest_campaign_id: `{latest.get('campaign_id', '')}`",
+        f"- latest_campaign_stop_reason: `{latest.get('stop_reason', '') or '-'}`",
+        f"- recommended_action: `{op.get('recommended_action', '')}`",
+        f"- decision_status: `{op.get('decision_status', '')}`",
+        "",
+        "## Restart Recovery Checklist",
+        "",
+    ]
+    for row in checklist:
+        lines.append(f"- [{'x' if bool(row.get('done', False)) else ' '}] {row.get('item', '')}")
+    if str(report.get("restart_command_hint") or "").strip():
+        lines.extend(["", "## Restart Command Hint", "", f"`{report.get('restart_command_hint')}`"])
+    return "\n".join(lines) + "\n"
+
+
+def write_live_pilot_handoff_snapshot(report: dict[str, Any], path_str: str) -> None:
+    path = Path(path_str)
+    if path.suffix.lower() in {".md", ".markdown"}:
+        path.write_text(_render_live_pilot_handoff_snapshot_markdown(report), encoding="utf-8")
+    else:
+        path.write_text(json.dumps(report, sort_keys=True, indent=2), encoding="utf-8")
+
+
 def _path_with_inserted_suffix(path_str: str, suffix: str) -> str:
     if not str(path_str or "").strip():
         return ""
@@ -3112,6 +3289,12 @@ def _main() -> int:
     p.add_argument("--campaign-trend-report-path", default="")
     p.add_argument("--daily-operator-report-path", default="")
     p.add_argument("--daily-operator-date-label", default="")
+    p.add_argument("--artifact-index-path", default="")
+    p.add_argument("--handoff-snapshot-path", default="")
+    p.add_argument("--handoff-shift-label", default="")
+    p.add_argument("--handoff-operator-id", default="")
+    p.add_argument("--handoff-notes", default="")
+    p.add_argument("--restart-command-hint", default="")
     p.add_argument("--operator-decision-log-jsonl-path", default="")
     p.add_argument("--operator-decision-actor", default="")
     p.add_argument("--operator-decision-action", default="")
@@ -3175,6 +3358,10 @@ def _main() -> int:
             ensure_dir_within_base(str(Path(args.campaign_trend_report_path).parent))
         if args.daily_operator_report_path:
             ensure_dir_within_base(str(Path(args.daily_operator_report_path).parent))
+        if args.artifact_index_path:
+            ensure_dir_within_base(str(Path(args.artifact_index_path).parent))
+        if args.handoff_snapshot_path:
+            ensure_dir_within_base(str(Path(args.handoff_snapshot_path).parent))
         if args.operator_decision_log_jsonl_path:
             ensure_dir_within_base(str(Path(args.operator_decision_log_jsonl_path).parent))
         if args.schedule_state_json_path:
@@ -3224,6 +3411,28 @@ def _main() -> int:
                 )
                 daily_report = apply_operator_acknowledgement_to_daily_report(daily_report, decision_row)
             write_live_pilot_daily_operator_report(daily_report, str(args.daily_operator_report_path))
+            if str(args.artifact_index_path or "").strip():
+                artifact_index = build_live_pilot_artifact_index(
+                    date_label=str(args.daily_operator_date_label or ""),
+                    daily_operator_report=daily_report,
+                    daily_operator_report_path=str(args.daily_operator_report_path or ""),
+                    alerts_jsonl_path=str(args.alerts_jsonl_path or ""),
+                    operator_decision_log_jsonl_path=str(args.operator_decision_log_jsonl_path or ""),
+                    campaign_reports=reports,
+                    campaign_report_paths=[str(p) for p in report_paths],
+                )
+                artifact_index.setdefault("artifacts", {})["artifact_index"] = {"path": str(args.artifact_index_path or ""), "present": True}
+                write_live_pilot_artifact_index(artifact_index, str(args.artifact_index_path))
+                if str(args.handoff_snapshot_path or "").strip():
+                    handoff = build_live_pilot_handoff_snapshot(
+                        daily_operator_report=daily_report,
+                        artifact_index=artifact_index,
+                        handoff_operator_id=str(args.handoff_operator_id or args.operator_decision_actor or ""),
+                        shift_label=str(args.handoff_shift_label or ""),
+                        handoff_notes=str(args.handoff_notes or ""),
+                        restart_command_hint=str(args.restart_command_hint or ""),
+                    )
+                    write_live_pilot_handoff_snapshot(handoff, str(args.handoff_snapshot_path))
         print(json.dumps(trend_report, sort_keys=True))
         return 0
     preflight = _build_live_pilot_preflight(args, adapter_config=adapter_config)
@@ -3585,11 +3794,44 @@ def _main() -> int:
                 daily_report = apply_operator_acknowledgement_to_daily_report(daily_report, decision_row)
                 write_live_pilot_daily_operator_report(daily_report, str(args.daily_operator_report_path))
                 schedule["daily_operator_report"] = daily_report
+            if str(args.artifact_index_path or "").strip():
+                sessions = [dict(x) for x in list(schedule.get("sessions") or []) if isinstance(x, dict)]
+                campaign_reports_for_index = [{"campaign_summary": dict((s.get("campaign_summary") or {}))} for s in sessions]
+                campaign_report_paths = [str(s.get("report_path") or "") for s in sessions if str(s.get("report_path") or "").strip()]
+                campaign_state_paths = [str(s.get("state_path") or "") for s in sessions if str(s.get("state_path") or "").strip()]
+                artifact_index = build_live_pilot_artifact_index(
+                    date_label=str(args.daily_operator_date_label or ""),
+                    schedule_report=schedule,
+                    schedule_report_path=str(args.schedule_report_path or ""),
+                    schedule_state_path=str(args.schedule_state_json_path or ""),
+                    daily_operator_report=dict(schedule.get("daily_operator_report") or {}),
+                    daily_operator_report_path=str(args.daily_operator_report_path or ""),
+                    campaign_reports=campaign_reports_for_index,
+                    campaign_report_paths=campaign_report_paths,
+                    campaign_state_paths=campaign_state_paths,
+                    alerts_jsonl_path=str(args.alerts_jsonl_path or ""),
+                    operator_decision_log_jsonl_path=str(args.operator_decision_log_jsonl_path or ""),
+                )
+                artifact_index.setdefault("artifacts", {})["artifact_index"] = {"path": str(args.artifact_index_path or ""), "present": True}
+                write_live_pilot_artifact_index(artifact_index, str(args.artifact_index_path))
+                if str(args.handoff_snapshot_path or "").strip():
+                    handoff = build_live_pilot_handoff_snapshot(
+                        schedule_report=schedule,
+                        daily_operator_report=dict(schedule.get("daily_operator_report") or {}),
+                        artifact_index=artifact_index,
+                        handoff_operator_id=str(args.handoff_operator_id or args.operator_decision_actor or ""),
+                        shift_label=str(args.handoff_shift_label or ""),
+                        handoff_notes=str(args.handoff_notes or ""),
+                        restart_command_hint=str(args.restart_command_hint or ""),
+                    )
+                    write_live_pilot_handoff_snapshot(handoff, str(args.handoff_snapshot_path))
             cli_out = {
                 "schedule_summary": schedule.get("schedule_summary"),
                 "report_path": schedule.get("report_path", ""),
                 "state_path": schedule.get("state_path", ""),
                 "daily_operator_report_path": (str(args.daily_operator_report_path or "")),
+                "artifact_index_path": (str(args.artifact_index_path or "")),
+                "handoff_snapshot_path": (str(args.handoff_snapshot_path or "")),
             }
             print(json.dumps(cli_out, sort_keys=True))
             if bool(args.print_human_summary):
@@ -3621,11 +3863,36 @@ def _main() -> int:
                 )
                 daily_report = apply_operator_acknowledgement_to_daily_report(daily_report, decision_row)
             write_live_pilot_daily_operator_report(daily_report, str(args.daily_operator_report_path))
+            if str(args.artifact_index_path or "").strip():
+                artifact_index = build_live_pilot_artifact_index(
+                    date_label=str(args.daily_operator_date_label or ""),
+                    daily_operator_report=daily_report,
+                    daily_operator_report_path=str(args.daily_operator_report_path or ""),
+                    campaign_reports=[campaign],
+                    campaign_report_paths=([str(campaign.get("report_path") or "")] if str(campaign.get("report_path") or "").strip() else []),
+                    campaign_state_paths=([str(campaign.get("state_path") or "")] if str(campaign.get("state_path") or "").strip() else []),
+                    alerts_jsonl_path=str(args.alerts_jsonl_path or ""),
+                    operator_decision_log_jsonl_path=str(args.operator_decision_log_jsonl_path or ""),
+                )
+                artifact_index.setdefault("artifacts", {})["artifact_index"] = {"path": str(args.artifact_index_path or ""), "present": True}
+                write_live_pilot_artifact_index(artifact_index, str(args.artifact_index_path))
+                if str(args.handoff_snapshot_path or "").strip():
+                    handoff = build_live_pilot_handoff_snapshot(
+                        daily_operator_report=daily_report,
+                        artifact_index=artifact_index,
+                        handoff_operator_id=str(args.handoff_operator_id or args.operator_decision_actor or ""),
+                        shift_label=str(args.handoff_shift_label or ""),
+                        handoff_notes=str(args.handoff_notes or ""),
+                        restart_command_hint=str(args.restart_command_hint or ""),
+                    )
+                    write_live_pilot_handoff_snapshot(handoff, str(args.handoff_snapshot_path))
         cli_out = {
             "campaign_summary": campaign.get("campaign_summary"),
             "report_path": campaign.get("report_path", ""),
             "state_path": campaign.get("state_path", ""),
             "daily_operator_report_path": (str(args.daily_operator_report_path or "")),
+            "artifact_index_path": (str(args.artifact_index_path or "")),
+            "handoff_snapshot_path": (str(args.handoff_snapshot_path or "")),
         }
         print(json.dumps(cli_out, sort_keys=True))
         if bool(args.print_human_summary):
