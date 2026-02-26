@@ -41,6 +41,11 @@ from src.live.live_pilot_service import (
     write_live_pilot_bundle_verification,
     build_live_pilot_session_timeline,
     write_live_pilot_session_timeline,
+    get_live_pilot_risk_profile_preset,
+    build_live_pilot_promotion_step_manifest,
+    write_live_pilot_promotion_step_manifest,
+    build_live_pilot_prelive_go_no_go_checklist,
+    write_live_pilot_prelive_go_no_go_checklist,
     write_live_pilot_daily_operator_report,
     write_campaign_trend_report,
     run_live_pilot_service_loop,
@@ -2195,3 +2200,40 @@ def test_bundle_verification_and_timeline_writers(tmp_path):
     tp = tmp_path / "timeline.md"
     write_live_pilot_session_timeline(timeline, str(tp))
     assert "Session Timeline" in tp.read_text(encoding="utf-8")
+
+
+def test_risk_profile_preset_and_promotion_manifest_writer(tmp_path):
+    preset = get_live_pilot_risk_profile_preset("tiny_supervised")
+    assert preset["max_notional_usd_total"] == 1.0
+    manifest = build_live_pilot_promotion_step_manifest(
+        risk_profile_preset="tiny_supervised",
+        step_name="increase_frequency_only",
+        daily_operator_report={"operator_decision_summary": {"recommended_action": "continue_tiny_pilots", "decision_status": "continue_supervised_validation"}},
+        artifact_index={"artifacts": {"artifact_index": {"path": "x"}}},
+        bundle_verification={"status": "pass", "failed_checks": []},
+        operator_decision_log_path="decisions.jsonl",
+    )
+    assert manifest["risk_profile"]["profile_name"] == "tiny_supervised"
+    p = tmp_path / "promotion_manifest.md"
+    write_live_pilot_promotion_step_manifest(manifest, str(p))
+    assert "Promotion Step Manifest" in p.read_text(encoding="utf-8")
+
+
+def test_prelive_go_no_go_checklist_writer(tmp_path):
+    report = build_live_pilot_prelive_go_no_go_checklist(
+        daily_operator_report={
+            "operator_decision_summary": {"recommended_action": "continue_tiny_pilots"},
+            "operator_acknowledgement": {"action": "continue_tiny_pilots"},
+        },
+        bundle_verification={"status": "pass"},
+        handoff_snapshot={"schedule_summary": {"schedule_id": "s1"}},
+        risk_profile_preset="tiny_supervised",
+        required_operator_ack=True,
+        require_bundle_pass=True,
+    )
+    assert report["status"] == "go"
+    p = tmp_path / "go_no_go.md"
+    write_live_pilot_prelive_go_no_go_checklist(report, str(p))
+    txt = p.read_text(encoding="utf-8")
+    assert "Pre-Live Go / No-Go Checklist" in txt
+    assert "status: `go`" in txt

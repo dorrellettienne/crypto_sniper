@@ -1908,6 +1908,191 @@ def _read_jsonl_rows(path_str: str) -> list[dict[str, Any]]:
     return out
 
 
+def get_live_pilot_risk_profile_preset(name: str) -> dict[str, Any]:
+    key = str(name or "").strip().lower()
+    presets = {
+        "tiny_supervised": {
+            "profile_name": "tiny_supervised",
+            "max_notional_usd_total": 1.0,
+            "max_orders_per_session": 1,
+            "schedule_sessions_per_day_cap": 3,
+            "requires_operator_acknowledgement": True,
+            "requires_bundle_verification_pass": True,
+            "target_mode": "pilot_campaign_tiny_supervised",
+        },
+        "tiny_supervised_plus": {
+            "profile_name": "tiny_supervised_plus",
+            "max_notional_usd_total": 2.0,
+            "max_orders_per_session": 1,
+            "schedule_sessions_per_day_cap": 5,
+            "requires_operator_acknowledgement": True,
+            "requires_bundle_verification_pass": True,
+            "target_mode": "pilot_campaign_tiny_supervised",
+        },
+        "frequency_step_only": {
+            "profile_name": "frequency_step_only",
+            "max_notional_usd_total": 1.0,
+            "max_orders_per_session": 1,
+            "schedule_sessions_per_day_cap": 8,
+            "requires_operator_acknowledgement": True,
+            "requires_bundle_verification_pass": True,
+            "target_mode": "pilot_campaign_schedule_tiny_supervised",
+        },
+    }
+    if key not in presets:
+        raise ValueError(f"unknown risk profile preset: {name}")
+    return dict(presets[key])
+
+
+def build_live_pilot_promotion_step_manifest(
+    *,
+    risk_profile_preset: str,
+    step_name: str = "",
+    daily_operator_report: dict[str, Any] | None = None,
+    artifact_index: dict[str, Any] | None = None,
+    bundle_verification: dict[str, Any] | None = None,
+    operator_decision_log_path: str = "",
+) -> dict[str, Any]:
+    preset = get_live_pilot_risk_profile_preset(risk_profile_preset)
+    daily = dict(daily_operator_report or {})
+    op = dict(daily.get("operator_decision_summary") or {})
+    ack = dict(daily.get("operator_acknowledgement") or {})
+    bundle = dict(bundle_verification or {})
+    idx = dict(artifact_index or {})
+    recommended_action = str(op.get("recommended_action") or "")
+    target_step = str(step_name or recommended_action or "hold")
+    return {
+        "generated_unix_ms": int(time.time() * 1000),
+        "step_name": target_step,
+        "risk_profile_preset": preset["profile_name"],
+        "risk_profile": preset,
+        "operator_context": {
+            "recommended_action": recommended_action,
+            "decision_status": str(op.get("decision_status") or ""),
+            "operator_acknowledged": bool(ack),
+            "operator_ack_action": str(ack.get("action") or ""),
+            "operator_decision_log_path": str(operator_decision_log_path or ""),
+        },
+        "artifact_context": {
+            "artifact_index_path": str(((idx.get("artifacts") or {}).get("artifact_index") or {}).get("path") or ""),
+            "bundle_verification_status": str(bundle.get("status") or ""),
+            "bundle_failed_checks": list(bundle.get("failed_checks", []) or []),
+        },
+    }
+
+
+def write_live_pilot_promotion_step_manifest(report: dict[str, Any], path_str: str) -> None:
+    p = Path(path_str)
+    if p.suffix.lower() in {".md", ".markdown"}:
+        rp = dict(report.get("risk_profile") or {})
+        op = dict(report.get("operator_context") or {})
+        ac = dict(report.get("artifact_context") or {})
+        lines = [
+            "# Live Pilot Promotion Step Manifest",
+            "",
+            f"- generated_unix_ms: `{report.get('generated_unix_ms', 0)}`",
+            f"- step_name: `{report.get('step_name', '')}`",
+            f"- risk_profile_preset: `{report.get('risk_profile_preset', '')}`",
+            "",
+            "## Risk Profile",
+            "",
+            f"- max_notional_usd_total: `{rp.get('max_notional_usd_total')}`",
+            f"- max_orders_per_session: `{rp.get('max_orders_per_session')}`",
+            f"- schedule_sessions_per_day_cap: `{rp.get('schedule_sessions_per_day_cap')}`",
+            "",
+            "## Operator Context",
+            "",
+            f"- recommended_action: `{op.get('recommended_action', '')}`",
+            f"- decision_status: `{op.get('decision_status', '')}`",
+            f"- operator_acknowledged: `{bool(op.get('operator_acknowledged', False))}`",
+            "",
+            "## Artifact Context",
+            "",
+            f"- bundle_verification_status: `{ac.get('bundle_verification_status', '')}`",
+            f"- bundle_failed_checks: `{', '.join(list(ac.get('bundle_failed_checks', []) or [])) or '-'}`",
+        ]
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    else:
+        p.write_text(json.dumps(report, sort_keys=True, indent=2), encoding="utf-8")
+
+
+def build_live_pilot_prelive_go_no_go_checklist(
+    *,
+    daily_operator_report: dict[str, Any] | None = None,
+    bundle_verification: dict[str, Any] | None = None,
+    handoff_snapshot: dict[str, Any] | None = None,
+    risk_profile_preset: str = "",
+    required_operator_ack: bool = True,
+    require_bundle_pass: bool = True,
+) -> dict[str, Any]:
+    daily = dict(daily_operator_report or {})
+    op = dict(daily.get("operator_decision_summary") or {})
+    ack = dict(daily.get("operator_acknowledgement") or {})
+    bundle = dict(bundle_verification or {})
+    handoff = dict(handoff_snapshot or {})
+    profile = (get_live_pilot_risk_profile_preset(risk_profile_preset) if str(risk_profile_preset or "").strip() else {})
+    checks = [
+        {
+            "name": "bundle_verification_pass",
+            "ok": (str(bundle.get("status") or "") == "pass") if require_bundle_pass else True,
+            "required": bool(require_bundle_pass),
+            "actual": str(bundle.get("status") or ""),
+        },
+        {
+            "name": "operator_acknowledged",
+            "ok": bool(ack) if required_operator_ack else True,
+            "required": bool(required_operator_ack),
+            "actual": bool(ack),
+        },
+        {
+            "name": "decision_not_hold",
+            "ok": str(ack.get("action") or op.get("recommended_action") or "") != "hold",
+            "required": False,
+            "actual": str(ack.get("action") or op.get("recommended_action") or ""),
+        },
+        {
+            "name": "handoff_snapshot_present",
+            "ok": bool(handoff),
+            "required": False,
+            "actual": bool(handoff),
+        },
+    ]
+    failed_required = [c["name"] for c in checks if bool(c.get("required", False)) and not bool(c.get("ok", False))]
+    status = "go" if not failed_required else "no_go"
+    return {
+        "generated_unix_ms": int(time.time() * 1000),
+        "status": status,
+        "failed_required_checks": failed_required,
+        "risk_profile_preset": str(profile.get("profile_name") or ""),
+        "risk_profile": profile,
+        "checks": checks,
+        "operator_decision_summary": op,
+        "operator_acknowledgement": ack,
+        "bundle_verification_status": str(bundle.get("status") or ""),
+    }
+
+
+def write_live_pilot_prelive_go_no_go_checklist(report: dict[str, Any], path_str: str) -> None:
+    p = Path(path_str)
+    if p.suffix.lower() in {".md", ".markdown"}:
+        lines = [
+            "# Live Pilot Pre-Live Go / No-Go Checklist",
+            "",
+            f"- status: `{report.get('status', '')}`",
+            f"- risk_profile_preset: `{report.get('risk_profile_preset', '')}`",
+            f"- bundle_verification_status: `{report.get('bundle_verification_status', '')}`",
+            f"- failed_required_checks: `{', '.join(list(report.get('failed_required_checks', []) or [])) or '-'}`",
+            "",
+            "## Checks",
+            "",
+        ]
+        for c in [dict(x) for x in list(report.get("checks") or []) if isinstance(x, dict)]:
+            lines.append(f"- {c.get('name','')}: `{'pass' if c.get('ok') else 'fail'}` required=`{bool(c.get('required', False))}` actual=`{c.get('actual')}`")
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    else:
+        p.write_text(json.dumps(report, sort_keys=True, indent=2), encoding="utf-8")
+
+
 def _path_with_inserted_suffix(path_str: str, suffix: str) -> str:
     if not str(path_str or "").strip():
         return ""
@@ -3547,6 +3732,12 @@ def _main() -> int:
     p.add_argument("--restart-command-hint", default="")
     p.add_argument("--run-manifest-path", default="")
     p.add_argument("--run-manifest-label", default="")
+    p.add_argument("--risk-profile-preset", default="")
+    p.add_argument("--promotion-step-manifest-path", default="")
+    p.add_argument("--promotion-step-name", default="")
+    p.add_argument("--prelive-go-no-go-report-path", default="")
+    p.add_argument("--prelive-require-operator-ack", action="store_true")
+    p.add_argument("--prelive-require-bundle-pass", action="store_true")
     p.add_argument("--operator-decision-log-jsonl-path", default="")
     p.add_argument("--operator-decision-actor", default="")
     p.add_argument("--operator-decision-action", default="")
@@ -3627,6 +3818,10 @@ def _main() -> int:
             ensure_dir_within_base(str(Path(args.handoff_snapshot_path).parent))
         if args.run_manifest_path:
             ensure_dir_within_base(str(Path(args.run_manifest_path).parent))
+        if args.promotion_step_manifest_path:
+            ensure_dir_within_base(str(Path(args.promotion_step_manifest_path).parent))
+        if args.prelive_go_no_go_report_path:
+            ensure_dir_within_base(str(Path(args.prelive_go_no_go_report_path).parent))
         if args.operator_decision_log_jsonl_path:
             ensure_dir_within_base(str(Path(args.operator_decision_log_jsonl_path).parent))
         if args.bundle_verification_report_path:
@@ -3702,6 +3897,34 @@ def _main() -> int:
                         restart_command_hint=str(args.restart_command_hint or ""),
                     )
                     write_live_pilot_handoff_snapshot(handoff, str(args.handoff_snapshot_path))
+                bundle_verification = None
+                if str(args.bundle_verification_report_path or "").strip():
+                    bundle_verification = verify_live_pilot_validation_bundle(artifact_index=artifact_index)
+                    write_live_pilot_bundle_verification(bundle_verification, str(args.bundle_verification_report_path))
+                if str(args.promotion_step_manifest_path or "").strip() and str(args.risk_profile_preset or "").strip():
+                    write_live_pilot_promotion_step_manifest(
+                        build_live_pilot_promotion_step_manifest(
+                            risk_profile_preset=str(args.risk_profile_preset),
+                            step_name=str(args.promotion_step_name or ""),
+                            daily_operator_report=daily_report,
+                            artifact_index=artifact_index,
+                            bundle_verification=(bundle_verification or verify_live_pilot_validation_bundle(artifact_index=artifact_index)),
+                            operator_decision_log_path=str(args.operator_decision_log_jsonl_path or ""),
+                        ),
+                        str(args.promotion_step_manifest_path),
+                    )
+                if str(args.prelive_go_no_go_report_path or "").strip():
+                    write_live_pilot_prelive_go_no_go_checklist(
+                        build_live_pilot_prelive_go_no_go_checklist(
+                            daily_operator_report=daily_report,
+                            bundle_verification=(bundle_verification or verify_live_pilot_validation_bundle(artifact_index=artifact_index)),
+                            handoff_snapshot=(handoff if 'handoff' in locals() else {}),
+                            risk_profile_preset=str(args.risk_profile_preset or ""),
+                            required_operator_ack=bool(args.prelive_require_operator_ack),
+                            require_bundle_pass=bool(args.prelive_require_bundle_pass),
+                        ),
+                        str(args.prelive_go_no_go_report_path),
+                    )
         print(json.dumps(trend_report, sort_keys=True))
         return 0
     preflight = _build_live_pilot_preflight(args, adapter_config=adapter_config)
@@ -4097,10 +4320,10 @@ def _main() -> int:
                     )
                     write_live_pilot_handoff_snapshot(handoff, str(args.handoff_snapshot_path))
                 if str(args.bundle_verification_report_path or "").strip():
-                    write_live_pilot_bundle_verification(
-                        verify_live_pilot_validation_bundle(artifact_index=artifact_index),
-                        str(args.bundle_verification_report_path),
-                    )
+                    bundle_verification = verify_live_pilot_validation_bundle(artifact_index=artifact_index)
+                    write_live_pilot_bundle_verification(bundle_verification, str(args.bundle_verification_report_path))
+                else:
+                    bundle_verification = verify_live_pilot_validation_bundle(artifact_index=artifact_index)
                 if str(args.timeline_export_path or "").strip():
                     write_live_pilot_session_timeline(
                         build_live_pilot_session_timeline(
@@ -4109,6 +4332,30 @@ def _main() -> int:
                             operator_decision_rows=_read_jsonl_rows(str(args.operator_decision_log_jsonl_path or "")),
                         ),
                         str(args.timeline_export_path),
+                    )
+                if str(args.promotion_step_manifest_path or "").strip() and str(args.risk_profile_preset or "").strip():
+                    write_live_pilot_promotion_step_manifest(
+                        build_live_pilot_promotion_step_manifest(
+                            risk_profile_preset=str(args.risk_profile_preset),
+                            step_name=str(args.promotion_step_name or ""),
+                            daily_operator_report=dict(schedule.get("daily_operator_report") or {}),
+                            artifact_index=artifact_index,
+                            bundle_verification=bundle_verification,
+                            operator_decision_log_path=str(args.operator_decision_log_jsonl_path or ""),
+                        ),
+                        str(args.promotion_step_manifest_path),
+                    )
+                if str(args.prelive_go_no_go_report_path or "").strip():
+                    write_live_pilot_prelive_go_no_go_checklist(
+                        build_live_pilot_prelive_go_no_go_checklist(
+                            daily_operator_report=dict(schedule.get("daily_operator_report") or {}),
+                            bundle_verification=bundle_verification,
+                            handoff_snapshot=(handoff if 'handoff' in locals() else {}),
+                            risk_profile_preset=str(args.risk_profile_preset or ""),
+                            required_operator_ack=bool(args.prelive_require_operator_ack),
+                            require_bundle_pass=bool(args.prelive_require_bundle_pass),
+                        ),
+                        str(args.prelive_go_no_go_report_path),
                     )
             cli_out = {
                 "schedule_summary": schedule.get("schedule_summary"),
@@ -4119,6 +4366,8 @@ def _main() -> int:
                 "handoff_snapshot_path": (str(args.handoff_snapshot_path or "")),
                 "bundle_verification_report_path": (str(args.bundle_verification_report_path or "")),
                 "timeline_export_path": (str(args.timeline_export_path or "")),
+                "promotion_step_manifest_path": (str(args.promotion_step_manifest_path or "")),
+                "prelive_go_no_go_report_path": (str(args.prelive_go_no_go_report_path or "")),
             }
             print(json.dumps(cli_out, sort_keys=True))
             if bool(args.print_human_summary):
@@ -4174,10 +4423,10 @@ def _main() -> int:
                     )
                     write_live_pilot_handoff_snapshot(handoff, str(args.handoff_snapshot_path))
                 if str(args.bundle_verification_report_path or "").strip():
-                    write_live_pilot_bundle_verification(
-                        verify_live_pilot_validation_bundle(artifact_index=artifact_index),
-                        str(args.bundle_verification_report_path),
-                    )
+                    bundle_verification = verify_live_pilot_validation_bundle(artifact_index=artifact_index)
+                    write_live_pilot_bundle_verification(bundle_verification, str(args.bundle_verification_report_path))
+                else:
+                    bundle_verification = verify_live_pilot_validation_bundle(artifact_index=artifact_index)
                 if str(args.timeline_export_path or "").strip():
                     write_live_pilot_session_timeline(
                         build_live_pilot_session_timeline(
@@ -4186,6 +4435,30 @@ def _main() -> int:
                             operator_decision_rows=_read_jsonl_rows(str(args.operator_decision_log_jsonl_path or "")),
                         ),
                         str(args.timeline_export_path),
+                    )
+                if str(args.promotion_step_manifest_path or "").strip() and str(args.risk_profile_preset or "").strip():
+                    write_live_pilot_promotion_step_manifest(
+                        build_live_pilot_promotion_step_manifest(
+                            risk_profile_preset=str(args.risk_profile_preset),
+                            step_name=str(args.promotion_step_name or ""),
+                            daily_operator_report=daily_report,
+                            artifact_index=artifact_index,
+                            bundle_verification=bundle_verification,
+                            operator_decision_log_path=str(args.operator_decision_log_jsonl_path or ""),
+                        ),
+                        str(args.promotion_step_manifest_path),
+                    )
+                if str(args.prelive_go_no_go_report_path or "").strip():
+                    write_live_pilot_prelive_go_no_go_checklist(
+                        build_live_pilot_prelive_go_no_go_checklist(
+                            daily_operator_report=daily_report,
+                            bundle_verification=bundle_verification,
+                            handoff_snapshot=(handoff if 'handoff' in locals() else {}),
+                            risk_profile_preset=str(args.risk_profile_preset or ""),
+                            required_operator_ack=bool(args.prelive_require_operator_ack),
+                            require_bundle_pass=bool(args.prelive_require_bundle_pass),
+                        ),
+                        str(args.prelive_go_no_go_report_path),
                     )
         cli_out = {
             "campaign_summary": campaign.get("campaign_summary"),
@@ -4196,6 +4469,8 @@ def _main() -> int:
             "handoff_snapshot_path": (str(args.handoff_snapshot_path or "")),
             "bundle_verification_report_path": (str(args.bundle_verification_report_path or "")),
             "timeline_export_path": (str(args.timeline_export_path or "")),
+            "promotion_step_manifest_path": (str(args.promotion_step_manifest_path or "")),
+            "prelive_go_no_go_report_path": (str(args.prelive_go_no_go_report_path or "")),
         }
         print(json.dumps(cli_out, sort_keys=True))
         if bool(args.print_human_summary):
