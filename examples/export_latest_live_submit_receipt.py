@@ -1,18 +1,38 @@
 import argparse
 import json
+import time
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
 RPC_URL = "https://api.mainnet-beta.solana.com"
 
 
-def _rpc(method: str, params: list[Any]) -> dict[str, Any]:
+def _rpc(method: str, params: list[Any], retry_attempts: int = 4, retry_backoff_seconds: float = 1.0) -> dict[str, Any]:
     body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode("utf-8")
     req = Request(RPC_URL, data=body, headers={"Content-Type": "application/json"}, method="POST")
-    with urlopen(req, timeout=20) as resp:  # nosec - trusted RPC URL
-        return json.loads(resp.read().decode("utf-8"))
+    attempts = max(1, int(retry_attempts))
+    backoff = max(0.0, float(retry_backoff_seconds))
+    last_exc: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            with urlopen(req, timeout=20) as resp:  # nosec - trusted RPC URL
+                return json.loads(resp.read().decode("utf-8"))
+        except HTTPError as exc:
+            last_exc = exc
+            if exc.code not in (429, 500, 502, 503, 504) or attempt >= attempts - 1:
+                raise
+        except URLError as exc:
+            last_exc = exc
+            if attempt >= attempts - 1:
+                raise
+        if backoff > 0:
+            time.sleep(backoff * (2 ** attempt))
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("rpc_request_failed")
 
 
 def _latest_log(exports_dir: Path) -> Path | None:
@@ -117,7 +137,12 @@ def _extract_owner_token_delta(tx_result: dict[str, Any] | None, owner_pubkey: s
     return deltas
 
 
-def build_receipt(exports_dir: Path, owner_pubkey: str | None = None) -> dict[str, Any]:
+def build_receipt(
+    exports_dir: Path,
+    owner_pubkey: str | None = None,
+    rpc_retry_attempts: int = 4,
+    rpc_retry_backoff_seconds: float = 1.0,
+) -> dict[str, Any]:
     log = _latest_log(exports_dir)
     if log is None:
         return {"ok": False, "reason": "no_audit_logs_found", "exports_dir": str(exports_dir)}
@@ -126,8 +151,18 @@ def build_receipt(exports_dir: Path, owner_pubkey: str | None = None) -> dict[st
     if not sig:
         return {"ok": False, "reason": "no_submitted_signature_found", "log": str(log)}
 
-    status_resp = _rpc("getSignatureStatuses", [[sig], {"searchTransactionHistory": True}])
-    tx_resp = _rpc("getTransaction", [sig, {"encoding": "json", "maxSupportedTransactionVersion": 0}])
+    status_resp = _rpc(
+        "getSignatureStatuses",
+        [[sig], {"searchTransactionHistory": True}],
+        retry_attempts=rpc_retry_attempts,
+        retry_backoff_seconds=rpc_retry_backoff_seconds,
+    )
+    tx_resp = _rpc(
+        "getTransaction",
+        [sig, {"encoding": "json", "maxSupportedTransactionVersion": 0}],
+        retry_attempts=rpc_retry_attempts,
+        retry_backoff_seconds=rpc_retry_backoff_seconds,
+    )
     status_result = status_resp.get("result") if isinstance(status_resp, dict) else None
     tx_result = tx_resp.get("result") if isinstance(tx_resp, dict) else None
     status_short = _short_status(status_result if isinstance(status_result, dict) else None)
@@ -209,9 +244,16 @@ def main() -> int:
     parser.add_argument("--owner-pubkey", default="", help="Optional owner pubkey to compute token deltas for.")
     parser.add_argument("--output-json", default="", help="Optional path to write receipt JSON.")
     parser.add_argument("--output-md", default="", help="Optional path to write receipt markdown.")
+    parser.add_argument("--rpc-retry-attempts", type=int, default=4)
+    parser.add_argument("--rpc-retry-backoff-seconds", type=float, default=1.0)
     args = parser.parse_args()
 
-    receipt = build_receipt(Path(args.exports_dir), owner_pubkey=(args.owner_pubkey or "").strip() or None)
+    receipt = build_receipt(
+        Path(args.exports_dir),
+        owner_pubkey=(args.owner_pubkey or "").strip() or None,
+        rpc_retry_attempts=args.rpc_retry_attempts,
+        rpc_retry_backoff_seconds=args.rpc_retry_backoff_seconds,
+    )
     if args.output_json:
         Path(args.output_json).write_text(json.dumps(receipt, indent=2, default=str), encoding="utf-8")
     if args.output_md:

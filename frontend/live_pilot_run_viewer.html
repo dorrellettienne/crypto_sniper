@@ -1,0 +1,649 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Live Pilot Run Viewer</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Fraunces:opsz,wght@9..144,700&display=swap');
+    :root {
+      --bg: #061019;
+      --panel: rgba(12, 22, 31, 0.9);
+      --panel-2: rgba(15, 28, 40, 0.95);
+      --ink: #edf5fb;
+      --muted: #9fb7ca;
+      --line: rgba(159, 178, 194, 0.14);
+      --blue: #55c6ff;
+      --green: #34d399;
+      --amber: #fbbf24;
+      --red: #fb7185;
+      --shadow: 0 28px 80px rgba(0, 0, 0, 0.45);
+      --radius: 18px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      font-family: "Space Grotesk", "Aptos", "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at 10% 8%, rgba(85, 198, 255, 0.16), transparent 38%),
+        radial-gradient(circle at 85% 10%, rgba(52, 211, 153, 0.10), transparent 30%),
+        linear-gradient(180deg, #050b10, #071019 40%, #09131c);
+      min-height: 100vh;
+    }
+    .shell { width: min(1200px, calc(100% - 28px)); margin: 18px auto 34px; }
+    .hero, .card {
+      border: 1px solid var(--line);
+      background: linear-gradient(180deg, rgba(12,22,31,0.95), rgba(9,16,24,0.95));
+      border-radius: 22px;
+      box-shadow: var(--shadow);
+    }
+    .hero { padding: 18px; position: relative; overflow: hidden; }
+    .hero::after {
+      content: "";
+      position: absolute;
+      width: 320px; height: 320px; border-radius: 50%;
+      right: -70px; top: -90px;
+      background: radial-gradient(circle, rgba(85, 198, 255, 0.12), transparent 70%);
+      pointer-events: none;
+    }
+    .eyebrow { margin: 0 0 8px; color: var(--blue); font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase; font-weight: 700; }
+    h1 { margin: 0; font-family: "Fraunces", Georgia, serif; font-size: clamp(28px, 4vw, 40px); line-height: 1.05; }
+    .sub { margin: 10px 0 16px; color: var(--muted); line-height: 1.45; max-width: 76ch; }
+    .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+    .dropzone {
+      flex: 1 1 420px;
+      min-height: 52px;
+      border: 1px dashed rgba(85, 198, 255, 0.32);
+      border-radius: 13px;
+      padding: 10px 14px;
+      color: var(--muted);
+      background: rgba(6, 12, 17, 0.5);
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    }
+    .dropzone strong { color: var(--ink); }
+    .btn {
+      appearance: none;
+      border: 1px solid rgba(85, 198, 255, 0.25);
+      background: linear-gradient(180deg, rgba(85,198,255,0.12), rgba(85,198,255,0.06));
+      color: var(--ink);
+      border-radius: 12px;
+      padding: 11px 13px;
+      font: 700 13px/1 "Space Grotesk", sans-serif;
+      cursor: pointer;
+    }
+    .btn.secondary { border-color: rgba(159,178,194,0.14); background: rgba(11,17,22,0.45); color: #c8d8e6; }
+    input[type="file"] { display: none; }
+    .dashboard { margin-top: 14px; display: grid; grid-template-columns: repeat(12, 1fr); gap: 12px; }
+    .card { padding: 14px; border-radius: var(--radius); }
+    .span-12 { grid-column: span 12; }
+    .span-8 { grid-column: span 8; }
+    .span-6 { grid-column: span 6; }
+    .span-4 { grid-column: span 4; }
+    .span-3 { grid-column: span 3; }
+    .label { color: var(--muted); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; font-weight: 700; margin-bottom: 8px; }
+    .big { font: 700 clamp(20px, 3vw, 30px)/1.1 "Fraunces", Georgia, serif; }
+    .muted { color: var(--muted); }
+    .row { display: flex; justify-content: space-between; gap: 10px; padding: 8px 0; border-bottom: 1px solid rgba(159,178,194,0.06); }
+    .row:last-child { border-bottom: 0; }
+    .row .k { color: var(--muted); }
+    .row .v { font-weight: 700; text-align: right; }
+    .grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 16px; }
+    .badge {
+      display: inline-flex; align-items: center; gap: 7px;
+      border-radius: 999px; padding: 7px 11px; font: 700 12px/1 "Space Grotesk", sans-serif;
+      border: 1px solid transparent;
+      text-transform: uppercase; letter-spacing: 0.08em;
+    }
+    .badge.no-send { color: #cceeff; border-color: rgba(85,198,255,0.28); background: rgba(85,198,255,0.10); }
+    .badge.live { color: #ffd7de; border-color: rgba(251,113,133,0.28); background: rgba(251,113,133,0.11); }
+    .badge.good { color: #c7f8e8; border-color: rgba(52,211,153,0.25); background: rgba(52,211,153,0.10); }
+    .badge.bad { color: #ffd2db; border-color: rgba(251,113,133,0.25); background: rgba(251,113,133,0.10); }
+    .pill {
+      display: inline-flex; align-items: center; gap: 6px;
+      border-radius: 999px; border: 1px solid rgba(159,178,194,0.14);
+      background: rgba(11,17,22,0.46); color: var(--ink);
+      padding: 6px 10px; font-size: 12px; font-weight: 700;
+    }
+    .stack { display: grid; gap: 8px; }
+    ul.clean { margin: 0; padding-left: 18px; color: var(--muted); line-height: 1.45; }
+    ul.clean li { margin: 4px 0; }
+    .artifact-list { display: grid; gap: 8px; }
+    .artifact {
+      display: flex; justify-content: space-between; gap: 10px; align-items: baseline;
+      border: 1px solid rgba(159,178,194,0.08); border-radius: 12px; padding: 9px 10px;
+      background: rgba(8,14,20,0.55);
+    }
+    .artifact code { color: #cfe7f7; font-size: 12px; word-break: break-all; }
+    .kv-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; }
+    pre {
+      margin: 0; padding: 12px;
+      background: rgba(8,15,23,0.9);
+      border: 1px solid rgba(159,178,194,0.08);
+      border-radius: 12px;
+      font: 12px/1.45 Consolas, monospace;
+      overflow: auto; max-height: 340px;
+      color: #d8e7f2;
+    }
+    .empty {
+      margin-top: 14px; border: 1px dashed rgba(159,178,194,0.16); border-radius: 14px;
+      padding: 14px; color: var(--muted); background: rgba(10,16,22,0.4);
+    }
+    .proof-panels { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 12px; }
+    .proof-box {
+      border: 1px solid rgba(159,178,194,0.08);
+      border-radius: 14px;
+      background: rgba(8,14,20,0.55);
+      padding: 12px;
+    }
+    .proof-box.goodish { border-color: rgba(52,211,153,0.18); }
+    .proof-box.warnish { border-color: rgba(251,191,36,0.18); }
+    @media (max-width: 960px) {
+      .span-8, .span-6, .span-4, .span-3 { grid-column: span 12; }
+      .grid2, .proof-panels, .kv-grid { grid-template-columns: 1fr; }
+      .controls { align-items: stretch; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="hero">
+      <p class="eyebrow">Live Pilot Viewer</p>
+      <h1>No-Send vs Live Run Status</h1>
+      <p class="sub">Load a run JSON (campaign summary adapter output or website API payload) to render a clear operator-facing view showing what the run proves, what it does not prove, and whether any transaction was actually submitted.</p>
+      <div class="controls">
+        <div id="dropzone" class="dropzone" role="button" tabindex="0" aria-label="Load run JSON">
+          <span><strong>Drop a run JSON here</strong> or load the sample</span>
+          <span id="file-name">No file loaded</span>
+        </div>
+        <label class="btn" for="file-input">Load JSON</label>
+        <button id="load-sample" class="btn secondary" type="button">Load Sample (No-Send)</button>
+        <button id="load-sample-live" class="btn secondary" type="button">Load Sample (Live)</button>
+      </div>
+      <input id="file-input" type="file" accept=".json,application/json">
+    </section>
+
+    <div id="empty" class="empty">
+      Waiting for a run JSON payload. This viewer expects the `execution_mode`/`transaction` schema described in the operator UI design.
+    </div>
+
+    <section id="dashboard" class="dashboard" hidden>
+      <div class="card span-12">
+        <div class="label">Run Mode</div>
+        <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+          <span id="mode-badge" class="badge no-send">NO-SEND</span>
+          <span id="stage-pill" class="pill">dry_run_validated</span>
+          <span id="status-pill" class="pill">completed</span>
+          <span id="network-pill" class="pill">solana</span>
+          <span id="tx-pill" class="pill">No transaction submitted</span>
+        </div>
+      </div>
+
+      <div class="card span-8">
+        <div class="label">Proof Scope</div>
+        <div class="proof-panels">
+          <div class="proof-box goodish">
+            <div class="label">What This Proves</div>
+            <ul id="proves-list" class="clean"></ul>
+          </div>
+          <div class="proof-box warnish">
+            <div class="label">What This Does Not Prove</div>
+            <ul id="not-proves-list" class="clean"></ul>
+          </div>
+        </div>
+      </div>
+
+      <div class="card span-4">
+        <div class="label">Topline</div>
+        <div class="stack">
+          <div>
+            <div class="muted">Run ID</div>
+            <div id="run-id" class="big" style="font-size:22px;">-</div>
+          </div>
+          <div class="grid2">
+            <div>
+              <div class="muted">Promotion Gate</div>
+              <div id="promotion-gate" class="big" style="font-size:20px;">-</div>
+            </div>
+            <div>
+              <div class="muted">Launch Guard</div>
+              <div id="launch-guard" class="big" style="font-size:20px;">-</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card span-6">
+        <div class="label">Run Summary</div>
+        <div id="summary-rows" class="stack"></div>
+      </div>
+
+      <div class="card span-6">
+        <div class="label">Provider Health</div>
+        <div id="provider-health" class="stack"></div>
+      </div>
+
+      <div class="card span-6">
+        <div class="label">Transaction</div>
+        <div id="transaction-card" class="stack"></div>
+      </div>
+
+      <div class="card span-6">
+        <div class="label">Operator & Safety</div>
+        <div id="safety-rows" class="stack"></div>
+      </div>
+
+      <div class="card span-12">
+        <div class="label">Artifacts</div>
+        <div id="artifacts-list" class="artifact-list"></div>
+      </div>
+
+      <div class="card span-12">
+        <div class="label">Raw JSON</div>
+        <pre id="raw-json">{}</pre>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const els = {
+      fileInput: document.getElementById("file-input"),
+      dropzone: document.getElementById("dropzone"),
+      fileName: document.getElementById("file-name"),
+      empty: document.getElementById("empty"),
+      dashboard: document.getElementById("dashboard"),
+      modeBadge: document.getElementById("mode-badge"),
+      stagePill: document.getElementById("stage-pill"),
+      statusPill: document.getElementById("status-pill"),
+      networkPill: document.getElementById("network-pill"),
+      txPill: document.getElementById("tx-pill"),
+      provesList: document.getElementById("proves-list"),
+      notProvesList: document.getElementById("not-proves-list"),
+      runId: document.getElementById("run-id"),
+      promotionGate: document.getElementById("promotion-gate"),
+      launchGuard: document.getElementById("launch-guard"),
+      summaryRows: document.getElementById("summary-rows"),
+      providerHealth: document.getElementById("provider-health"),
+      transactionCard: document.getElementById("transaction-card"),
+      safetyRows: document.getElementById("safety-rows"),
+      artifactsList: document.getElementById("artifacts-list"),
+      rawJson: document.getElementById("raw-json"),
+    };
+
+    const sampleNoSend = {
+      run_id: "pilot_campaign_1772095534",
+      timestamp_unix_ms: 1772095534974,
+      execution_mode: "no_send",
+      execution_stage: "dry_run_validated",
+      network: "solana",
+      status: "completed",
+      summary: {
+        signals_seen: 0,
+        candidates_attempted: 0,
+        quotes_ok: 1,
+        quotes_failed: 1,
+        provider_errors: { dexscreener_http_403: 0, quote_http_400: 1 },
+        promotion_gate_status: "fail",
+        operator_decision: "continue_tiny_pilots",
+        bundle_verification_status: "pass",
+        live_launch_guard_status: "block"
+      },
+      transaction: {
+        submitted: false,
+        signature: null,
+        finalized: false,
+        fee_lamports: null,
+        realized_slippage_bps: null,
+        reconciliation_status: null
+      },
+      artifacts: {
+        daily_operator_report: "data/exports/pilot_daily_operator_s4m50_report.md",
+        artifact_index: "data/exports/pilot_artifact_index_s4m50.md",
+        handoff_snapshot: "data/exports/pilot_handoff_s4m50.md",
+        prelive_go_no_go: "data/exports/pilot_prelive_go_no_go_s4m50.md",
+        promotion_ticket: "data/exports/pilot_promotion_ticket_s4m50.json",
+        bundle_verification: "data/exports/pilot_bundle_verify_s4m50.md",
+        timeline: "data/exports/pilot_timeline_s4m50.md"
+      },
+      explainability: {
+        what_this_proves: [
+          "Pipeline orchestration and guards ran",
+          "Provider/quote paths produced telemetry",
+          "Operator artifacts were generated"
+        ],
+        what_this_does_not_prove: [
+          "On-chain transaction submission/finalization",
+          "Real execution fees/slippage under live conditions"
+        ]
+      }
+    };
+
+    const sampleLive = {
+      ...sampleNoSend,
+      run_id: "pilot_live_1772099999",
+      execution_mode: "live",
+      execution_stage: "live_finalized",
+      summary: {
+        ...sampleNoSend.summary,
+        signals_seen: 1,
+        candidates_attempted: 1,
+        quotes_ok: 1,
+        quotes_failed: 0,
+        provider_errors: { dexscreener_http_403: 0, quote_http_400: 0 },
+        promotion_gate_status: "pass",
+        operator_decision: "increase_frequency_only",
+        live_launch_guard_status: "allow"
+      },
+      transaction: {
+        submitted: true,
+        signature: "5uM6...abcXYZ",
+        finalized: true,
+        fee_lamports: 5000,
+        realized_slippage_bps: 14.2,
+        reconciliation_status: "live_finalized"
+      },
+      explainability: {
+        what_this_proves: [
+          "Transaction path submitted and finalized on-chain",
+          "Reconciliation and execution economics were captured",
+          "Operator artifacts and launch guard workflow completed"
+        ],
+        what_this_does_not_prove: [
+          "Long-run strategy edge or scalability",
+          "Future provider reliability under all conditions"
+        ]
+      }
+    };
+
+    function escapeHtml(v) {
+      return String(v ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    function fmt(v) {
+      if (v === null || v === undefined || v === "") return "-";
+      if (typeof v === "boolean") return v ? "Yes" : "No";
+      if (typeof v === "number") return Number.isInteger(v) ? String(v) : String(Math.round(v * 1000) / 1000);
+      return String(v);
+    }
+
+    function badgeClass(mode) {
+      return mode === "live" ? "badge live" : "badge no-send";
+    }
+
+    function toRows(obj, preferOrder = []) {
+      const out = [];
+      const src = obj && typeof obj === "object" ? obj : {};
+      const used = new Set();
+      preferOrder.forEach((k) => {
+        if (k in src) { out.push([k, src[k]]); used.add(k); }
+      });
+      Object.keys(src).sort().forEach((k) => {
+        if (!used.has(k)) out.push([k, src[k]]);
+      });
+      return out;
+    }
+
+    function renderList(el, items) {
+      const rows = Array.isArray(items) && items.length ? items : ["-"];
+      el.innerHTML = rows.map((x) => `<li>${escapeHtml(x)}</li>`).join("");
+    }
+
+    function renderKeyValueStack(el, rows) {
+      el.innerHTML = rows.map(([k, v]) => `
+        <div class="row"><span class="k">${escapeHtml(k)}</span><span class="v">${escapeHtml(fmt(v))}</span></div>
+      `).join("");
+    }
+
+    function renderArtifacts(el, artifacts) {
+      const src = (artifacts && typeof artifacts === "object") ? artifacts : {};
+      const keys = Object.keys(src);
+      if (!keys.length) {
+        el.innerHTML = `<div class="artifact"><span class="muted">No artifacts listed</span><code>-</code></div>`;
+        return;
+      }
+      el.innerHTML = keys.sort().map((k) => `
+        <div class="artifact">
+          <span>${escapeHtml(k)}</span>
+          <code>${escapeHtml(src[k])}</code>
+        </div>
+      `).join("");
+    }
+
+    function renderTransactionCard(tx) {
+      const t = (tx && typeof tx === "object") ? tx : {};
+      if (!t.submitted) {
+        els.transactionCard.innerHTML = `
+          <div class="badge no-send">NO-SEND</div>
+          <div class="muted">No transaction submitted (dry run / paper test mode).</div>
+          <div class="row"><span class="k">Funds Moved</span><span class="v">No</span></div>
+          <div class="row"><span class="k">On-Chain Signature</span><span class="v">-</span></div>
+        `;
+        return;
+      }
+      els.transactionCard.innerHTML = `
+        <div class="badge live">LIVE TRANSACTION</div>
+        <div class="row"><span class="k">Submitted</span><span class="v">${escapeHtml(fmt(t.submitted))}</span></div>
+        <div class="row"><span class="k">Signature</span><span class="v">${escapeHtml(fmt(t.signature))}</span></div>
+        <div class="row"><span class="k">Finalized</span><span class="v">${escapeHtml(fmt(t.finalized))}</span></div>
+        <div class="row"><span class="k">Fee (lamports)</span><span class="v">${escapeHtml(fmt(t.fee_lamports))}</span></div>
+        <div class="row"><span class="k">Slippage (bps)</span><span class="v">${escapeHtml(fmt(t.realized_slippage_bps))}</span></div>
+        <div class="row"><span class="k">Reconciliation</span><span class="v">${escapeHtml(fmt(t.reconciliation_status))}</span></div>
+      `;
+    }
+
+    function normalizePayload(input) {
+      const p = (input && typeof input === "object") ? input : {};
+
+      // Existing schema passthrough
+      if (p.execution_mode || p.transaction || p.explainability) return p;
+
+      // Daily packet schema
+      if (p.receipt && typeof p.receipt === "object" && p.summary && typeof p.summary === "object") {
+        const receipt = p.receipt || {};
+        const liveSummary = (receipt.live_pilot_summary && typeof receipt.live_pilot_summary === "object") ? receipt.live_pilot_summary : {};
+        const econ = (liveSummary.economics && typeof liveSummary.economics === "object") ? liveSummary.economics : {};
+        const truth = (liveSummary.settlement_truth && typeof liveSummary.settlement_truth === "object") ? liveSummary.settlement_truth : {};
+        const rpcStatus = (receipt.rpc_status && typeof receipt.rpc_status === "object") ? receipt.rpc_status : {};
+        const confirmationStatus = String(rpcStatus.confirmation_status || "");
+        const finalized = confirmationStatus === "finalized";
+        const submitted = Boolean(receipt.signature);
+        const chainOutcome = String(liveSummary.chain_outcome_class || "");
+        const noSend = !submitted;
+        return {
+          run_id: `daily_packet:${String(receipt.signature || "no_sig").slice(0, 12)}`,
+          timestamp_unix_ms: Date.parse(p.generated_at_utc || "") || null,
+          execution_mode: noSend ? "no_send" : "live",
+          execution_stage: finalized ? "live_finalized" : (submitted ? "live_confirmed" : "dry_run_validated"),
+          network: "solana",
+          status: p.ok ? "completed" : "error",
+          summary: {
+            promotion_gate_status: (((receipt.promotion_gate_summary || {}).status) || "unknown"),
+            live_launch_guard_status: "n/a",
+            operator_decision: "n/a",
+            bundle_verification_status: "n/a",
+            quotes_ok: 1,
+            quotes_failed: 0,
+            provider_errors: {},
+            chain_outcome_class: liveSummary.chain_outcome_class,
+            chain_terminal_reason: liveSummary.chain_terminal_reason,
+            truth_confidence: truth.confidence,
+            truth_terminal_state: truth.terminal_state,
+            owner_token_delta_raw: truth.owner_token_delta_raw,
+            fee_lamports: receipt.fee_lamports,
+            quote_mismatch_class: econ.quote_vs_settlement_mismatch_class
+          },
+          transaction: {
+            submitted,
+            signature: receipt.signature || null,
+            finalized,
+            fee_lamports: receipt.fee_lamports ?? null,
+            realized_slippage_bps: econ.realized_slippage_bps_vs_quote ?? null,
+            reconciliation_status: chainOutcome || rpcStatus.confirmation_status || null
+          },
+          artifacts: Object.fromEntries(Object.entries(p.artifacts || {}).map(([k, v]) => [k, (v && typeof v === "object") ? (v.path || "") : v])),
+          explainability: {
+            what_this_proves: submitted ? [
+              "Real on-chain transaction path submitted",
+              "RPC status and transaction truth were fetched",
+              "Receipt and daily validation packet were generated"
+            ] : [
+              "Validation packet generation path ran",
+              "Artifact references were packaged"
+            ],
+            what_this_does_not_prove: submitted ? [
+              "Long-run strategy edge or profitability",
+              "Unattended production reliability"
+            ] : [
+              "Live transaction submission/finalization"
+            ]
+          },
+          _source: "daily_packet",
+          _raw: p
+        };
+      }
+
+      // Receipt schema
+      if ("signature" in p && "rpc_status" in p && "live_pilot_summary" in p) {
+        const liveSummary = (p.live_pilot_summary && typeof p.live_pilot_summary === "object") ? p.live_pilot_summary : {};
+        const econ = (liveSummary.economics && typeof liveSummary.economics === "object") ? liveSummary.economics : {};
+        const truth = (liveSummary.settlement_truth && typeof liveSummary.settlement_truth === "object") ? liveSummary.settlement_truth : {};
+        const rpcStatus = (p.rpc_status && typeof p.rpc_status === "object") ? p.rpc_status : {};
+        const submitted = Boolean(p.signature);
+        const finalized = String(rpcStatus.confirmation_status || "") === "finalized";
+        return {
+          run_id: `receipt:${String(p.signature || "no_sig").slice(0, 12)}`,
+          timestamp_unix_ms: null,
+          execution_mode: submitted ? "live" : "no_send",
+          execution_stage: finalized ? "live_finalized" : (submitted ? "live_confirmed" : "dry_run_validated"),
+          network: "solana",
+          status: p.ok ? "completed" : "error",
+          summary: {
+            promotion_gate_status: (((p.promotion_gate_summary || {}).status) || "unknown"),
+            live_launch_guard_status: "n/a",
+            provider_errors: {},
+            chain_outcome_class: liveSummary.chain_outcome_class,
+            chain_terminal_reason: liveSummary.chain_terminal_reason,
+            truth_confidence: truth.confidence,
+            truth_terminal_state: truth.terminal_state,
+            owner_token_delta_raw: truth.owner_token_delta_raw,
+            quote_mismatch_class: econ.quote_vs_settlement_mismatch_class,
+            fee_lamports: p.fee_lamports
+          },
+          transaction: {
+            submitted,
+            signature: p.signature || null,
+            finalized,
+            fee_lamports: p.fee_lamports ?? null,
+            realized_slippage_bps: econ.realized_slippage_bps_vs_quote ?? null,
+            reconciliation_status: liveSummary.chain_outcome_class || rpcStatus.confirmation_status || null
+          },
+          artifacts: {
+            source_log: p.log || "",
+            solscan_url: p.solscan_url || ""
+          },
+          explainability: {
+            what_this_proves: [
+              "RPC status and transaction truth were fetched",
+              "Live pilot summary and economics/truth fields were captured"
+            ],
+            what_this_does_not_prove: [
+              "That this single trade implies strategy edge",
+              "That future provider/RPC conditions will match this run"
+            ]
+          },
+          _source: "receipt",
+          _raw: p
+        };
+      }
+
+      return p;
+    }
+
+    function render(payload, label) {
+      const p = normalizePayload(payload);
+      const summary = (p.summary && typeof p.summary === "object") ? p.summary : {};
+      const providerErrors = (summary.provider_errors && typeof summary.provider_errors === "object") ? summary.provider_errors : {};
+      const explain = (p.explainability && typeof p.explainability === "object") ? p.explainability : {};
+
+      els.empty.hidden = true;
+      els.dashboard.hidden = false;
+      els.fileName.textContent = label || "Loaded JSON";
+      els.rawJson.textContent = JSON.stringify(p, null, 2);
+
+      els.modeBadge.className = badgeClass(p.execution_mode);
+      els.modeBadge.textContent = String(p.execution_mode || "unknown").replace("_", "-").toUpperCase();
+      els.stagePill.textContent = fmt(p.execution_stage);
+      els.statusPill.textContent = fmt(p.status);
+      els.networkPill.textContent = fmt(p.network);
+      els.txPill.textContent = p.transaction && p.transaction.submitted ? "Transaction submitted" : "No transaction submitted";
+
+      renderList(els.provesList, explain.what_this_proves || []);
+      renderList(els.notProvesList, explain.what_this_does_not_prove || []);
+
+      els.runId.textContent = fmt(p.run_id);
+      els.promotionGate.textContent = fmt(summary.promotion_gate_status);
+      els.launchGuard.textContent = fmt(summary.live_launch_guard_status);
+
+      renderKeyValueStack(els.summaryRows, toRows(summary, [
+        "signals_seen",
+        "candidates_attempted",
+        "quotes_ok",
+        "quotes_failed",
+        "promotion_gate_status",
+        "operator_decision",
+        "bundle_verification_status",
+        "live_launch_guard_status"
+      ]).filter(([k]) => k !== "provider_errors"));
+
+      const providerRows = toRows(providerErrors);
+      renderKeyValueStack(els.providerHealth, providerRows.length ? providerRows : [["provider_errors", "none"]]);
+
+      renderTransactionCard(p.transaction);
+
+      renderKeyValueStack(els.safetyRows, [
+        ["Execution Mode", p.execution_mode],
+        ["Execution Stage", p.execution_stage],
+        ["No-Send / Paper Test", p.execution_mode === "no_send"],
+        ["Status", p.status],
+        ["Timestamp (unix ms)", p.timestamp_unix_ms],
+        ["Source Schema", p._source || "run_view_model"]
+      ]);
+
+      renderArtifacts(els.artifactsList, p.artifacts);
+    }
+
+    function loadText(text, label) {
+      try {
+        const payload = JSON.parse(text);
+        render(payload, label);
+      } catch (err) {
+        alert(`Invalid JSON: ${err.message}`);
+      }
+    }
+
+    document.getElementById("load-sample").addEventListener("click", () => render(sampleNoSend, "Sample No-Send Run"));
+    document.getElementById("load-sample-live").addEventListener("click", () => render(sampleLive, "Sample Live Run"));
+    els.fileInput.addEventListener("change", async (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      loadText(await file.text(), file.name);
+    });
+    els.dropzone.addEventListener("click", () => els.fileInput.click());
+    els.dropzone.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); els.fileInput.click(); }
+    });
+    ["dragenter", "dragover"].forEach((evt) => els.dropzone.addEventListener(evt, (e) => { e.preventDefault(); }));
+    els.dropzone.addEventListener("drop", async (e) => {
+      e.preventDefault();
+      const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+      if (!file) return;
+      loadText(await file.text(), file.name);
+    });
+  </script>
+</body>
+</html>

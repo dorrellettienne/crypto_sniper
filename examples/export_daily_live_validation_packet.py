@@ -1,5 +1,6 @@
 import argparse
 import importlib.util
+import shutil
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,12 +36,50 @@ def _artifact_snapshot(path: Path | None) -> dict[str, Any]:
     }
 
 
-def build_daily_packet(exports_dir: Path, owner_pubkey: str | None = None) -> dict[str, Any]:
+def _load_json_if_exists(path: Path) -> dict[str, Any] | None:
+    try:
+        if not path.exists():
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _copy_if_exists(src: Path | None, dst_dir: Path) -> dict[str, Any]:
+    snap = _artifact_snapshot(src)
+    if not snap.get("present"):
+        return {"copied": False, "source": snap}
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    dst = dst_dir / src.name  # type: ignore[union-attr]
+    shutil.copy2(src, dst)
+    return {"copied": True, "source": snap, "dest": _artifact_snapshot(dst)}
+
+
+def build_daily_packet(
+    exports_dir: Path,
+    owner_pubkey: str | None = None,
+    prefer_cached_receipt: bool = True,
+    rpc_retry_attempts: int = 4,
+    rpc_retry_backoff_seconds: float = 1.0,
+) -> dict[str, Any]:
     examples_dir = Path(__file__).resolve().parent
     receipt_mod = _load_module_from_path("export_latest_live_submit_receipt_mod", examples_dir / "export_latest_live_submit_receipt.py")
-    status_mod = _load_module_from_path("check_latest_live_submit_signature_status_mod", examples_dir / "check_latest_live_submit_signature_status.py")
+    _ = _load_module_from_path("check_latest_live_submit_signature_status_mod", examples_dir / "check_latest_live_submit_signature_status.py")
 
-    receipt = receipt_mod.build_receipt(exports_dir, owner_pubkey=owner_pubkey)  # type: ignore[attr-defined]
+    receipt: dict[str, Any] | None = None
+    latest_receipt_path = exports_dir / "latest_live_receipt.json"
+    if prefer_cached_receipt:
+        cached = _load_json_if_exists(latest_receipt_path)
+        if isinstance(cached, dict) and cached.get("ok"):
+            receipt = cached
+    if receipt is None:
+        receipt = receipt_mod.build_receipt(  # type: ignore[attr-defined]
+            exports_dir,
+            owner_pubkey=owner_pubkey,
+            rpc_retry_attempts=rpc_retry_attempts,
+            rpc_retry_backoff_seconds=rpc_retry_backoff_seconds,
+        )
     try:
         # Reuse helper main logic by calling its internals directly is not exposed; emulate with receipt-derived status.
         latest_status = {
@@ -81,6 +120,66 @@ def build_daily_packet(exports_dir: Path, owner_pubkey: str | None = None) -> di
         },
     }
     return packet
+
+
+def build_run_artifact_index(exports_dir: Path) -> dict[str, Any]:
+    patterns = {
+        "auto_window_log": "live_pilot_service_auto_window_*.jsonl",
+        "receipt_json": "latest_live_receipt.json",
+        "receipt_md": "latest_live_receipt.md",
+        "daily_packet_json": "daily_live_validation_packet.json",
+        "daily_packet_md": "daily_live_validation_packet.md",
+        "guard_report_json": "pilot_live_launch_guard*.json",
+    }
+    out: dict[str, Any] = {}
+    for key, pattern in patterns.items():
+        out[key] = _artifact_snapshot(_latest_by_glob(exports_dir, pattern))
+    return out
+
+
+def autopack_run_bundle(packet: dict[str, Any], exports_dir: Path, pack_dir: Path) -> dict[str, Any]:
+    signature = str(((packet.get("summary") or {}).get("signature") or "no_sig"))
+    safe_sig = signature[:12] if signature else "no_sig"
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    bundle_dir = pack_dir / f"live_validation_{stamp}_{safe_sig}"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+
+    copies = {}
+    copies["auto_window_log"] = _copy_if_exists(_latest_by_glob(exports_dir, "live_pilot_service_auto_window_*.jsonl"), bundle_dir)
+    copies["receipt_json"] = _copy_if_exists(_latest_by_glob(exports_dir, "latest_live_receipt.json"), bundle_dir)
+    copies["receipt_md"] = _copy_if_exists(_latest_by_glob(exports_dir, "latest_live_receipt.md"), bundle_dir)
+    copies["daily_packet_json"] = _copy_if_exists(_latest_by_glob(exports_dir, "daily_live_validation_packet.json"), bundle_dir)
+    copies["daily_packet_md"] = _copy_if_exists(_latest_by_glob(exports_dir, "daily_live_validation_packet.md"), bundle_dir)
+    copies["guard_report_json"] = _copy_if_exists(_latest_by_glob(exports_dir, "pilot_live_launch_guard*.json"), bundle_dir)
+
+    run_index = {
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "bundle_dir": str(bundle_dir),
+        "summary": dict(packet.get("summary") or {}),
+        "artifacts": copies,
+    }
+    (bundle_dir / "run_artifact_index.json").write_text(json.dumps(run_index, indent=2, default=str), encoding="utf-8")
+    (bundle_dir / "run_artifact_index.md").write_text(
+        "\n".join(
+            [
+                "# Run Artifact Index",
+                "",
+                f"- bundle_dir: `{bundle_dir}`",
+                f"- signature: `{run_index['summary'].get('signature')}`",
+                f"- confirmation_status: `{run_index['summary'].get('confirmation_status')}`",
+                "",
+                "## Files",
+                "",
+            ]
+            + [
+                f"- {name}: `{((info.get('dest') or {}).get('path') if isinstance(info, dict) else '')}` copied={bool((info or {}).get('copied', False))}"
+                for name, info in copies.items()
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return {"bundle_dir": str(bundle_dir), "run_index_json": str(bundle_dir / "run_artifact_index.json"), "run_index_md": str(bundle_dir / "run_artifact_index.md")}
 
 
 def _to_markdown(packet: dict[str, Any]) -> str:
@@ -132,12 +231,25 @@ def main() -> int:
     parser.add_argument("--owner-pubkey", default="")
     parser.add_argument("--output-json", default="data/exports/daily_live_validation_packet.json")
     parser.add_argument("--output-md", default="data/exports/daily_live_validation_packet.md")
+    parser.add_argument("--pack-dir", default="", help="Optional directory to copy latest run artifacts into a dated bundle.")
+    parser.add_argument("--no-reuse-cached-receipt", action="store_true")
+    parser.add_argument("--rpc-retry-attempts", type=int, default=4)
+    parser.add_argument("--rpc-retry-backoff-seconds", type=float, default=1.0)
     args = parser.parse_args()
 
-    packet = build_daily_packet(Path(args.exports_dir), owner_pubkey=(args.owner_pubkey or "").strip() or None)
+    packet = build_daily_packet(
+        Path(args.exports_dir),
+        owner_pubkey=(args.owner_pubkey or "").strip() or None,
+        prefer_cached_receipt=not bool(args.no_reuse_cached_receipt),
+        rpc_retry_attempts=args.rpc_retry_attempts,
+        rpc_retry_backoff_seconds=args.rpc_retry_backoff_seconds,
+    )
     Path(args.output_json).write_text(json.dumps(packet, indent=2, default=str), encoding="utf-8")
     Path(args.output_md).write_text(_to_markdown(packet), encoding="utf-8")
-    print(json.dumps({"ok": bool(packet.get("ok")), "output_json": args.output_json, "output_md": args.output_md}, separators=(",", ":")))
+    out = {"ok": bool(packet.get("ok")), "output_json": args.output_json, "output_md": args.output_md}
+    if args.pack_dir:
+        out["run_bundle"] = autopack_run_bundle(packet, Path(args.exports_dir), Path(args.pack_dir))
+    print(json.dumps(out, separators=(",", ":"), default=str))
     return 0 if packet.get("ok") else 1
 
 

@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Live Validation Bundles Index</title>
+  <style>
+    :root {
+      --bg: #081018;
+      --panel: #0f1a25;
+      --panel2: #122131;
+      --ink: #e7f0f7;
+      --muted: #9db2c3;
+      --line: rgba(157,178,195,0.14);
+      --accent: #4fd1c5;
+      --good: #34d399;
+      --warn: #f59e0b;
+    }
+    * { box-sizing: border-box; }
+    body { margin:0; background: radial-gradient(circle at 80% 5%, rgba(79,209,197,.12), transparent 35%), linear-gradient(180deg, #060c12, #081018); color:var(--ink); font: 14px/1.4 "Segoe UI", Arial, sans-serif; }
+    .wrap { width:min(1200px, calc(100% - 24px)); margin: 18px auto 28px; }
+    .hero, .card { background: linear-gradient(180deg, rgba(15,26,37,.96), rgba(10,17,25,.96)); border:1px solid var(--line); border-radius: 16px; }
+    .hero { padding: 16px; }
+    h1 { margin:0 0 8px; font-size: 28px; }
+    .muted { color: var(--muted); }
+    .controls { display:flex; flex-wrap:wrap; gap:8px; margin-top: 12px; }
+    .btn { background: var(--panel2); color: var(--ink); border:1px solid var(--line); border-radius: 10px; padding:10px 12px; cursor:pointer; font-weight:600; }
+    input[type=file]{ display:none; }
+    .drop { flex:1 1 420px; border:1px dashed rgba(79,209,197,.25); border-radius: 10px; padding: 10px 12px; background: rgba(7,12,17,.55); }
+    .grid { display:grid; grid-template-columns: repeat(12, minmax(0,1fr)); gap:10px; margin-top: 12px; }
+    .span-12 { grid-column: span 12; }
+    .span-4 { grid-column: span 4; }
+    .span-8 { grid-column: span 8; }
+    @media (max-width: 980px) { .span-4, .span-8 { grid-column: span 12; } }
+    .card { padding: 12px; }
+    .label { color: var(--muted); text-transform: uppercase; letter-spacing: .08em; font-size: 11px; margin-bottom: 8px; }
+    .big { font-size: 26px; font-weight: 700; }
+    .bundle-list { display:grid; gap:8px; }
+    .bundle { border:1px solid rgba(157,178,195,.08); background: rgba(7,12,17,.45); border-radius: 12px; padding: 10px; }
+    .bundle-head { display:flex; justify-content:space-between; gap:10px; align-items:center; }
+    .bundle-name { font-weight:700; word-break: break-word; }
+    .pill { display:inline-block; padding: 5px 8px; border-radius: 999px; border:1px solid var(--line); background: rgba(12,22,31,.6); font-size:12px; }
+    .pill.good { border-color: rgba(52,211,153,.25); color:#c7f8e8; background: rgba(52,211,153,.08); }
+    .pill.warn { border-color: rgba(245,158,11,.25); color:#ffe3ba; background: rgba(245,158,11,.08); }
+    .rows { margin-top: 8px; display:grid; gap:4px; }
+    .row { display:flex; justify-content:space-between; gap:10px; border-bottom:1px solid rgba(157,178,195,.05); padding: 4px 0; }
+    .row:last-child { border-bottom:none; }
+    code { color:#cfe8f5; word-break: break-all; }
+    pre { margin:0; max-height: 280px; overflow:auto; padding:10px; background:#09141d; border:1px solid rgba(157,178,195,.08); border-radius: 10px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <h1>Validation Bundles Index</h1>
+      <div class="muted">Load the generated `data/exports/run_bundles/index.json` to browse recent live validation bundles and jump to run artifact indexes.</div>
+      <div class="controls">
+        <div id="drop" class="drop">Drop `run_bundles/index.json` here or use Load JSON.</div>
+        <label class="btn" for="file-input">Load JSON</label>
+        <button id="load-sample" class="btn" type="button">Load Sample</button>
+      </div>
+      <input id="file-input" type="file" accept=".json,application/json">
+    </section>
+
+    <div class="grid">
+      <div class="card span-4">
+        <div class="label">Summary</div>
+        <div id="bundle-count" class="big">0</div>
+        <div id="summary-lines" class="rows"></div>
+      </div>
+      <div class="card span-8">
+        <div class="label">Bundles</div>
+        <div id="bundles" class="bundle-list"></div>
+      </div>
+      <div class="card span-12">
+        <div class="label">Raw JSON</div>
+        <pre id="raw">{}</pre>
+      </div>
+    </div>
+  </div>
+  <script>
+    const els = {
+      fileInput: document.getElementById("file-input"),
+      drop: document.getElementById("drop"),
+      loadSample: document.getElementById("load-sample"),
+      bundleCount: document.getElementById("bundle-count"),
+      summaryLines: document.getElementById("summary-lines"),
+      bundles: document.getElementById("bundles"),
+      raw: document.getElementById("raw"),
+    };
+
+    const sample = {
+      ok: true,
+      generated_at_utc: "2026-02-26T18:00:30Z",
+      run_bundles_dir: "data/exports/run_bundles",
+      bundle_count: 2,
+      bundles: [
+        {
+          bundle_name: "live_validation_20260226T180030Z_2W9XbtWYTWrD",
+          bundle_dir: "data/exports/run_bundles/live_validation_20260226T180030Z_2W9XbtWYTWrD",
+          summary: {
+            signature: "2h6ZiHfUP8CAaTtvtvCTRv8BomvehiSo1pKkvMeRn61y4KhJF2LZzVUoQ5ErYfkArUtj1j9zVG7SbBFSBaE13Qr6",
+            confirmation_status: "finalized",
+            chain_outcome_class: "live_confirmed_reconciled",
+            truth_confidence: "truth_complete",
+            fee_lamports: 105000
+          },
+          run_artifact_index_json: { present: true, path: "data/exports/run_bundles/.../run_artifact_index.json" }
+        },
+        {
+          bundle_name: "live_validation_20260226T175000Z_KEwWKQ2C6eV2",
+          bundle_dir: "data/exports/run_bundles/live_validation_20260226T175000Z_KEwWKQ2C6eV2",
+          summary: {
+            signature: "KEwWKQ2C6eV2JUdqfBDz2qUidV5wKv76Z77MMPntZgJ2nCUC4ydnBfqiKyQ0D8dfTYCHW3oQxtFaKXV7B5ftYwJ",
+            confirmation_status: "finalized",
+            chain_outcome_class: "live_confirmed_reconciled",
+            truth_confidence: "truth_complete",
+            fee_lamports: 105000
+          },
+          run_artifact_index_json: { present: true, path: "data/exports/run_bundles/.../run_artifact_index.json" }
+        }
+      ]
+    };
+
+    function esc(v) {
+      return String(v ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    function fmt(v) {
+      if (v === null || v === undefined || v === "") return "-";
+      if (typeof v === "boolean") return v ? "true" : "false";
+      return String(v);
+    }
+
+    function renderRow(k, v) {
+      return `<div class="row"><span class="muted">${esc(k)}</span><span>${esc(fmt(v))}</span></div>`;
+    }
+
+    function pillClass(status) {
+      const s = String(status || "").toLowerCase();
+      if (s === "finalized" || s.includes("reconciled")) return "pill good";
+      if (s) return "pill warn";
+      return "pill";
+    }
+
+    function render(index) {
+      const p = (index && typeof index === "object") ? index : {};
+      const bundles = Array.isArray(p.bundles) ? p.bundles : [];
+      els.raw.textContent = JSON.stringify(p, null, 2);
+      els.bundleCount.textContent = String(p.bundle_count ?? bundles.length ?? 0);
+      els.summaryLines.innerHTML = [
+        ["Generated", p.generated_at_utc],
+        ["Bundles Dir", p.run_bundles_dir],
+        ["OK", p.ok],
+      ].map(([k, v]) => renderRow(k, v)).join("");
+
+      if (!bundles.length) {
+        els.bundles.innerHTML = `<div class="bundle"><div class="muted">No bundles found</div></div>`;
+        return;
+      }
+      els.bundles.innerHTML = bundles.map((b) => {
+        const s = (b && typeof b.summary === "object") ? b.summary : {};
+        const idxPath = (((b || {}).run_artifact_index_json || {}).path) || "";
+        return `
+          <div class="bundle">
+            <div class="bundle-head">
+              <div class="bundle-name">${esc(b.bundle_name || b.bundle_dir || "-")}</div>
+              <span class="${pillClass(s.confirmation_status)}">${esc(s.confirmation_status || s.chain_outcome_class || "unknown")}</span>
+            </div>
+            <div class="rows">
+              ${renderRow("signature", s.signature || "-")}
+              ${renderRow("chain_outcome_class", s.chain_outcome_class)}
+              ${renderRow("truth_confidence", s.truth_confidence)}
+              ${renderRow("fee_lamports", s.fee_lamports)}
+              ${renderRow("run_artifact_index_json", idxPath)}
+            </div>
+          </div>
+        `;
+      }).join("");
+    }
+
+    function loadText(text) {
+      try {
+        render(JSON.parse(text));
+      } catch (e) {
+        alert("Invalid JSON: " + e.message);
+      }
+    }
+
+    els.loadSample.addEventListener("click", () => render(sample));
+    els.fileInput.addEventListener("change", async (e) => {
+      const f = e.target.files && e.target.files[0];
+      if (!f) return;
+      loadText(await f.text());
+    });
+    els.drop.addEventListener("click", () => els.fileInput.click());
+    ["dragenter","dragover"].forEach((evt) => els.drop.addEventListener(evt, (e) => e.preventDefault()));
+    els.drop.addEventListener("drop", async (e) => {
+      e.preventDefault();
+      const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+      if (!f) return;
+      loadText(await f.text());
+    });
+    render({ ok: true, generated_at_utc: "-", run_bundles_dir: "-", bundle_count: 0, bundles: [] });
+  </script>
+</body>
+</html>
