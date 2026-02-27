@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("tiny_live_usdc", "no_send_usdc", "status_only", "scored_discovery_demo", "strategy_demo", "strategy_demo_full", "v14_strategy_cycle", "v14_release_checkpoint", "v15_entry_gate", "v15_supervised_cycle", "v15_release_checkpoint", "v15_ops_bundle_postprocess", "v15_supervised_signoff", "v15_release_cycle")]
+    [ValidateSet("tiny_live_usdc", "no_send_usdc", "status_only", "scored_discovery_demo", "strategy_demo", "strategy_demo_full", "v14_strategy_cycle", "v14_release_checkpoint", "v15_entry_gate", "v15_supervised_cycle", "v15_release_checkpoint", "v15_ops_bundle_postprocess", "v15_supervised_signoff", "v15_release_cycle", "v16_supervised_discovery_live", "v16_supervised_discovery_postprocess", "v16_performance_summary", "v16_go_no_go_gate", "v16_release_cycle")]
     [string]$Preset = "status_only",
     [double]$UsdSize = 0.25,
     [string]$ConfigPath = "data/exports/live_pilot_solana_send_pilot_live_enabled_temp.json",
@@ -212,6 +212,70 @@ function Invoke-V15ReleaseCycle {
     Write-Host "v15-release-cycle: done"
 }
 
+function Invoke-V16SupervisedDiscoveryLive {
+    powershell -ExecutionPolicy Bypass -File .\examples\run_v16_supervised_discovery_live.ps1 `
+      -ConfigPath $ConfigPath `
+      -UsdSize ([double]$UsdSize) `
+      -PollIntervalSeconds ([int]$PollIntervalSeconds)
+    if ($LASTEXITCODE -ne 0) {
+        throw "v16_supervised_discovery_live_failed"
+    }
+}
+
+function Invoke-V16SupervisedDiscoveryPostprocess {
+    powershell -ExecutionPolicy Bypass -File .\examples\run_v16_supervised_discovery_postprocess.ps1
+    if ($LASTEXITCODE -ne 0) {
+        throw "v16_supervised_discovery_postprocess_failed"
+    }
+}
+
+function Invoke-V16PerformanceSummary {
+    $env:PYTHONPATH = "."
+    python .\examples\export_v16_performance_summary.py `
+      --v16-bundles-dir .\data\exports\v16_bundles `
+      --max-bundles 50 `
+      --output-json .\data\exports\v16_performance_summary.json `
+      --output-md .\data\exports\v16_performance_summary.md
+    if ($LASTEXITCODE -ne 0) {
+        throw "v16_performance_summary_failed"
+    }
+}
+
+function Invoke-V16GoNoGoGate {
+    $env:PYTHONPATH = "."
+    python .\examples\export_v16_go_no_go_gate.py `
+      --v16-performance-summary-json-path .\data\exports\v16_performance_summary.json `
+      --min-finalized 3 `
+      --max-mismatch-rate 0.50 `
+      --max-avg-slippage-bps 50.0 `
+      --max-no-finalized-streak 3 `
+      --output-json .\data\exports\v16_go_no_go_gate.json `
+      --output-md .\data\exports\v16_go_no_go_gate.md
+    if ($LASTEXITCODE -ne 0) {
+        throw "v16_go_no_go_gate_failed"
+    }
+}
+
+function Invoke-V16ReleaseCycle {
+    Invoke-V16SupervisedDiscoveryLive
+    if ($LASTEXITCODE -ne 0) {
+        throw "v16_supervised_discovery_live_failed"
+    }
+    Invoke-V16SupervisedDiscoveryPostprocess
+    if ($LASTEXITCODE -ne 0) {
+        throw "v16_supervised_discovery_postprocess_failed"
+    }
+    Invoke-V16PerformanceSummary
+    if ($LASTEXITCODE -ne 0) {
+        throw "v16_performance_summary_failed"
+    }
+    Invoke-V16GoNoGoGate
+    if ($LASTEXITCODE -ne 0) {
+        throw "v16_go_no_go_gate_failed"
+    }
+    Write-Host "v16-release-cycle: done"
+}
+
 Write-Host ("preset=" + $Preset)
 switch ($Preset) {
     "tiny_live_usdc" { Invoke-TinyLiveUsdc; break }
@@ -228,4 +292,9 @@ switch ($Preset) {
     "v15_ops_bundle_postprocess" { Invoke-V15OpsBundlePostprocess; break }
     "v15_supervised_signoff" { Invoke-V15SupervisedSignoff; break }
     "v15_release_cycle" { Invoke-V15ReleaseCycle; break }
+    "v16_supervised_discovery_live" { Invoke-V16SupervisedDiscoveryLive; break }
+    "v16_supervised_discovery_postprocess" { Invoke-V16SupervisedDiscoveryPostprocess; break }
+    "v16_performance_summary" { Invoke-V16PerformanceSummary; break }
+    "v16_go_no_go_gate" { Invoke-V16GoNoGoGate; break }
+    "v16_release_cycle" { Invoke-V16ReleaseCycle; break }
 }

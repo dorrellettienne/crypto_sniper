@@ -763,6 +763,102 @@
         };
       }
 
+      // V1.6 performance summary schema
+      if (p.report_version === "v1.6_performance_summary_v1" && p.metrics) {
+        const m = (p.metrics && typeof p.metrics === "object") ? p.metrics : {};
+        return {
+          run_id: "v16_performance_summary",
+          timestamp_unix_ms: Date.parse(p.generated_at_utc || "") || null,
+          execution_mode: "live",
+          execution_stage: "v16_performance_summary",
+          network: "solana",
+          status: "completed",
+          summary: {
+            runs_total: m.runs_total ?? 0,
+            submitted_count: m.submitted_count ?? 0,
+            finalized_count: m.finalized_count ?? 0,
+            finalized_rate: m.finalized_rate ?? null,
+            quote_mismatch_rate: m.quote_mismatch_rate ?? null,
+            avg_realized_slippage_bps: m.avg_realized_slippage_bps ?? null,
+            worst_realized_slippage_bps: m.worst_realized_slippage_bps ?? null,
+            promotion_gate_status: "n/a",
+            live_launch_guard_status: "n/a"
+          },
+          transaction: {
+            submitted: false,
+            signature: null,
+            finalized: false,
+            fee_lamports: null,
+            realized_slippage_bps: null,
+            reconciliation_status: null
+          },
+          artifacts: {
+            v16_performance_summary_json: "data/exports/v16_performance_summary.json",
+            v16_performance_summary_md: "data/exports/v16_performance_summary.md"
+          },
+          explainability: {
+            what_this_proves: [
+              "V1.6 run outcomes are aggregated over bundles",
+              "Slippage/mismatch/finalization metrics are measurable",
+              "Operator can tune gates from observed data"
+            ],
+            what_this_does_not_prove: [
+              "Long-term profitable expectancy",
+              "Future market behavior stability"
+            ]
+          },
+          _source: "v16_performance_summary",
+          _raw: p
+        };
+      }
+
+      // V1.6 go/no-go gate schema
+      if (p.report_version === "v1.6_go_no_go_gate_v1" && "go" in p) {
+        const checks = Array.isArray(p.checks) ? p.checks : [];
+        const failed = Array.isArray(p.failed_checks) ? p.failed_checks : [];
+        return {
+          run_id: `v16_go_no_go:${String((failed[0] || "go"))}`,
+          timestamp_unix_ms: Date.parse(p.generated_at_utc || "") || null,
+          execution_mode: "live",
+          execution_stage: "v16_go_no_go_gate",
+          network: "solana",
+          status: p.ok ? "completed" : "error",
+          summary: {
+            go: p.go ?? false,
+            gate_summary: p.summary ?? "",
+            failed_checks: JSON.stringify(failed || []),
+            checks_total: checks.length,
+            promotion_gate_status: (p.go ? "pass" : "hold"),
+            live_launch_guard_status: "n/a"
+          },
+          transaction: {
+            submitted: false,
+            signature: null,
+            finalized: false,
+            fee_lamports: null,
+            realized_slippage_bps: null,
+            reconciliation_status: null
+          },
+          artifacts: {
+            v16_go_no_go_gate_json: "data/exports/v16_go_no_go_gate.json",
+            v16_go_no_go_gate_md: "data/exports/v16_go_no_go_gate.md"
+          },
+          explainability: {
+            what_this_proves: [
+              "Go/no-go decision is explicit and threshold-driven",
+              "Failed gate checks are operator-readable",
+              "Scaling decision is not discretionary guesswork"
+            ],
+            what_this_does_not_prove: [
+              "That passing once implies permanent edge",
+              "That all future runs will pass"
+            ]
+          },
+          _source: "v16_go_no_go_gate",
+          _raw: p
+        };
+      }
+
       // V1.2 scored discovery report schema
       if (p.report_version === "v1.2_scored_discovery_report_v1" && p.scoring && p.promotion) {
         const summary = (p.summary && typeof p.summary === "object") ? p.summary : {};
