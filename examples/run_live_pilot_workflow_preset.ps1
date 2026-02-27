@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("tiny_live_usdc", "no_send_usdc", "status_only", "scored_discovery_demo", "strategy_demo", "strategy_demo_full")]
+    [ValidateSet("tiny_live_usdc", "no_send_usdc", "status_only", "scored_discovery_demo", "strategy_demo", "strategy_demo_full", "v14_strategy_cycle", "v14_release_checkpoint")]
     [string]$Preset = "status_only",
     [double]$UsdSize = 0.25,
     [string]$ConfigPath = "data/exports/live_pilot_solana_send_pilot_live_enabled_temp.json",
@@ -118,6 +118,26 @@ function Invoke-StrategyDemoFull {
     Write-Host "strategy_decision_review_packet_md=data/exports/strategy_decision_review_packet.md"
 }
 
+function Invoke-V14StrategyCycle {
+    powershell -ExecutionPolicy Bypass -File .\examples\run_v14_strategy_cycle.ps1 -Cycles 1 -PollAttempts 6 -PollIntervalSeconds 1.0
+    if ($LASTEXITCODE -ne 0) {
+        throw "v14_strategy_cycle_failed"
+    }
+}
+
+function Invoke-V14ReleaseCheckpoint {
+    $env:PYTHONPATH = "."
+    python .\examples\export_v14_release_checkpoint.py `
+      --signoff-json-path .\data\exports\v14_strategy_cycle_signoff.json `
+      --ops-index-json-path .\data\exports\v14_ops_bundles\index.json `
+      --min-bundles 1 `
+      --output-json .\data\exports\v14_release_checkpoint.json `
+      --output-md .\data\exports\v14_release_checkpoint.md
+    if ($LASTEXITCODE -ne 0) {
+        throw "v14_release_checkpoint_failed"
+    }
+}
+
 Write-Host ("preset=" + $Preset)
 switch ($Preset) {
     "tiny_live_usdc" { Invoke-TinyLiveUsdc; break }
@@ -126,4 +146,6 @@ switch ($Preset) {
     "scored_discovery_demo" { Invoke-ScoredDiscoveryDemo; break }
     "strategy_demo" { Invoke-StrategyDemo; break }
     "strategy_demo_full" { Invoke-StrategyDemoFull; break }
+    "v14_strategy_cycle" { Invoke-V14StrategyCycle; break }
+    "v14_release_checkpoint" { Invoke-V14ReleaseCheckpoint; break }
 }

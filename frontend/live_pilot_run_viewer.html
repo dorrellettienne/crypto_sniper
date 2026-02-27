@@ -448,6 +448,114 @@
       // Existing schema passthrough
       if (p.execution_mode || p.transaction || p.explainability) return p;
 
+      // V1.4 strategy cycle signoff schema
+      if (p.report_version === "v1.4_strategy_cycle_signoff_v1" && "cycles_total" in p && "cycles_finalized_ok" in p) {
+        const latest = (p.latest_cycle && typeof p.latest_cycle === "object") ? p.latest_cycle : {};
+        const failureCounts = (p.failure_class_counts && typeof p.failure_class_counts === "object") ? p.failure_class_counts : {};
+        const finalized = String(latest.confirmation_status || "") === "finalized";
+        const sigs = Array.isArray(p.unique_finalized_signatures) ? p.unique_finalized_signatures : [];
+        return {
+          run_id: `v14_signoff:${String(latest.signature || "no_sig").slice(0, 12)}`,
+          timestamp_unix_ms: Date.parse(p.generated_at_utc || "") || null,
+          execution_mode: "live",
+          execution_stage: "v14_cycle_signoff",
+          network: "solana",
+          status: p.ok ? "completed" : "error",
+          summary: {
+            required_finalized_cycles: p.required_finalized_cycles ?? 3,
+            cycles_total: p.cycles_total ?? 0,
+            cycles_finalized_ok: p.cycles_finalized_ok ?? 0,
+            cycles_failed: p.cycles_failed ?? 0,
+            signoff_ready: p.signoff_ready ?? false,
+            latest_confirmation_status: latest.confirmation_status ?? "",
+            latest_retry_exhausted: latest.retry_exhausted ?? false,
+            failure_class_counts: JSON.stringify(failureCounts || {}),
+            unique_finalized_signature_count: sigs.length,
+            promotion_gate_status: (p.signoff_ready ? "pass" : "hold"),
+            live_launch_guard_status: "n/a"
+          },
+          transaction: {
+            submitted: Boolean(latest.tx_present),
+            signature: latest.signature || null,
+            finalized,
+            fee_lamports: null,
+            realized_slippage_bps: null,
+            reconciliation_status: latest.confirmation_status || null
+          },
+          artifacts: {
+            v14_strategy_cycle_signoff_json: "data/exports/v14_strategy_cycle_signoff.json",
+            v14_strategy_cycle_signoff_md: "data/exports/v14_strategy_cycle_signoff.md",
+            v14_strategy_cycle_log_jsonl: "data/exports/v14_strategy_cycle_log.jsonl"
+          },
+          explainability: {
+            what_this_proves: [
+              "Cycle-level finalized verification is recorded in a persistent log",
+              "Signoff readiness is computed against required finalized cycle count",
+              "Failure classes are summarized for operational triage"
+            ],
+            what_this_does_not_prove: [
+              "Long-run profitability or edge by itself",
+              "Automatic recovery from all external RPC/provider conditions"
+            ]
+          },
+          _source: "v14_strategy_cycle_signoff",
+          _raw: p
+        };
+      }
+
+      // V1.4 release checkpoint schema
+      if (p.report_version === "v1.4_release_checkpoint_v1" && "release_ready" in p) {
+        const checks = Array.isArray(p.checks) ? p.checks : [];
+        const failed = Array.isArray(p.failed_checks) ? p.failed_checks : [];
+        const inputs = (p.inputs && typeof p.inputs === "object") ? p.inputs : {};
+        return {
+          run_id: `v14_release:${String((failed[0] || "ready"))}`,
+          timestamp_unix_ms: Date.parse(p.generated_at_utc || "") || null,
+          execution_mode: "live",
+          execution_stage: "v14_release_checkpoint",
+          network: "solana",
+          status: p.ok ? "completed" : "error",
+          summary: {
+            release_ready: p.release_ready ?? false,
+            release_summary: p.summary ?? "",
+            failed_checks: JSON.stringify(failed || []),
+            checks_total: checks.length,
+            cycles_total: inputs.cycles_total ?? 0,
+            cycles_finalized_ok: inputs.cycles_finalized_ok ?? 0,
+            cycles_failed: inputs.cycles_failed ?? 0,
+            signoff_ready: inputs.signoff_ready ?? false,
+            ops_bundle_count: inputs.ops_bundle_count ?? 0,
+            promotion_gate_status: (p.release_ready ? "pass" : "hold"),
+            live_launch_guard_status: "n/a"
+          },
+          transaction: {
+            submitted: false,
+            signature: null,
+            finalized: false,
+            fee_lamports: null,
+            realized_slippage_bps: null,
+            reconciliation_status: null
+          },
+          artifacts: {
+            v14_release_checkpoint_json: "data/exports/v14_release_checkpoint.json",
+            v14_release_checkpoint_md: "data/exports/v14_release_checkpoint.md"
+          },
+          explainability: {
+            what_this_proves: [
+              "Release readiness checks were evaluated from signoff and ops bundle evidence",
+              "Failed checks are explicit and operator-readable",
+              "A frozen checkpoint state can be validated repeatedly"
+            ],
+            what_this_does_not_prove: [
+              "Future runtime reliability under all external network conditions",
+              "Performance edge or profitability"
+            ]
+          },
+          _source: "v14_release_checkpoint",
+          _raw: p
+        };
+      }
+
       // V1.2 scored discovery report schema
       if (p.report_version === "v1.2_scored_discovery_report_v1" && p.scoring && p.promotion) {
         const summary = (p.summary && typeof p.summary === "object") ? p.summary : {};
@@ -886,6 +994,15 @@
       els.launchGuard.textContent = fmt(summary.live_launch_guard_status);
 
       renderKeyValueStack(els.summaryRows, toRows(summary, [
+        "required_finalized_cycles",
+        "cycles_total",
+        "cycles_finalized_ok",
+        "cycles_failed",
+        "signoff_ready",
+        "latest_confirmation_status",
+        "latest_retry_exhausted",
+        "failure_class_counts",
+        "unique_finalized_signature_count",
         "signals_seen",
         "candidates_attempted",
         "quotes_ok",
