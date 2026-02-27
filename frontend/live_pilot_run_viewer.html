@@ -556,6 +556,213 @@
         };
       }
 
+      // V1.5 entry readiness schema
+      if (p.report_version === "v1.5_entry_readiness_v1" && "entry_ready" in p) {
+        const checks = Array.isArray(p.checks) ? p.checks : [];
+        const failed = Array.isArray(p.failed_checks) ? p.failed_checks : [];
+        const m = (p.metrics && typeof p.metrics === "object") ? p.metrics : {};
+        return {
+          run_id: `v15_entry:${String((failed[0] || "ready"))}`,
+          timestamp_unix_ms: Date.parse(p.generated_at_utc || "") || null,
+          execution_mode: "live",
+          execution_stage: "v15_entry_readiness",
+          network: "solana",
+          status: p.ok ? "completed" : "error",
+          summary: {
+            entry_ready: p.entry_ready ?? false,
+            entry_summary: p.summary ?? "",
+            failed_checks: JSON.stringify(failed || []),
+            checks_total: checks.length,
+            cycles_total: m.cycles_total ?? 0,
+            cycles_finalized_ok: m.cycles_finalized_ok ?? 0,
+            cycles_failed: m.cycles_failed ?? 0,
+            recent_cycles_required: m.recent_cycles_required ?? 0,
+            recent_cycles_all_finalized_ok: m.recent_cycles_all_finalized_ok ?? false,
+            promotion_gate_status: (p.entry_ready ? "pass" : "hold"),
+            live_launch_guard_status: "n/a"
+          },
+          transaction: {
+            submitted: false,
+            signature: null,
+            finalized: false,
+            fee_lamports: null,
+            realized_slippage_bps: null,
+            reconciliation_status: null
+          },
+          artifacts: {
+            v15_entry_readiness_json: "data/exports/v15_entry_readiness.json",
+            v15_entry_readiness_md: "data/exports/v15_entry_readiness.md"
+          },
+          explainability: {
+            what_this_proves: [
+              "V1.5 entry gate checks were evaluated from V1.4 supervised evidence",
+              "Recent-cycle stability and failure-free requirements are enforced",
+              "Entry readiness is an explicit pass/fail artifact"
+            ],
+            what_this_does_not_prove: [
+              "Autonomous profitability",
+              "That future external conditions will remain stable"
+            ]
+          },
+          _source: "v15_entry_readiness",
+          _raw: p
+        };
+      }
+
+      // V1.5 release checkpoint schema
+      if (p.report_version === "v1.5_release_checkpoint_v1" && "release_ready" in p) {
+        const checks = Array.isArray(p.checks) ? p.checks : [];
+        const failed = Array.isArray(p.failed_checks) ? p.failed_checks : [];
+        const inputs = (p.inputs && typeof p.inputs === "object") ? p.inputs : {};
+        return {
+          run_id: `v15_release:${String((failed[0] || "ready"))}`,
+          timestamp_unix_ms: Date.parse(p.generated_at_utc || "") || null,
+          execution_mode: "live",
+          execution_stage: "v15_release_checkpoint",
+          network: "solana",
+          status: p.ok ? "completed" : "error",
+          summary: {
+            release_ready: p.release_ready ?? false,
+            release_summary: p.summary ?? "",
+            failed_checks: JSON.stringify(failed || []),
+            checks_total: checks.length,
+            cycles_total: inputs.cycles_total ?? 0,
+            cycles_failed: inputs.cycles_failed ?? 0,
+            v14_release_ready: inputs.v14_release_ready ?? false,
+            v15_entry_ready: inputs.v15_entry_ready ?? false,
+            v15_ops_bundle_count: inputs.v15_ops_bundle_count ?? 0,
+            promotion_gate_status: (p.release_ready ? "pass" : "hold"),
+            live_launch_guard_status: "n/a"
+          },
+          transaction: {
+            submitted: false,
+            signature: null,
+            finalized: false,
+            fee_lamports: null,
+            realized_slippage_bps: null,
+            reconciliation_status: null
+          },
+          artifacts: {
+            v15_release_checkpoint_json: "data/exports/v15_release_checkpoint.json",
+            v15_release_checkpoint_md: "data/exports/v15_release_checkpoint.md"
+          },
+          explainability: {
+            what_this_proves: [
+              "V1.5 release checks were evaluated from V1.4 release plus V1.5 entry/ops artifacts",
+              "Release readiness is explicit and repeatable",
+              "Operator gating remains supervised and auditable"
+            ],
+            what_this_does_not_prove: [
+              "Unsupervised strategy autonomy",
+              "Guaranteed profitability"
+            ]
+          },
+          _source: "v15_release_checkpoint",
+          _raw: p
+        };
+      }
+
+      // V1.5 ops bundles index schema
+      if (p.report_version === "v1.5_ops_bundles_index_v1" && Array.isArray(p.bundles)) {
+        const bundles = Array.isArray(p.bundles) ? p.bundles : [];
+        const newest = bundles[0] || {};
+        const newestSummary = (newest.summary && typeof newest.summary === "object") ? newest.summary : {};
+        return {
+          run_id: `v15_ops:${String(newest.bundle_name || "none")}`,
+          timestamp_unix_ms: Date.parse(p.generated_at_utc || "") || null,
+          execution_mode: "live",
+          execution_stage: "v15_ops_bundles_index",
+          network: "solana",
+          status: "completed",
+          summary: {
+            bundle_count: p.bundle_count ?? bundles.length,
+            newest_bundle: newest.bundle_name || "",
+            newest_release_ready: newestSummary.release_ready ?? false,
+            newest_entry_ready: newestSummary.entry_ready ?? false,
+            newest_cycles_total: newestSummary.cycles_total ?? 0,
+            newest_cycles_failed: newestSummary.cycles_failed ?? 0,
+            promotion_gate_status: ((newestSummary.release_ready ?? false) ? "pass" : "hold"),
+            live_launch_guard_status: "n/a"
+          },
+          transaction: {
+            submitted: false,
+            signature: null,
+            finalized: false,
+            fee_lamports: null,
+            realized_slippage_bps: null,
+            reconciliation_status: null
+          },
+          artifacts: {
+            v15_ops_bundles_index_json: "data/exports/v15_ops_bundles/index.json",
+            v15_ops_bundles_index_md: "data/exports/v15_ops_bundles/index.md"
+          },
+          explainability: {
+            what_this_proves: [
+              "V1.5 ops bundles are indexed and reviewable",
+              "Latest bundle release/entry state is visible",
+              "Supervised handoff artifacts are persisted"
+            ],
+            what_this_does_not_prove: [
+              "Execution quality in unseen market regimes",
+              "Autonomous adaptation correctness"
+            ]
+          },
+          _source: "v15_ops_bundles_index",
+          _raw: p
+        };
+      }
+
+      // V1.5 supervised signoff schema
+      if (p.report_version === "v1.5_supervised_signoff_v1" && "signoff_ready" in p) {
+        const checks = Array.isArray(p.checks) ? p.checks : [];
+        const failed = Array.isArray(p.failed_checks) ? p.failed_checks : [];
+        const inputs = (p.inputs && typeof p.inputs === "object") ? p.inputs : {};
+        return {
+          run_id: `v15_signoff:${String((failed[0] || "ready"))}`,
+          timestamp_unix_ms: Date.parse(p.generated_at_utc || "") || null,
+          execution_mode: "live",
+          execution_stage: "v15_supervised_signoff",
+          network: "solana",
+          status: p.ok ? "completed" : "error",
+          summary: {
+            signoff_ready: p.signoff_ready ?? false,
+            signoff_summary: p.summary ?? "",
+            failed_checks: JSON.stringify(failed || []),
+            checks_total: checks.length,
+            entry_ready: inputs.entry_ready ?? false,
+            release_ready: inputs.release_ready ?? false,
+            v15_ops_bundle_count: inputs.v15_ops_bundle_count ?? 0,
+            promotion_gate_status: (p.signoff_ready ? "pass" : "hold"),
+            live_launch_guard_status: "n/a"
+          },
+          transaction: {
+            submitted: false,
+            signature: null,
+            finalized: false,
+            fee_lamports: null,
+            realized_slippage_bps: null,
+            reconciliation_status: null
+          },
+          artifacts: {
+            v15_supervised_signoff_json: "data/exports/v15_supervised_signoff.json",
+            v15_supervised_signoff_md: "data/exports/v15_supervised_signoff.md"
+          },
+          explainability: {
+            what_this_proves: [
+              "V1.5 supervised signoff checks passed/failed explicitly",
+              "Entry readiness, release readiness, and ops bundle evidence were combined",
+              "Operator handoff state is persistent and auditable"
+            ],
+            what_this_does_not_prove: [
+              "Future market profitability",
+              "Unsupervised trading safety"
+            ]
+          },
+          _source: "v15_supervised_signoff",
+          _raw: p
+        };
+      }
+
       // V1.2 scored discovery report schema
       if (p.report_version === "v1.2_scored_discovery_report_v1" && p.scoring && p.promotion) {
         const summary = (p.summary && typeof p.summary === "object") ? p.summary : {};

@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("tiny_live_usdc", "no_send_usdc", "status_only", "scored_discovery_demo", "strategy_demo", "strategy_demo_full", "v14_strategy_cycle", "v14_release_checkpoint")]
+    [ValidateSet("tiny_live_usdc", "no_send_usdc", "status_only", "scored_discovery_demo", "strategy_demo", "strategy_demo_full", "v14_strategy_cycle", "v14_release_checkpoint", "v15_entry_gate", "v15_supervised_cycle", "v15_release_checkpoint", "v15_ops_bundle_postprocess", "v15_supervised_signoff", "v15_release_cycle")]
     [string]$Preset = "status_only",
     [double]$UsdSize = 0.25,
     [string]$ConfigPath = "data/exports/live_pilot_solana_send_pilot_live_enabled_temp.json",
@@ -138,6 +138,80 @@ function Invoke-V14ReleaseCheckpoint {
     }
 }
 
+function Invoke-V15EntryGate {
+    powershell -ExecutionPolicy Bypass -File .\examples\run_v15_entry_gate.ps1 -MinCyclesTotal 7 -RecentCyclesRequired 3
+    if ($LASTEXITCODE -ne 0) {
+        throw "v15_entry_gate_failed"
+    }
+}
+
+function Invoke-V15SupervisedCycle {
+    Invoke-V14StrategyCycle
+    if ($LASTEXITCODE -ne 0) {
+        throw "v14_strategy_cycle_failed"
+    }
+    Invoke-V15EntryGate
+    if ($LASTEXITCODE -ne 0) {
+        throw "v15_entry_gate_failed"
+    }
+    Write-Host "v15-supervised-cycle: done"
+}
+
+function Invoke-V15ReleaseCheckpoint {
+    $env:PYTHONPATH = "."
+    python .\examples\export_v15_release_checkpoint.py `
+      --v14-release-checkpoint-json-path .\data\exports\v14_release_checkpoint.json `
+      --v15-entry-readiness-json-path .\data\exports\v15_entry_readiness.json `
+      --v15-ops-index-json-path .\data\exports\v15_ops_bundles\index.json `
+      --min-bundles 1 `
+      --output-json .\data\exports\v15_release_checkpoint.json `
+      --output-md .\data\exports\v15_release_checkpoint.md
+    if ($LASTEXITCODE -ne 0) {
+        throw "v15_release_checkpoint_failed"
+    }
+}
+
+function Invoke-V15OpsBundlePostprocess {
+    powershell -ExecutionPolicy Bypass -File .\examples\run_v15_ops_bundle_postprocess.ps1
+    if ($LASTEXITCODE -ne 0) {
+        throw "v15_ops_bundle_postprocess_failed"
+    }
+}
+
+function Invoke-V15SupervisedSignoff {
+    $env:PYTHONPATH = "."
+    python .\examples\export_v15_supervised_signoff.py `
+      --v15-entry-readiness-json-path .\data\exports\v15_entry_readiness.json `
+      --v15-release-checkpoint-json-path .\data\exports\v15_release_checkpoint.json `
+      --v15-ops-index-json-path .\data\exports\v15_ops_bundles\index.json `
+      --min-bundles 1 `
+      --output-json .\data\exports\v15_supervised_signoff.json `
+      --output-md .\data\exports\v15_supervised_signoff.md
+    if ($LASTEXITCODE -ne 0) {
+        throw "v15_supervised_signoff_failed"
+    }
+}
+
+function Invoke-V15ReleaseCycle {
+    Invoke-V15SupervisedCycle
+    if ($LASTEXITCODE -ne 0) {
+        throw "v15_supervised_cycle_failed"
+    }
+    Invoke-V15ReleaseCheckpoint
+    if ($LASTEXITCODE -ne 0) {
+        throw "v15_release_checkpoint_failed"
+    }
+    Invoke-V15OpsBundlePostprocess
+    if ($LASTEXITCODE -ne 0) {
+        throw "v15_ops_bundle_postprocess_failed"
+    }
+    Invoke-V15SupervisedSignoff
+    if ($LASTEXITCODE -ne 0) {
+        throw "v15_supervised_signoff_failed"
+    }
+    Write-Host "v15-release-cycle: done"
+}
+
 Write-Host ("preset=" + $Preset)
 switch ($Preset) {
     "tiny_live_usdc" { Invoke-TinyLiveUsdc; break }
@@ -148,4 +222,10 @@ switch ($Preset) {
     "strategy_demo_full" { Invoke-StrategyDemoFull; break }
     "v14_strategy_cycle" { Invoke-V14StrategyCycle; break }
     "v14_release_checkpoint" { Invoke-V14ReleaseCheckpoint; break }
+    "v15_entry_gate" { Invoke-V15EntryGate; break }
+    "v15_supervised_cycle" { Invoke-V15SupervisedCycle; break }
+    "v15_release_checkpoint" { Invoke-V15ReleaseCheckpoint; break }
+    "v15_ops_bundle_postprocess" { Invoke-V15OpsBundlePostprocess; break }
+    "v15_supervised_signoff" { Invoke-V15SupervisedSignoff; break }
+    "v15_release_cycle" { Invoke-V15ReleaseCycle; break }
 }
