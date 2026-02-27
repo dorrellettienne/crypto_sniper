@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>V1.4 Ops Bundles Index</title>
+  <style>
+    :root { --bg:#081018; --panel:#0f1a25; --ink:#e7f0f7; --muted:#9db2c3; --line:rgba(157,178,195,.14); --good:#34d399; --warn:#f59e0b; --bad:#fb7185; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:linear-gradient(180deg,#060c12,#081018); color:var(--ink); font:14px/1.45 "Segoe UI",Arial,sans-serif; }
+    .wrap { width:min(1150px,calc(100% - 24px)); margin:18px auto 28px; }
+    .hero,.card { background:rgba(15,26,37,.96); border:1px solid var(--line); border-radius:14px; }
+    .hero { padding:14px; }
+    .grid { display:grid; grid-template-columns:repeat(12,minmax(0,1fr)); gap:10px; margin-top:12px; }
+    .span-12 { grid-column:span 12; } .span-4 { grid-column:span 4; } .span-8 { grid-column:span 8; }
+    @media (max-width: 960px){ .span-4,.span-8{grid-column:span 12;} }
+    .card { padding:12px; }
+    .controls { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+    .btn { border:1px solid var(--line); background:#122131; color:var(--ink); border-radius:10px; padding:10px 12px; cursor:pointer; font-weight:600; }
+    input[type=file]{display:none;}
+    .drop { flex:1 1 420px; border:1px dashed rgba(52,211,153,.22); border-radius:10px; padding:10px 12px; color:var(--muted); }
+    .label { color:var(--muted); text-transform:uppercase; letter-spacing:.08em; font-size:11px; margin-bottom:8px; }
+    .big { font-size:26px; font-weight:700; }
+    .bundle { border:1px solid rgba(157,178,195,.08); background:rgba(7,12,17,.45); border-radius:12px; padding:10px; margin-bottom:8px; }
+    .head { display:flex; justify-content:space-between; gap:8px; align-items:center; }
+    .pill { display:inline-block; padding:4px 8px; border-radius:999px; border:1px solid var(--line); background:rgba(12,22,31,.6); font-size:12px; }
+    .pill.good { border-color:rgba(52,211,153,.25); color:#c7f8e8; background:rgba(52,211,153,.08); }
+    .pill.warn { border-color:rgba(245,158,11,.25); color:#ffe3ba; background:rgba(245,158,11,.08); }
+    .pill.bad { border-color:rgba(251,113,133,.25); color:#ffd8df; background:rgba(251,113,133,.08); }
+    .rows { display:grid; gap:4px; margin-top:6px; }
+    .row { display:flex; justify-content:space-between; gap:8px; }
+    .muted { color:var(--muted); }
+    pre { margin:0; max-height:280px; overflow:auto; background:#09141d; border:1px solid rgba(157,178,195,.08); border-radius:10px; padding:10px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <h1 style="margin:0 0 8px;font-size:26px;">V1.4 Ops Bundles Index</h1>
+      <div class="muted">Load <code>data/exports/v14_ops_bundles/index.json</code> to review cycle signoff snapshots and ops readiness bundles.</div>
+      <div class="controls">
+        <div id="drop" class="drop">Drop <code>v14_ops_bundles/index.json</code> here or use Load JSON.</div>
+        <label class="btn" for="file-input">Load JSON</label>
+        <button id="load-sample" class="btn" type="button">Load Sample</button>
+      </div>
+      <input id="file-input" type="file" accept=".json,application/json">
+    </section>
+
+    <div class="grid">
+      <div class="card span-4">
+        <div class="label">Summary</div>
+        <div id="bundle-count" class="big">0</div>
+        <div id="summary" class="rows"></div>
+      </div>
+      <div class="card span-8">
+        <div class="label">Ops Bundles</div>
+        <div id="bundles"></div>
+      </div>
+      <div class="card span-12">
+        <div class="label">Raw JSON</div>
+        <pre id="raw">{}</pre>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const els = {
+      drop: document.getElementById("drop"),
+      fileInput: document.getElementById("file-input"),
+      loadSample: document.getElementById("load-sample"),
+      bundleCount: document.getElementById("bundle-count"),
+      summary: document.getElementById("summary"),
+      bundles: document.getElementById("bundles"),
+      raw: document.getElementById("raw"),
+    };
+
+    const sample = {
+      ok: true,
+      report_version: "v1.4_ops_bundles_index_v1",
+      generated_at_utc: "2026-02-27T00:45:00Z",
+      v14_ops_bundles_dir: "data/exports/v14_ops_bundles",
+      bundle_count: 1,
+      bundles: [
+        {
+          bundle_name: "v14_ops_20260227T004500Z",
+          summary: { cycles_total: 3, cycles_finalized_ok: 3, cycles_failed: 0, signoff_ready: true },
+          v14_strategy_cycle_signoff_json: { path: "data/exports/v14_ops_bundles/.../v14_strategy_cycle_signoff.json" }
+        }
+      ]
+    };
+
+    const esc = (v) => String(v ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+    const fmt = (v) => (v === null || v === undefined || v === "" ? "-" : String(v));
+    const row = (k,v) => `<div class="row"><span class="muted">${esc(k)}</span><span>${esc(fmt(v))}</span></div>`;
+
+    function readinessPillClass(summary) {
+      const ready = !!summary.signoff_ready;
+      const failed = Number(summary.cycles_failed || 0);
+      if (ready && failed === 0) return "pill good";
+      if (failed > 0) return "pill bad";
+      return "pill warn";
+    }
+
+    function render(idx) {
+      const p = (idx && typeof idx === "object") ? idx : {};
+      const bundles = Array.isArray(p.bundles) ? p.bundles : [];
+      els.raw.textContent = JSON.stringify(p, null, 2);
+      els.bundleCount.textContent = String(p.bundle_count ?? bundles.length ?? 0);
+      els.summary.innerHTML = [
+        row("Generated", p.generated_at_utc),
+        row("Dir", p.v14_ops_bundles_dir),
+        row("Report", p.report_version),
+        row("OK", p.ok),
+      ].join("");
+
+      if (!bundles.length) {
+        els.bundles.innerHTML = `<div class="bundle"><div class="muted">No V1.4 ops bundles found.</div></div>`;
+        return;
+      }
+
+      els.bundles.innerHTML = bundles.map((b) => {
+        const s = (b && typeof b.summary === "object") ? b.summary : {};
+        const pillCls = readinessPillClass(s);
+        const pillTxt = s.signoff_ready ? "signoff_ready=true" : "signoff_ready=false";
+        return `<div class="bundle">
+          <div class="head">
+            <div><strong>${esc(b.bundle_name || "-")}</strong></div>
+            <span class="${pillCls}">${esc(pillTxt)}</span>
+          </div>
+          <div class="rows">
+            ${row("cycles_total", s.cycles_total)}
+            ${row("cycles_finalized_ok", s.cycles_finalized_ok)}
+            ${row("cycles_failed", s.cycles_failed)}
+            ${row("signoff_ready", s.signoff_ready)}
+            ${row("signoff_json", ((b.v14_strategy_cycle_signoff_json || {}).path || ""))}
+            ${row("cycle_log", ((b.v14_strategy_cycle_log_jsonl || {}).path || ""))}
+            ${row("review_packet_json", ((b.strategy_decision_review_packet_json || {}).path || ""))}
+          </div>
+        </div>`;
+      }).join("");
+    }
+
+    function loadText(t) { try { render(JSON.parse(t)); } catch (e) { alert("Invalid JSON: " + e.message); } }
+    els.loadSample.addEventListener("click", () => render(sample));
+    els.fileInput.addEventListener("change", async (e) => { const f = e.target.files && e.target.files[0]; if (!f) return; loadText(await f.text()); });
+    els.drop.addEventListener("click", () => els.fileInput.click());
+    ["dragenter","dragover"].forEach((evt) => els.drop.addEventListener(evt, (e) => e.preventDefault()));
+    els.drop.addEventListener("drop", async (e) => { e.preventDefault(); const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]; if (!f) return; loadText(await f.text()); });
+    render({ ok: true, bundle_count: 0, bundles: [] });
+  </script>
+</body>
+</html>
+
