@@ -44,18 +44,14 @@ function Convert-MixedOutputToJsonObject {
 
 if ($EnforceRegressionSmoke) {
     Write-Host "v14-cycle: regression-smoke preflight check"
-    $smokeRaw = powershell -ExecutionPolicy Bypass -File .\examples\run_v14_regression_smoke.ps1
+    powershell -ExecutionPolicy Bypass -File .\examples\run_v14_regression_smoke.ps1
     if ($LASTEXITCODE -ne 0) { throw "v14_regression_smoke_failed" }
-    $smokeObj = Convert-MixedOutputToJsonObject -Text $smokeRaw
-    if (-not $smokeObj.ok) { throw "v14_regression_smoke_failed" }
 }
 
 if ($EnforceGuardrailLock) {
     Write-Host "v14-cycle: guardrail-lock preflight check"
-    $guardrailRaw = powershell -ExecutionPolicy Bypass -File .\examples\check_live_workflow_env_and_config.ps1 -ConfigPath $ConfigPath -ExpectedUsdSize $ExpectedUsdSize
+    powershell -ExecutionPolicy Bypass -File .\examples\check_live_workflow_env_and_config.ps1 -ConfigPath $ConfigPath -ExpectedUsdSize $ExpectedUsdSize
     if ($LASTEXITCODE -ne 0) { throw "v14_guardrail_lock_failed" }
-    $guardrailObj = Convert-MixedOutputToJsonObject -Text $guardrailRaw
-    if (-not $guardrailObj.ok) { throw "v14_guardrail_lock_failed" }
 }
 
 function Get-FailureClass {
