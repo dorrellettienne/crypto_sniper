@@ -12,6 +12,7 @@ param(
     [int]$PromoteMaxCandidates = 1,
     [switch]$PromoteRequireProbeOk,
     [int]$MaxFetchedCandidates = 120,
+    [string]$DexscreenerUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
     [switch]$SkipStatusCheck
 )
 
@@ -57,6 +58,7 @@ $selectionJsonPath = ".\data\exports\v16_selected_promoted_candidate.json"
 python .\examples\export_dexscreener_candidates.py `
   --fetch-url $DexscreenerFetchUrl `
   --fallback-urls-json-path $DexscreenerFallbackUrlsJsonPath `
+  --user-agent $DexscreenerUserAgent `
   --chain-id solana `
   --usd-size ([string]$UsdSize) `
   --max-candidates ([string]$MaxFetchedCandidates) `
@@ -125,4 +127,3 @@ if (-not $SkipStatusCheck) {
 }
 
 exit $exitCode
-

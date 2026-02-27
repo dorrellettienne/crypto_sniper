@@ -65,11 +65,28 @@ def main() -> int:
     ap.add_argument("--fetch-retry-backoff-seconds", type=float, default=0.5)
     ap.add_argument("--max-payload-age-ms", type=int, default=30000)
     ap.add_argument("--allow-stale-payloads", action="store_true")
+    ap.add_argument("--user-agent", default="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")
+    ap.add_argument("--header", action="append", default=[])
     ap.add_argument("--max-candidates", type=int, default=100)
     ap.add_argument("--output-json", default="data/exports/v16_discovery_candidates.json")
     args = ap.parse_args()
 
     fallback_urls = _load_fallback_urls(args.fallback_urls_json_path)
+    headers: dict[str, str] = {}
+    user_agent = str(args.user_agent or "").strip()
+    if user_agent:
+        headers["User-Agent"] = user_agent
+    for item in list(args.header or []):
+        s = str(item or "")
+        if ":" not in s:
+            raise SystemExit("invalid_header_format_expected_NAME:VALUE")
+        k, v = s.split(":", 1)
+        k = k.strip()
+        v = v.strip()
+        if not k:
+            raise SystemExit("invalid_header_name_empty")
+        headers[k] = v
+
     fetcher = DexScreenerHttpPairsFetcher(
         url=str(args.fetch_url),
         fallback_urls=fallback_urls,
@@ -78,6 +95,7 @@ def main() -> int:
         retry_backoff_seconds=float(args.fetch_retry_backoff_seconds),
         max_payload_age_ms=int(args.max_payload_age_ms) if args.max_payload_age_ms is not None else None,
         fail_on_stale_payload=not bool(args.allow_stale_payloads),
+        headers=headers,
     )
     payload = fetcher()
     pairs = payload.get("pairs")
@@ -116,4 +134,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
