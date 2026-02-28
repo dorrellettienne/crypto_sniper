@@ -120,8 +120,6 @@ class QuoteOnlyDexExecutor:
         }
 
     def build_sell_order(self, position_id: int, exit_price: float) -> dict[str, Any]:
-        if not self.quote_only_mode:
-            raise LiveDexQuoteError("QuoteOnlyDexExecutor requires quote_only_mode=True")
         return {
             "action": "sell",
             "mode": "quote_only",
@@ -130,9 +128,37 @@ class QuoteOnlyDexExecutor:
             "quote_preview": {"provider": "quote_only_dex", "note": "sell quote not implemented in skeleton"},
         }
 
+    def build_sell_order_for_position(
+        self,
+        *,
+        position_id: int,
+        token_address: str,
+        symbol: str,
+        token_amount_raw: int | None,
+        entry_price: float,
+        exit_price: float,
+        usd_size: float,
+    ) -> dict[str, Any]:
+        amount = max(1, int(token_amount_raw or 0))
+        quote = self.get_quote_preview(
+            input_mint=str(token_address),
+            output_mint=self.quote_input_mint,
+            amount=amount,
+        )
+        return {
+            "action": "sell",
+            "mode": "quote_only",
+            "position_id": int(position_id),
+            "token_address": str(token_address),
+            "symbol": str(symbol),
+            "entry_price": float(entry_price),
+            "exit_price": float(exit_price),
+            "usd_size": float(usd_size),
+            "token_amount_raw": int(amount),
+            "quote_preview": quote,
+        }
+
     def build_stop_loss_order(self, position_id: int, stop_percent: float) -> dict[str, Any]:
-        if not self.quote_only_mode:
-            raise LiveDexQuoteError("QuoteOnlyDexExecutor requires quote_only_mode=True")
         return {
             "action": "stop_loss",
             "mode": "quote_only",
@@ -166,7 +192,7 @@ class QuoteOnlyDexExecutor:
 
     def build_unsigned_submit_stub(self, order_preview: dict[str, Any], client_order_id: str) -> dict[str, Any]:
         action = (order_preview or {}).get("action")
-        if str(action) != "buy":
+        if str(action) not in {"buy", "sell", "stop_loss"}:
             return {
                 "mode": "unsigned_submit_stub",
                 "provider": "quote_only_dex",
@@ -174,7 +200,7 @@ class QuoteOnlyDexExecutor:
                 "order_action": action,
                 "unsigned_transaction_base64": None,
                 "ready": False,
-                "reason": "quote_only_executor_unsigned_buy_only",
+                "reason": "quote_only_executor_unsigned_action_not_supported",
             }
         if not self.swap_url:
             return {

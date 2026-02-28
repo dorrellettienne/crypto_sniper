@@ -7187,15 +7187,28 @@ def _validate_live_auto_window_guardrails(
     if int(max_auto_trades) != 1:
         raise ValueError("live auto-window network submits require --auto-pilot-max-trades 1 for S4-M22.4")
 
+    auto_exit_enabled = bool(cfg.get("live_auto_exit_enabled", False))
     max_orders = cfg.get("live_send_max_orders_per_session")
-    if max_orders is None or int(max_orders) > 1:
-        raise ValueError("live auto-window network submits require live_send_max_orders_per_session <= 1")
+    if auto_exit_enabled:
+        if max_orders is None or int(max_orders) > 2:
+            raise ValueError("live auto-window network submits with auto-exit require live_send_max_orders_per_session <= 2")
+    else:
+        if max_orders is None or int(max_orders) > 1:
+            raise ValueError("live auto-window network submits require live_send_max_orders_per_session <= 1")
 
     max_notional = cfg.get("live_send_max_notional_usd_total")
-    if max_notional is None or float(max_notional) > 1.0:
-        raise ValueError("live auto-window network submits require live_send_max_notional_usd_total <= 1.0")
+    if auto_exit_enabled:
+        if max_notional not in (None, "") and float(max_notional) > 2.0:
+            raise ValueError("live auto-window network submits with auto-exit require live_send_max_notional_usd_total <= 2.0")
+    else:
+        if max_notional is None or float(max_notional) > 1.0:
+            raise ValueError("live auto-window network submits require live_send_max_notional_usd_total <= 1.0")
 
-    if str(cfg.get("manual_submit_mode") or "").strip().lower() != "buy_only":
+    manual_mode = str(cfg.get("manual_submit_mode") or "").strip().lower()
+    if auto_exit_enabled:
+        if manual_mode not in {"buy_sell", "buy_and_sell", "all"}:
+            raise ValueError("live auto-window network submits with auto-exit require manual_submit_mode=buy_and_sell")
+    elif manual_mode != "buy_only":
         raise ValueError("live auto-window network submits require manual_submit_mode=buy_only")
 
 
@@ -7348,6 +7361,70 @@ def _format_human_live_pilot_summary(out: dict[str, Any]) -> str:
             f"promotion_gate: status={gate.get('status')} ready={bool(gate.get('ready_to_promote', False))} failed={','.join(list(gate.get('failed_checks', []) or [])) or '-'}"
         )
     return "\n".join(lines)
+
+
+def _maybe_run_auto_exit_for_buy_payload(
+    *,
+    adapter,
+    cfg: dict[str, Any],
+    buy_payload: dict[str, Any],
+    audit_log_path: str,
+    rollup: dict[str, Any],
+    cycle_context: dict[str, Any],
+    sleep_fn,
+) -> dict[str, Any] | None:
+    if not bool(cfg.get("live_auto_exit_enabled", False)):
+        return None
+    md = buy_payload.get("metadata") if isinstance(buy_payload, dict) else {}
+    dispatch = md.get("submit_dispatch") if isinstance(md, dict) else {}
+    if not isinstance(dispatch, dict) or str(dispatch.get("reason") or "") != "send_raw_transaction_submitted":
+        return None
+    position_id = buy_payload.get("position_id", md.get("virtual_position_id")) if isinstance(buy_payload, dict) else None
+    if position_id in (None, ""):
+        return None
+
+    entry_price = _to_float_or_none((buy_payload.get("candidate") or {}).get("entry_price"))
+    if entry_price is None:
+        entry_price = _to_float_or_none(md.get("entry_price"))
+    if entry_price is None or entry_price <= 0:
+        return None
+    exit_mult = _to_float_or_none(cfg.get("live_auto_exit_price_multiplier"))
+    if exit_mult is None or exit_mult <= 0:
+        exit_mult = 1.0
+    exit_price = float(entry_price) * float(exit_mult)
+    delay_seconds = _to_float_or_none(cfg.get("live_auto_exit_delay_seconds"))
+    if delay_seconds is not None and delay_seconds > 0:
+        sleep_fn(float(delay_seconds))
+
+    sell_result = adapter.sell(int(position_id), float(exit_price))
+    sell_payload = {
+        "ok": bool(sell_result.ok),
+        "action": sell_result.action,
+        "message": sell_result.message,
+        "metadata": dict(sell_result.metadata or {}),
+        "position_id": sell_result.position_id,
+        "auto_exit_for_cycle": int(cycle_context.get("cycle", 0)),
+        "exit_price": float(exit_price),
+        "exit_price_multiplier": float(exit_mult),
+    }
+    for key in ("candidate_index", "token_address", "symbol"):
+        if key in cycle_context:
+            sell_payload[key] = cycle_context[key]
+    _maybe_attach_live_chain_reconciliation(sell_payload, adapter, cfg, audit_log_path)
+    _maybe_attach_live_submit_economics(sell_payload, cfg)
+    _audit_result_and_dispatch(audit_log_path, sell_payload)
+    _rollup_update_from_payload(rollup, sell_payload)
+    rollup["sell_runs"] = int(rollup.get("sell_runs", 0)) + 1
+    sell_dispatch = sell_payload["metadata"].get("submit_dispatch") if isinstance(sell_payload.get("metadata"), dict) else {}
+    sell_reason = str((sell_dispatch or {}).get("reason") or "") if isinstance(sell_dispatch, dict) else ""
+    if sell_reason:
+        by_reason = rollup.setdefault("sell_submit_dispatch_by_reason", {})
+        by_reason[sell_reason] = int(by_reason.get(sell_reason, 0)) + 1
+    if isinstance(sell_dispatch, dict) and str(sell_dispatch.get("submitted_signature") or ""):
+        rollup["sell_submitted_signatures"] = int(rollup.get("sell_submitted_signatures", 0)) + 1
+        if isinstance(rollup.get("auto_window"), dict):
+            rollup["auto_window"]["sells_submitted"] = int((rollup.get("auto_window") or {}).get("sells_submitted", 0)) + 1
+    return sell_payload
 
 
 def run_live_pilot_service_once(
@@ -7566,8 +7643,11 @@ def run_live_pilot_auto_window(
 
     rollup = {
         "runs": 0,
+        "sell_runs": 0,
         "submit_dispatch_by_reason": {},
+        "sell_submit_dispatch_by_reason": {},
         "submitted_signatures": 0,
+        "sell_submitted_signatures": 0,
         "pause_latch_events": 0,
         "pause_reset_events": 0,
         "live_reconciliation_outcome_by_class": {},
@@ -7579,6 +7659,7 @@ def run_live_pilot_auto_window(
             "poll_interval_seconds": poll_interval_seconds,
             "stop_reason": "",
             "trades_submitted": 0,
+            "sells_submitted": 0,
             "cycles_completed": 0,
         },
     }
@@ -7628,10 +7709,33 @@ def run_live_pilot_auto_window(
         cycles.append(
             {
                 "cycle": payload["auto_window_cycle"],
+                "phase": "buy",
                 "submit_dispatch_reason": (dispatch or {}).get("reason") if isinstance(dispatch, dict) else None,
                 "chain_outcome_class": ((dispatch or {}).get("chain_reconciliation") or {}).get("outcome_class") if isinstance(dispatch, dict) else None,
             }
         )
+        auto_exit_payload = _maybe_run_auto_exit_for_buy_payload(
+            adapter=adapter,
+            cfg=cfg,
+            buy_payload=payload,
+            audit_log_path=audit_log_path,
+            rollup=rollup,
+            cycle_context={"cycle": payload["auto_window_cycle"], "token_address": str(token_address), "symbol": str(symbol)},
+            sleep_fn=sleep_fn,
+        )
+        if isinstance(auto_exit_payload, dict):
+            auto_exit_dispatch = auto_exit_payload.get("metadata", {}).get("submit_dispatch", {})
+            cycles.append(
+                {
+                    "cycle": payload["auto_window_cycle"],
+                    "phase": "auto_exit_sell",
+                    "position_id": auto_exit_payload.get("position_id"),
+                    "submit_dispatch_reason": (auto_exit_dispatch or {}).get("reason") if isinstance(auto_exit_dispatch, dict) else None,
+                    "chain_outcome_class": ((auto_exit_dispatch or {}).get("chain_reconciliation") or {}).get("outcome_class")
+                    if isinstance(auto_exit_dispatch, dict)
+                    else None,
+                }
+            )
 
         chain_outcome = str(((dispatch or {}).get("chain_reconciliation") or {}).get("outcome_class") or "") if isinstance(dispatch, dict) else ""
         if stop_on_reconciliation_mismatch and chain_outcome == "live_reconciliation_mismatch":
@@ -7734,8 +7838,11 @@ def run_live_pilot_auto_window_candidates(
 
     rollup = {
         "runs": 0,
+        "sell_runs": 0,
         "submit_dispatch_by_reason": {},
+        "sell_submit_dispatch_by_reason": {},
         "submitted_signatures": 0,
+        "sell_submitted_signatures": 0,
         "pause_latch_events": 0,
         "pause_reset_events": 0,
         "live_reconciliation_outcome_by_class": {},
@@ -7748,6 +7855,7 @@ def run_live_pilot_auto_window_candidates(
             "poll_interval_seconds": poll_interval_seconds,
             "stop_reason": "",
             "trades_submitted": 0,
+            "sells_submitted": 0,
             "cycles_completed": 0,
         },
         "candidates_seen": 0,
@@ -7893,6 +8001,7 @@ def run_live_pilot_auto_window_candidates(
         cycles.append(
             {
                 "cycle": payload["auto_window_cycle"],
+                "phase": "buy",
                 "candidate_index": idx,
                 "token_address": token_address,
                 "symbol": symbol,
@@ -7900,6 +8009,36 @@ def run_live_pilot_auto_window_candidates(
                 "chain_outcome_class": ((dispatch or {}).get("chain_reconciliation") or {}).get("outcome_class") if isinstance(dispatch, dict) else None,
             }
         )
+        auto_exit_payload = _maybe_run_auto_exit_for_buy_payload(
+            adapter=adapter,
+            cfg=cfg,
+            buy_payload=payload,
+            audit_log_path=audit_log_path,
+            rollup=rollup,
+            cycle_context={
+                "cycle": payload["auto_window_cycle"],
+                "candidate_index": idx,
+                "token_address": token_address,
+                "symbol": symbol,
+            },
+            sleep_fn=sleep_fn,
+        )
+        if isinstance(auto_exit_payload, dict):
+            auto_exit_dispatch = auto_exit_payload.get("metadata", {}).get("submit_dispatch", {})
+            cycles.append(
+                {
+                    "cycle": payload["auto_window_cycle"],
+                    "phase": "auto_exit_sell",
+                    "candidate_index": idx,
+                    "token_address": token_address,
+                    "symbol": symbol,
+                    "position_id": auto_exit_payload.get("position_id"),
+                    "submit_dispatch_reason": (auto_exit_dispatch or {}).get("reason") if isinstance(auto_exit_dispatch, dict) else None,
+                    "chain_outcome_class": ((auto_exit_dispatch or {}).get("chain_reconciliation") or {}).get("outcome_class")
+                    if isinstance(auto_exit_dispatch, dict)
+                    else None,
+                }
+            )
 
         chain_outcome = str(((dispatch or {}).get("chain_reconciliation") or {}).get("outcome_class") or "") if isinstance(dispatch, dict) else ""
         if stop_on_reconciliation_mismatch and chain_outcome == "live_reconciliation_mismatch":

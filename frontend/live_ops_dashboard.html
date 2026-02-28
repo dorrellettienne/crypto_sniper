@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Crypto Sniper Live Ops Dashboard</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --bg2: #111827;
+      --card: #111827;
+      --ink: #e5e7eb;
+      --muted: #94a3b8;
+      --ok: #22c55e;
+      --warn: #f59e0b;
+      --bad: #ef4444;
+      --line: #1f2937;
+      --accent: #06b6d4;
+    }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "SF Pro Display", Tahoma, sans-serif;
+      background: radial-gradient(1200px 800px at 15% -10%, #0b3f6e 0%, var(--bg) 35%), linear-gradient(160deg, var(--bg), var(--bg2));
+      color: var(--ink);
+    }
+    .wrap { max-width: 1100px; margin: 0 auto; padding: 20px; }
+    .hero { display: flex; justify-content: space-between; gap: 12px; align-items: end; margin-bottom: 14px; }
+    .title { font-size: 28px; font-weight: 700; letter-spacing: 0.2px; }
+    .subtitle { color: var(--muted); font-size: 13px; }
+    .pill { display: inline-block; padding: 6px 10px; border-radius: 999px; font-size: 12px; border: 1px solid var(--line); background: #0b1220; }
+    .grid { display: grid; gap: 12px; grid-template-columns: repeat(12, 1fr); }
+    .card {
+      background: linear-gradient(180deg, #0f172a, #0b1220);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 14px;
+      box-shadow: 0 8px 28px rgba(0,0,0,.25);
+    }
+    .c4 { grid-column: span 4; }
+    .c6 { grid-column: span 6; }
+    .c12 { grid-column: span 12; }
+    .k { color: var(--muted); font-size: 12px; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+    .v { font-size: 24px; font-weight: 700; }
+    .mono { font-family: Consolas, "SF Mono", monospace; font-size: 12px; }
+    .ok { color: var(--ok); }
+    .warn { color: var(--warn); }
+    .bad { color: var(--bad); }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border-bottom: 1px solid #1e293b; padding: 7px 4px; text-align: left; font-size: 12px; vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; }
+    .small { color: var(--muted); font-size: 12px; }
+    @media (max-width: 900px) {
+      .c4, .c6 { grid-column: span 12; }
+      .title { font-size: 22px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="hero">
+      <div>
+        <div class="title">Crypto Sniper Live Ops</div>
+        <div class="subtitle">Autonomous status, buy/sell coverage, and latest execution events</div>
+      </div>
+      <div class="pill mono" id="updated">updating...</div>
+    </div>
+
+    <div class="grid">
+      <div class="card c4"><div class="k">Autonomous Status</div><div class="v" id="autost">-</div><div class="small mono" id="autoreason"></div></div>
+      <div class="card c4"><div class="k">Final Stage Ready</div><div class="v" id="ready">-</div><div class="small mono" id="failed"></div></div>
+      <div class="card c4"><div class="k">Latest Signature</div><div class="v mono" id="sig">-</div></div>
+
+      <div class="card c6">
+        <div class="k">Trade Coverage</div>
+        <table>
+          <tbody>
+            <tr><th>Buys Submitted</th><td id="buys">0</td></tr>
+            <tr><th>Sells Submitted</th><td id="sells">0</td></tr>
+            <tr><th>Auto Trades</th><td id="atrades">0</td></tr>
+            <tr><th>Auto Sells</th><td id="asells">0</td></tr>
+            <tr><th>Stop Reason</th><td class="mono" id="stopr">-</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="card c6">
+        <div class="k">Gate Health</div>
+        <table>
+          <tbody>
+            <tr><th>Go/No-Go</th><td id="g1">-</td></tr>
+            <tr><th>Security Preflight</th><td id="g2">-</td></tr>
+            <tr><th>Closeout Gate</th><td id="g3">-</td></tr>
+            <tr><th>Latest Log</th><td class="mono" id="logf">-</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="card c12">
+        <div class="k">Latest Events</div>
+        <table>
+          <thead><tr><th>Time</th><th>Type</th><th>Reason</th><th>Chain</th><th>Signature</th></tr></thead>
+          <tbody id="events"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    function cls(v) {
+      if (v === true || v === "success") return "ok";
+      if (v === false || v === "failed") return "bad";
+      return "warn";
+    }
+    function setBool(id, v) {
+      const el = document.getElementById(id);
+      el.textContent = String(v);
+      el.className = cls(v);
+    }
+    function trimSig(s) {
+      if (!s) return "-";
+      return s.length > 30 ? s.slice(0, 12) + "..." + s.slice(-12) : s;
+    }
+    async function tick() {
+      try {
+        const r = await fetch("/api/status?events=24", { cache: "no-store" });
+        const d = await r.json();
+        const st = (d.status || {});
+        const au = (st.autonomous || {});
+        const rd = (st.readiness || {});
+        const ro = (d.rollup || {});
+        const aw = (ro.auto_window || {});
+
+        const aut = document.getElementById("autost");
+        aut.textContent = au.status || "-";
+        aut.className = cls(au.status);
+        document.getElementById("autoreason").textContent = au.reason || "";
+        const ready = rd.ready_for_final_stage;
+        const rdEl = document.getElementById("ready");
+        rdEl.textContent = String(ready);
+        rdEl.className = cls(ready);
+        document.getElementById("failed").textContent = JSON.stringify(rd.failed_checks || []);
+        document.getElementById("sig").textContent = trimSig(au.latest_signature || "");
+
+        document.getElementById("buys").textContent = ro.submitted_signatures ?? 0;
+        document.getElementById("sells").textContent = ro.sell_submitted_signatures ?? 0;
+        document.getElementById("atrades").textContent = aw.trades_submitted ?? 0;
+        document.getElementById("asells").textContent = aw.sells_submitted ?? 0;
+        document.getElementById("stopr").textContent = aw.stop_reason || "-";
+
+        setBool("g1", st.go_no_go);
+        setBool("g2", st.security_preflight_ok);
+        setBool("g3", st.closeout_ok);
+        document.getElementById("logf").textContent = (d.artifacts || {}).latest_auto_window_log || "-";
+
+        const body = document.getElementById("events");
+        body.innerHTML = "";
+        (d.events || []).forEach(ev => {
+          const tr = document.createElement("tr");
+          tr.innerHTML =
+            `<td class="mono">${ev.timestamp_utc || "-"}</td>` +
+            `<td>${ev.event_type || "-"}</td>` +
+            `<td class="mono">${ev.reason || ev.submit_dispatch_reason || "-"}</td>` +
+            `<td class="mono">${ev.chain_outcome_class || "-"}</td>` +
+            `<td class="mono">${trimSig(ev.submitted_signature || "")}</td>`;
+          body.appendChild(tr);
+        });
+        document.getElementById("updated").textContent = "updated " + new Date().toLocaleTimeString();
+      } catch (e) {
+        document.getElementById("updated").textContent = "update failed";
+      }
+    }
+    tick();
+    setInterval(tick, 4000);
+  </script>
+</body>
+</html>
+

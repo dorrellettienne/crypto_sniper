@@ -751,6 +751,79 @@ def test_run_live_pilot_auto_window_candidates_stops_after_one_submitted_trade(t
     assert len(out["cycles"]) == 1
 
 
+def test_run_live_pilot_auto_window_candidates_can_auto_exit_with_sell_submit(tmp_path):
+    class RpcStub:
+        def __init__(self):
+            self.calls = 0
+        def health_check(self):
+            return {"ok": True}
+        def get_recent_blockhash(self):
+            return "BH"
+        def build_confirm_preview(self, client_order_id):
+            return {"mode": "confirm_skeleton", "client_order_id": client_order_id}
+        def send_raw_transaction(self, transaction_base64, **kwargs):
+            self.calls += 1
+            return f"SIG_{self.calls}"
+        def get_signature_status(self, signature, search_transaction_history=True):
+            return {"slot": 10, "confirmationStatus": "finalized", "err": None}
+        def get_transaction(self, signature, **kwargs):
+            return {
+                "slot": 10,
+                "transaction": {"signatures": [signature]},
+                "meta": {"fee": 5000, "err": None, "preBalances": [100], "postBalances": [50], "preTokenBalances": [], "postTokenBalances": []},
+            }
+
+    class DexStub:
+        def build_buy_order(self, token_address, symbol, entry_price, usd_size):
+            return {"action": "buy", "quote_preview": {"out_amount": "500000", "amount": int(usd_size * 1_000_000), "route_count": 1}}
+        def build_sell_order(self, position_id, exit_price):
+            return {"action": "sell", "quote_preview": {"amount": 500000, "route_count": 1}}
+        def build_stop_loss_order(self, position_id, stop_percent):
+            return {"action": "stop_loss", "quote_preview": {"amount": 500000, "route_count": 1}}
+        def build_submit_preview(self, order_preview, client_order_id):
+            return {"mode": "submit_skeleton", "client_order_id": client_order_id}
+        def build_submit_request_stub(self, order_preview, client_order_id):
+            return {"mode": "submit_request_stub", "client_order_id": client_order_id}
+        def build_signed_submit_stub(self, order_preview, client_order_id):
+            return {"mode": "signed_submit_stub", "client_order_id": client_order_id, "transaction_base64": "SIGNED_TX", "ready": True}
+
+    out = run_live_pilot_auto_window_candidates(
+        candidates=[{"token_address": "TOKEN_A", "symbol": "TKA", "entry_price": 0.01, "usd_size": 1}],
+        window_seconds=60,
+        max_auto_trades=1,
+        stop_on_reconciliation_mismatch=False,
+        audit_log_dir=str(tmp_path),
+        adapter_config={
+            "rpc_url": "https://rpc.example",
+            "wallet_public_key": "wallet_pub",
+            "dex_name": "JUPITER",
+            "allowlist_tokens": ["TOKEN_A"],
+            "max_order_usd_cap": 10,
+            "pilot_hard_max_order_usd_cap": 10,
+            "live_submit_skeleton_enabled": True,
+            "manual_submit_approval_enabled": True,
+            "manual_submit_required_token": "APPROVE",
+            "manual_submit_provided_token": "APPROVE",
+            "manual_submit_mode": "buy_and_sell",
+            "live_send_enabled": True,
+            "live_send_network_enabled": True,
+            "live_auto_exit_enabled": True,
+            "live_auto_exit_price_multiplier": 1.01,
+        },
+        rpc_client=RpcStub(),
+        dex_executor=DexStub(),
+        now_fn=lambda: 0.0,
+        sleep_fn=lambda s: None,
+    )
+    assert out["rollup"]["auto_window"]["trades_submitted"] == 1
+    assert out["rollup"]["auto_window"]["sells_submitted"] == 1
+    assert out["rollup"]["sell_submitted_signatures"] == 1
+    assert out["rollup"]["sell_submit_dispatch_by_reason"]["send_raw_transaction_submitted"] == 1
+    assert len(out["cycles"]) == 2
+    assert out["cycles"][0]["phase"] == "buy"
+    assert out["cycles"][1]["phase"] == "auto_exit_sell"
+
+
 def test_run_live_pilot_auto_window_candidates_all_blocked_tracks_reasons(tmp_path):
     adapter_cfg = {
         "rpc_url": "https://rpc.example",
@@ -1188,6 +1261,21 @@ def test_validate_live_auto_window_guardrails_passes_for_s4_m22_4_tiny_live_wind
         "manual_submit_mode": "buy_only",
     }
     _validate_live_auto_window_guardrails(adapter_config=cfg, max_auto_trades=1, explicit_live_auto_submit_enable=True)
+
+
+def test_validate_live_auto_window_guardrails_auto_exit_requires_buy_and_sell_mode():
+    cfg = {
+        "live_send_network_enabled": True,
+        "live_send_max_orders_per_session": 1,
+        "live_send_max_notional_usd_total": 1.0,
+        "manual_submit_mode": "buy_only",
+        "live_auto_exit_enabled": True,
+    }
+    try:
+        _validate_live_auto_window_guardrails(adapter_config=cfg, max_auto_trades=1, explicit_live_auto_submit_enable=True)
+        assert False, "Expected ValueError"
+    except ValueError as exc:
+        assert "manual_submit_mode=buy_and_sell" in str(exc)
 
 
 def test_apply_live_pilot_mode_preset_sets_no_send_dexscreener_defaults():

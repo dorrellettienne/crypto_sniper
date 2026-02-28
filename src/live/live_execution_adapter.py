@@ -152,6 +152,8 @@ class LiveExecutionAdapter(ExecutionAdapter):
         self._live_send_session_notional_usd_submitted = 0.0
         self._live_send_pause_latched = False
         self._live_send_pause_reason = ""
+        self._next_virtual_position_id = 1
+        self._open_virtual_positions: dict[int, dict] = {}
         self._live_send_runtime_counters = {
             "submit_dispatch_calls": 0,
             "submit_dispatch_attempted": 0,
@@ -167,6 +169,65 @@ class LiveExecutionAdapter(ExecutionAdapter):
             "submit_dispatch_reconciliation_inconclusive_latches": 0,
             "submit_dispatch_pause_reset_events": 0,
         }
+
+    def _parse_int_or_none(self, value) -> int | None:
+        if value in (None, ""):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _extract_token_amount_raw_from_buy_workflow(self, workflow: dict) -> int | None:
+        wf = dict(workflow or {})
+        estimated = wf.get("estimated_costs")
+        if isinstance(estimated, dict):
+            parsed = self._parse_int_or_none(estimated.get("out_amount"))
+            if parsed is not None and parsed > 0:
+                return parsed
+        order_preview = wf.get("order_preview")
+        if isinstance(order_preview, dict):
+            quote_preview = order_preview.get("quote_preview")
+            if isinstance(quote_preview, dict):
+                parsed = self._parse_int_or_none(quote_preview.get("out_amount"))
+                if parsed is not None and parsed > 0:
+                    return parsed
+                raw_quote = quote_preview.get("raw_quote")
+                if isinstance(raw_quote, dict):
+                    parsed = self._parse_int_or_none(raw_quote.get("outAmount"))
+                    if parsed is not None and parsed > 0:
+                        return parsed
+        return None
+
+    def _register_virtual_position(self, *, token_address: str, symbol: str, entry_price: float, usd_size: float, workflow: dict) -> int:
+        position_id = int(self._next_virtual_position_id)
+        self._next_virtual_position_id += 1
+        token_amount_raw = self._extract_token_amount_raw_from_buy_workflow(workflow)
+        self._open_virtual_positions[position_id] = {
+            "position_id": position_id,
+            "token_address": str(token_address),
+            "symbol": str(symbol),
+            "entry_price": float(entry_price),
+            "usd_size": float(usd_size),
+            "token_amount_raw": token_amount_raw,
+        }
+        return position_id
+
+    def _get_virtual_position(self, position_id: int) -> dict | None:
+        return dict(self._open_virtual_positions.get(int(position_id)) or {})
+
+    def _is_live_send_action_enabled(self, action: str) -> bool:
+        mode = str(self.config.get("manual_submit_mode") or "disabled").strip().lower()
+        action_norm = str(action or "").strip().lower()
+        if mode == "disabled":
+            return False
+        if mode == "buy_only":
+            return action_norm == "buy"
+        if mode in {"sell_only", "exit_only"}:
+            return action_norm in {"sell", "stop_loss"}
+        if mode in {"buy_sell", "buy_and_sell", "all"}:
+            return action_norm in {"buy", "sell", "stop_loss"}
+        return False
 
     def _build_default_clients(self, rpc_client=None, dex_executor=None, rpc_transport=None, dex_quote_transport=None, dex_swap_transport=None):
         if self.config.get("use_real_quote_clients"):
@@ -479,7 +540,8 @@ class LiveExecutionAdapter(ExecutionAdapter):
             requested_notional_usd = float((manual_request or {}).get("estimated_notional_usd"))
         except (TypeError, ValueError):
             requested_notional_usd = None
-        if str(action) != "buy":
+        if not self._is_live_send_action_enabled(str(action)):
+            self._live_send_runtime_counters["submit_dispatch_blocked_action_not_enabled"] += 1
             return {
                 "mode": "submit_dispatch_stub_v1",
                 "action": str(action),
@@ -488,6 +550,7 @@ class LiveExecutionAdapter(ExecutionAdapter):
                 "live_send_network_enabled": live_send_network_enabled,
                 "ready": False,
                 "reason": "live_send_action_not_enabled",
+                "manual_submit_mode": str(self.config.get("manual_submit_mode") or "disabled"),
                 "runtime_counters": self._live_send_runtime_snapshot(),
             }
         if hasattr(self.dex_executor, "build_submit_request_stub"):
@@ -875,17 +938,52 @@ class LiveExecutionAdapter(ExecutionAdapter):
         workflow = self._attach_quote_cost_estimate("buy", workflow, fallback_notional_usd=usd_size)
         workflow = self._attach_submit_confirm_skeleton("buy", workflow)
         workflow = self._attach_manual_submit_scaffold("buy", workflow)
+        position_id = self._register_virtual_position(
+            token_address=token_address,
+            symbol=symbol,
+            entry_price=entry_price,
+            usd_size=usd_size,
+            workflow=workflow,
+        )
         return self._disabled_result(
             "buy",
             "live adapter skeleton only (buy not implemented)" if not self._submit_skeleton_enabled() else "live adapter submit skeleton only (buy not implemented)",
-            metadata={**metadata, "startup_guardrails": dict(self.startup_guardrails), **workflow},
+            metadata={**metadata, "virtual_position_id": position_id, "startup_guardrails": dict(self.startup_guardrails), **workflow},
+            position_id=position_id,
         )
 
     def sell(self, position_id: int, exit_price: float) -> ExecutionResult:
         metadata = {"exit_price": exit_price}
         if not self.live_enabled:
             return self._disabled_result("sell", "live execution disabled", metadata=metadata, position_id=position_id)
-        order_preview = self.dex_executor.build_sell_order(position_id, exit_price)
+        virtual_position = self._get_virtual_position(position_id)
+        if not virtual_position:
+            return self._disabled_result(
+                "sell",
+                "unknown virtual position_id for sell",
+                metadata={**metadata, "position_lookup": "missing"},
+                position_id=position_id,
+            )
+        metadata = {
+            **metadata,
+            "token_address": virtual_position.get("token_address"),
+            "symbol": virtual_position.get("symbol"),
+            "entry_price": virtual_position.get("entry_price"),
+            "usd_size": virtual_position.get("usd_size"),
+            "token_amount_raw": virtual_position.get("token_amount_raw"),
+        }
+        if hasattr(self.dex_executor, "build_sell_order_for_position"):
+            order_preview = self.dex_executor.build_sell_order_for_position(
+                position_id=int(position_id),
+                token_address=str(virtual_position.get("token_address") or ""),
+                symbol=str(virtual_position.get("symbol") or ""),
+                token_amount_raw=self._parse_int_or_none(virtual_position.get("token_amount_raw")),
+                entry_price=float(virtual_position.get("entry_price") or 0.0),
+                exit_price=float(exit_price),
+                usd_size=float(virtual_position.get("usd_size") or 0.0),
+            )
+        else:
+            order_preview = self.dex_executor.build_sell_order(position_id, exit_price)
         ids = build_workflow_identifiers(action="sell", position_id=position_id, exit_price=exit_price)
         workflow = build_execution_preview_workflow(
             action="sell",
@@ -894,9 +992,12 @@ class LiveExecutionAdapter(ExecutionAdapter):
             client_order_id=ids["client_order_id"],
             request_fingerprint=ids["request_fingerprint"],
         )
-        workflow = self._attach_quote_cost_estimate("sell", workflow, fallback_notional_usd=None)
+        workflow = self._attach_quote_cost_estimate("sell", workflow, fallback_notional_usd=float(virtual_position.get("usd_size") or 0.0))
         workflow = self._attach_submit_confirm_skeleton("sell", workflow)
         workflow = self._attach_manual_submit_scaffold("sell", workflow)
+        dispatch_reason = str(((workflow.get("submit_dispatch") or {}).get("reason")) or "")
+        if dispatch_reason in {"send_raw_transaction_submitted", "would_send_network_gated"}:
+            self._open_virtual_positions.pop(int(position_id), None)
         return self._disabled_result(
             "sell",
             "live adapter skeleton only (sell not implemented)" if not self._submit_skeleton_enabled() else "live adapter submit skeleton only (sell not implemented)",
@@ -908,6 +1009,14 @@ class LiveExecutionAdapter(ExecutionAdapter):
         metadata = {"stop_percent": stop_percent}
         if not self.live_enabled:
             return self._disabled_result("stop_loss", "live execution disabled", metadata=metadata, position_id=position_id)
+        virtual_position = self._get_virtual_position(position_id)
+        if not virtual_position:
+            return self._disabled_result(
+                "stop_loss",
+                "unknown virtual position_id for stop_loss",
+                metadata={**metadata, "position_lookup": "missing"},
+                position_id=position_id,
+            )
         order_preview = self.dex_executor.build_stop_loss_order(position_id, stop_percent)
         ids = build_workflow_identifiers(action="stop_loss", position_id=position_id, stop_percent=stop_percent)
         workflow = build_execution_preview_workflow(
@@ -917,9 +1026,12 @@ class LiveExecutionAdapter(ExecutionAdapter):
             client_order_id=ids["client_order_id"],
             request_fingerprint=ids["request_fingerprint"],
         )
-        workflow = self._attach_quote_cost_estimate("stop_loss", workflow, fallback_notional_usd=None)
+        workflow = self._attach_quote_cost_estimate("stop_loss", workflow, fallback_notional_usd=float(virtual_position.get("usd_size") or 0.0))
         workflow = self._attach_submit_confirm_skeleton("stop_loss", workflow)
         workflow = self._attach_manual_submit_scaffold("stop_loss", workflow)
+        dispatch_reason = str(((workflow.get("submit_dispatch") or {}).get("reason")) or "")
+        if dispatch_reason in {"send_raw_transaction_submitted", "would_send_network_gated"}:
+            self._open_virtual_positions.pop(int(position_id), None)
         return self._disabled_result(
             "stop_loss",
             "live adapter skeleton only (stop loss not implemented)" if not self._submit_skeleton_enabled() else "live adapter submit skeleton only (stop loss not implemented)",

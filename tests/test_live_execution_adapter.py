@@ -146,7 +146,7 @@ def test_live_execution_adapter_accepts_injected_clients_for_wiring():
     assert sell.metadata["order_preview"]["action"] == "sell"
     assert sell.metadata["lifecycle_events"][0]["action"] == "sell"
     assert sell.metadata["client_order_id"].startswith("coid_")
-    assert sell.metadata["estimated_costs"]["ok"] is False
+    assert "estimated_costs" in sell.metadata
     assert stop.metadata["order_preview"]["action"] == "stop_loss"
     assert stop.metadata["lifecycle_events"][0]["action"] == "stop_loss"
 
@@ -1305,4 +1305,56 @@ def test_live_execution_adapter_real_submit_pause_latch_can_reset_with_token():
     assert dispatch["pause_reset"]["reset_applied"] is True
     assert dispatch["reason"] == "send_raw_transaction_submitted"
     assert dispatch["runtime_counters"]["submit_dispatch_pause_reset_events"] == 1
+
+
+def test_live_execution_adapter_allows_sell_submit_when_mode_is_buy_and_sell():
+    class RpcStub:
+        def __init__(self):
+            self.calls = 0
+        def health_check(self):
+            return {"ok": True, "client": "rpc_stub"}
+        def get_recent_blockhash(self):
+            return "STUB_HASH"
+        def build_confirm_preview(self, client_order_id):
+            return {"mode": "confirm_skeleton", "client_order_id": client_order_id}
+        def send_raw_transaction(self, transaction_base64, **kwargs):
+            self.calls += 1
+            return f"SIG_{self.calls}"
+
+    class DexStub:
+        def build_buy_order(self, token_address, symbol, entry_price, usd_size):
+            return {"action": "buy", "quote_preview": {"out_amount": "12345", "amount": int(usd_size * 1_000_000), "route_count": 1}}
+        def build_sell_order(self, position_id, exit_price):
+            return {"action": "sell", "quote_preview": {"amount": 12345, "route_count": 1}}
+        def build_stop_loss_order(self, position_id, stop_percent):
+            return {"action": "stop_loss", "quote_preview": {"amount": 12345, "route_count": 1}}
+        def build_submit_preview(self, order_preview, client_order_id):
+            return {"mode": "submit_skeleton", "client_order_id": client_order_id}
+        def build_submit_request_stub(self, order_preview, client_order_id):
+            return {"mode": "submit_request_stub", "client_order_id": client_order_id}
+        def build_signed_submit_stub(self, order_preview, client_order_id):
+            return {"mode": "signed_submit_stub", "client_order_id": client_order_id, "transaction_base64": "BASE64_TX"}
+
+    cfg = {
+        "live_enabled": True,
+        "rpc_url": "https://rpc.example",
+        "wallet_public_key": "wallet_pub",
+        "dex_name": "JUPITER",
+        "allowlist_tokens": ["TOKEN_A"],
+        "max_order_usd_cap": 100,
+        "live_submit_skeleton_enabled": True,
+        "manual_submit_approval_enabled": True,
+        "manual_submit_required_token": "APPROVE_ME",
+        "manual_submit_provided_token": "APPROVE_ME",
+        "manual_submit_mode": "buy_and_sell",
+        "live_send_enabled": True,
+        "live_send_network_enabled": True,
+    }
+    adapter = LiveExecutionAdapter(cfg, rpc_client=RpcStub(), dex_executor=DexStub())
+
+    buy = adapter.buy("TOKEN_A", "SYM", 0.01, 10)
+    sell = adapter.sell(int(buy.position_id), 0.02)
+
+    assert buy.metadata["submit_dispatch"]["reason"] == "send_raw_transaction_submitted"
+    assert sell.metadata["submit_dispatch"]["reason"] == "send_raw_transaction_submitted"
 
