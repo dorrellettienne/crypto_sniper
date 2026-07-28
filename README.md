@@ -1,42 +1,47 @@
 # Crypto Sniper
 
-Crypto Sniper is an experimental research and operations platform for evaluating short-horizon token trading workflows. It combines:
+Crypto Sniper is a Python-based research and operations project for testing short-horizon Solana token trading workflows. It combines repeatable paper simulations, candidate discovery, safety filtering, guarded execution adapters, dashboards, and audit reporting.
 
-- deterministic paper-trading simulation
-- candidate discovery and scoring workflows
-- reporting and dashboard tooling
-- guarded live-execution scaffolding that expects secrets to be provided through environment variables, never committed to the repository
+> **Current status:** Paper simulation is the safest place to start. The live workflows are experimental, require operator supervision, and are designed for tightly limited test runs. This is not a plug-and-play trading bot and does not promise profitable results.
 
-The project emphasizes repeatable experiments, observable workflows, and safety controls. It is not a plug-and-play trading bot and does not promise profitable results.
+## What It Does
 
-## Quick Navigation
+- Runs deterministic paper-trading simulations with configurable seeds and strategy presets.
+- Discovers and scores token candidates using market signals.
+- Checks liquidity, route availability, token properties, and operational safety rules.
+- Supports paper, dry-run, and guarded live execution adapters.
+- Applies controls such as allowlists, order caps, position limits, audit requirements, and a kill switch.
+- Stores trading data in SQLite and exports JSON, CSV, and JSONL artifacts.
+- Provides browser dashboards for strategy results, validation bundles, and live-operations review.
+- Can send optional failure and trade-event alerts to Discord through the PowerShell operations runner.
 
-- [At a Glance](#at-a-glance)
-- [Screenshots](#screenshots)
-- [Core Capabilities](#core-capabilities)
-- [Tech Stack](#tech-stack)
-- [Quick Start](#quick-start)
-- [Architecture Overview](#architecture-overview)
-- [Dashboards](#dashboards)
-- [Regression Suite](#regression-suite)
-- [Repository Guide](#repository-guide)
-- [Scope and Safety](#scope-and-safety)
+## Architecture
 
-## At a Glance
+![Crypto Sniper architecture](docs/crypto-sniper-architecture.svg)
 
-- Runs deterministic paper-trading simulations and parameterized experiments
-- Discovers, filters, and scores token candidates
-- Provides guarded execution workflows with fail-closed controls and preflight validation
-- Produces structured artifacts for dashboards, run analysis, and operational audits
-- Includes regression coverage for simulations, transports, configuration, and live-workflow helpers
+## How It Works
 
-| Area | What's included |
+1. An operator chooses a preset, seed, or signal source and starts a workflow.
+2. The analysis layer runs a paper simulation or discovers and scores token candidates.
+3. Liquidity, route, token-safety, and risk checks decide whether a candidate can continue.
+4. An execution adapter handles the action in paper, dry-run, or guarded live mode.
+5. Results are written to SQLite, JSON, CSV, and JSONL audit files.
+6. The browser dashboards load those artifacts for review.
+7. The PowerShell operations runner can send selected failures, executions, and settlement events to a Discord-compatible webhook.
+
+In simple terms: the project collects or generates trading signals, checks whether they are safe enough to use, runs them through a controlled execution mode, and records the outcome for review.
+
+## Technology Used
+
+| Part | Tools |
 | --- | --- |
-| Simulation | Deterministic paper-trading runners and parameterized experiments |
-| Discovery | Candidate filtering and scoring workflows |
-| Ops | Runbooks, preflight checks, release gates, and bounded execution helpers |
-| Reporting | HTML dashboards for summaries, bundles, and validation artifacts |
-| Quality | Regression coverage across simulation, config validation, transports, and live-workflow helpers |
+| Core application | Python |
+| Market integrations | DexScreener, Jupiter, Solana JSON-RPC |
+| Storage and reports | SQLite, JSON, CSV, JSONL |
+| Dashboards | HTML, CSS, JavaScript |
+| Local automation | PowerShell, Windows batch scripts |
+| Notifications | Discord-compatible webhooks |
+| Testing | Pytest |
 
 ## Screenshots
 
@@ -44,140 +49,74 @@ The project emphasizes repeatable experiments, observable workflows, and safety 
 
 ![Strategy review dashboard](docs/images/strategy-review-sample.png)
 
-### Live Ops Dashboard
+### Live Operations Dashboard
 
-![Live ops dashboard](docs/images/live-ops-dashboard-crop.png)
+![Live operations dashboard](docs/images/live-ops-dashboard-crop.png)
 
 ### Validation Bundle Viewer
 
 ![Validation bundle viewer](docs/images/validation-bundles-sample.png)
 
-## Core Capabilities
+## Project Structure
 
-- Deterministic paper trading with configurable strategies and seeded market behavior
-- Rule-based token discovery, candidate scoring, and safety filtering
-- Paper, dry-run, and guarded live execution adapters
-- Risk controls, preflight checks, bounded execution, and audit logging
-- JSON and CSV exports for run summaries and closed trades
-- Browser-based dashboards for strategy, validation, and operational data
-- Discord-compatible webhook alerts for operational events
-- Automated regression tests and reusable workflow presets
-
-## Tech Stack
-
-- Python
-- Pytest
-- HTML, CSS, and vanilla JavaScript dashboards
-- JSON-based configuration and export artifacts
-- PowerShell and batch scripting for local operational workflows
-
-## Scope and Safety
-
-- No private keys, `.env` files, or webhook secrets are committed in this repository.
-- Live-operation helpers are present, but they are intentionally structured to read signer material from external environment variables or local key files outside version control.
-- Live workflows should only be used after validating configuration, signal quality, fees, slippage, and risk limits in a controlled environment.
-
-## Quick Start
-
-### 1. Clone and enter the repository
-
-```powershell
-git clone https://github.com/dorrellettienne/crypto_sniper.git
-cd crypto_sniper
+```text
+.
+|-- config/                # Strategy presets and safety profiles
+|-- frontend/              # Browser dashboards
+|-- src/discovery/         # Candidate and route discovery
+|-- src/execution/         # Paper-trading engine and persistence
+|-- src/filters/           # Liquidity and route filters
+|-- src/live/              # Guarded execution, risk, audit, and reconciliation
+|-- src/runner/            # Simulations and experiment runners
+|-- tests/                 # Regression tests
+|-- data/exports/          # Generated run artifacts
+`-- run_regression_tests.py
 ```
 
-### 2. Install dependencies
+## Run a Paper Simulation
+
+Create a virtual environment and install the dependencies:
 
 ```powershell
 python -m venv .venv
 .venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
-### 3. Run a paper simulation
+Run a deterministic simulation:
 
 ```powershell
-python src/runner/paper_sim_runner.py --steps 50 --seed 1
+python -m src.runner.paper_sim_runner --steps 50 --seed 1
 ```
 
-### 4. Run with rule parameters and export JSON/CSV
+Export a summary for the dashboards:
 
 ```powershell
-python src/runner/paper_sim_runner.py `
+python -m src.runner.paper_sim_runner `
   --steps 100 `
   --seed 7 `
-  --usd-size 100 `
-  --stop-loss-percent 0.15 `
-  --sell-price 0.03 `
-  --p-buy 0.35 `
-  --p-stop-loss 0.20 `
-  --p-sell 0.25 `
-  --p-stop-check 0.10 `
-  --p-time-exit 0.10 `
   --export-json-dir data\exports `
   --export-csv-dir data\exports `
   --export-trades-csv-dir data\exports
 ```
 
-Outputs can include:
-- Summary JSON (for dashboard)
-- Summary CSV
-- Closed-trades CSV (one row per closed trade)
+## Open the Dashboards
 
-## Architecture Overview
-
-- `src/runner/`: paper simulation runners and experiment helpers
-- `src/live/`: guarded live-workflow scaffolding, audit logging, and execution adapters
-- `frontend/`: HTML dashboards for reviewing exports and operational artifacts
-- `examples/`: reusable scripts and workflow presets
-- `tests/`: regression coverage for simulation, filters, profiles, and live-workflow helpers
-- `config/`: tuned presets and safety profiles
-
-## Dashboards
-
-### Open the main dashboard
-
-Open `frontend/index.html` in a browser, or run:
+Start a local web server:
 
 ```powershell
 python -m http.server 8000
 ```
 
-Then browse to:
+Then open:
 
-`http://localhost:8000/frontend/index.html`
+```text
+http://localhost:8000/frontend/index.html
+```
 
-### Windows shortcuts
+The dashboards load local export files selected by the user. They do not require a separate frontend build.
 
-- `open_dashboard.bat` -> starts local server and opens the dashboard
-- `run_sim_and_open_dashboard.bat` -> runs a simulation export and opens the dashboard
-
-## Dashboard Workflows
-
-### Single run view
-
-1. Export a JSON summary (`--export-json-dir` or `--export-json-path`)
-2. Open the dashboard
-3. Click `Load JSON`
-4. Select the exported `.json` file from `data\exports`
-
-### Compare runs view
-
-1. Generate multiple JSON exports with different seeds/settings
-2. Open the dashboard
-3. Use `Compare Runs` / multi-file load
-4. Select multiple summary `.json` files
-5. Compare PnL, trades, win rate, and action counts side-by-side
-
-## Experiments (Seed Sweeps)
-
-Programmatic helper module:
-
-- `src/runner/paper_sim_experiments.py`
-
-Use it to run batches of seeded simulations and summarize results for rule tuning.
-
-## Regression Suite
+## Run the Tests
 
 Run the curated regression suite:
 
@@ -185,21 +124,23 @@ Run the curated regression suite:
 python run_regression_tests.py
 ```
 
-Current expected checkpoint (latest verified):
-- `128 passed`
-- `Exit Code: 0`
+Avoid running database-writing tests in parallel on Windows because `data/sniper.db` can lock.
 
-## Repository Guide
+## Discord Alerts
 
-1. Start with the paper simulation flow in `src/runner/`.
-2. Open the dashboards in `frontend/` to explore generated artifacts.
-3. Use `examples/` for workflow presets and operational entry points.
-4. See `tests/` and `run_regression_tests.py` for expected behavior.
-5. Read `LIVE_READINESS_NOTES.md` before working with guarded live workflows.
+The autonomous PowerShell runner can read a webhook URL from:
+
+```text
+CRYPTO_SNIPER_ALERT_WEBHOOK_URL
+```
+
+When the URL is a Discord webhook, the runner formats messages for failures, executed trades, and settled trades. The webhook is optional and should be stored only in the local environment, never committed to Git.
 
 ## Notes
 
-- Deterministic paper simulation is the simplest local starting point.
-- Results are deterministic for the same seed and starting DB state.
-- Avoid running DB-writing tests in parallel on Windows (`data/sniper.db` can lock).
-- Before live integration work, read `LIVE_READINESS_NOTES.md` (fees/slippage realism, signal quality, safety gates, and rollout cautions).
+- Paper results do not fully represent fees, slippage, latency, partial fills, or live market conditions.
+- Live helpers are intended for supervised, tightly limited experiments rather than unattended production trading.
+- Private keys, `.env` files, and webhook URLs must remain outside version control.
+- External services such as DexScreener, Jupiter, and Solana RPC providers can fail or rate-limit requests.
+- Read `LIVE_READINESS_NOTES.md` and `KNOWN_LIMITATIONS.md` before working with guarded live workflows.
+- This project is for technical research and testing, not financial advice.

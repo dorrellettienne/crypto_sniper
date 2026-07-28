@@ -1,0 +1,181 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 960" role="img" aria-labelledby="title description">
+  <title id="title">Crypto Sniper architecture</title>
+  <desc id="description">A light-mode architecture diagram showing the Crypto Sniper inputs, analysis, safety controls, execution adapters, data and audit storage, operations runner, dashboards, Discord alerts, and market API integrations.</desc>
+
+  <defs>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="6" stdDeviation="8" flood-color="#31524d" flood-opacity="0.10"/>
+    </filter>
+    <marker id="arrow" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto">
+      <path d="M0,0 L11,5.5 L0,11 Z" fill="#315f58"/>
+    </marker>
+    <marker id="arrow-orange" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto">
+      <path d="M0,0 L11,5.5 L0,11 Z" fill="#cf6b43"/>
+    </marker>
+    <style>
+      .page-title { font: 700 40px "Trebuchet MS", sans-serif; fill: #173f3b; }
+      .page-subtitle { font: 500 19px "Trebuchet MS", sans-serif; fill: #5f7470; }
+      .app-title { font: 700 28px "Trebuchet MS", sans-serif; fill: #173f3b; }
+      .section-label { font: 700 16px "Trebuchet MS", sans-serif; letter-spacing: 2px; fill: #627773; }
+      .node-title { font: 700 22px "Trebuchet MS", sans-serif; fill: #173f3b; }
+      .node-copy { font: 500 16px "Trebuchet MS", sans-serif; fill: #5f7470; }
+      .icon-text { font: 700 16px "Trebuchet MS", sans-serif; fill: #fff; text-anchor: middle; dominant-baseline: middle; }
+      .edge-label { font: 600 15px "Trebuchet MS", sans-serif; fill: #47645f; text-anchor: middle; }
+      .edge-pill { fill: #ffffff; stroke: #dce5e2; stroke-width: 1; }
+      .flow { fill: none; stroke: #315f58; stroke-width: 3; marker-end: url(#arrow); }
+      .optional { fill: none; stroke: #cf6b43; stroke-width: 3; stroke-dasharray: 9 8; marker-end: url(#arrow-orange); }
+    </style>
+  </defs>
+
+  <rect width="1200" height="960" rx="28" fill="#fbfcfa"/>
+  <circle cx="1110" cy="65" r="165" fill="#f1c36a" opacity="0.16"/>
+  <circle cx="60" cy="900" r="190" fill="#e69a79" opacity="0.12"/>
+
+  <text x="50" y="60" class="page-title">Crypto Sniper Architecture</text>
+  <text x="50" y="92" class="page-subtitle">Paper research, guarded execution, reporting, and operational alerts</text>
+
+  <!-- Application boundary -->
+  <rect x="200" y="130" width="950" height="600" rx="26" fill="#ffffff" stroke="#91aaa5" stroke-width="3" filter="url(#shadow)"/>
+  <rect x="231" y="156" width="8" height="34" rx="4" fill="#f19a38"/>
+  <text x="257" y="183" class="app-title">Crypto Sniper Application</text>
+  <text x="955" y="179" class="node-copy">Python + local workflows</text>
+
+  <text x="245" y="235" class="section-label">ANALYSIS AND DECISION FLOW</text>
+  <line x1="245" y1="251" x2="1110" y2="251" stroke="#dce5e2" stroke-width="2"/>
+
+  <text x="245" y="465" class="section-label">EXECUTION AND OPERATIONS</text>
+  <line x1="245" y1="481" x2="1110" y2="481" stroke="#dce5e2" stroke-width="2"/>
+
+  <!-- Operator -->
+  <g filter="url(#shadow)">
+    <rect x="30" y="276" width="170" height="112" rx="20" fill="#ffffff" stroke="#d5e0dd" stroke-width="2"/>
+    <circle cx="72" cy="320" r="24" fill="#315f58"/>
+    <circle cx="72" cy="312" r="8" fill="none" stroke="#fff" stroke-width="3"/>
+    <path d="M55 337c6-12 28-12 34 0" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"/>
+    <text x="111" y="318" class="node-title">Operator</text>
+    <text x="111" y="344" class="node-copy">CLI and scripts</text>
+  </g>
+
+  <!-- Inputs -->
+  <g filter="url(#shadow)">
+    <rect x="245" y="270" width="230" height="136" rx="21" fill="#eef9ed" stroke="#c6e3c3" stroke-width="2"/>
+    <rect x="267" y="302" width="58" height="58" rx="15" fill="#4aa646"/>
+    <text x="296" y="332" class="icon-text">IN</text>
+    <text x="345" y="318" class="node-title">Inputs</text>
+    <text x="345" y="347" class="node-copy">Strategy presets</text>
+    <text x="267" y="384" class="node-copy">Seeds and signals</text>
+  </g>
+
+  <!-- Analysis -->
+  <g filter="url(#shadow)">
+    <rect x="555" y="270" width="230" height="136" rx="21" fill="#f5efff" stroke="#d9c8f3" stroke-width="2"/>
+    <rect x="577" y="302" width="58" height="58" rx="15" fill="#8c4fff"/>
+    <text x="606" y="332" class="icon-text">SIM</text>
+    <text x="655" y="318" class="node-title">Analysis</text>
+    <text x="655" y="347" class="node-copy">Paper simulation</text>
+    <text x="577" y="384" class="node-copy">Discovery and scoring</text>
+  </g>
+
+  <!-- Safety -->
+  <g filter="url(#shadow)">
+    <rect x="865" y="270" width="230" height="136" rx="21" fill="#fff3ee" stroke="#f0c9b9" stroke-width="2"/>
+    <rect x="887" y="302" width="58" height="58" rx="15" fill="#d96d4b"/>
+    <text x="916" y="332" class="icon-text">SAFE</text>
+    <text x="965" y="318" class="node-title">Safety Gates</text>
+    <text x="965" y="347" class="node-copy">Token checks</text>
+    <text x="887" y="384" class="node-copy">Routes, caps and kill switch</text>
+  </g>
+
+  <!-- Operations runner -->
+  <g filter="url(#shadow)">
+    <rect x="245" y="500" width="230" height="136" rx="21" fill="#f3f5f5" stroke="#cfdad7" stroke-width="2"/>
+    <rect x="267" y="532" width="58" height="58" rx="15" fill="#315f58"/>
+    <text x="296" y="562" class="icon-text">OPS</text>
+    <text x="345" y="548" class="node-title">Ops Runner</text>
+    <text x="345" y="577" class="node-copy">PowerShell runner</text>
+    <text x="267" y="614" class="node-copy">Failure and trade alerts</text>
+  </g>
+
+  <!-- Data -->
+  <g filter="url(#shadow)">
+    <rect x="555" y="500" width="230" height="136" rx="21" fill="#eef2ff" stroke="#c9d3f4" stroke-width="2"/>
+    <rect x="577" y="532" width="58" height="58" rx="15" fill="#4265cf"/>
+    <text x="606" y="562" class="icon-text">DB</text>
+    <text x="655" y="548" class="node-title">Data &amp; Audit</text>
+    <text x="655" y="577" class="node-copy">SQLite and exports</text>
+    <text x="577" y="614" class="node-copy">JSON, CSV and JSONL</text>
+  </g>
+
+  <!-- Execution -->
+  <g filter="url(#shadow)">
+    <rect x="865" y="500" width="230" height="136" rx="21" fill="#fff7e7" stroke="#f2d89e" stroke-width="2"/>
+    <rect x="887" y="532" width="58" height="58" rx="15" fill="#ed8b00"/>
+    <text x="916" y="562" class="icon-text">EXE</text>
+    <text x="965" y="548" class="node-title">Execution</text>
+    <text x="965" y="577" class="node-copy">Paper and dry-run</text>
+    <text x="887" y="614" class="node-copy">Guarded live adapter</text>
+  </g>
+
+  <!-- Core flow -->
+  <path d="M200 332 H245" class="flow"/>
+
+  <path d="M475 338 H555" class="flow"/>
+  <rect x="486" y="298" width="58" height="26" rx="8" class="edge-pill"/>
+  <text x="515" y="317" class="edge-label">Signals</text>
+
+  <path d="M785 338 H865" class="flow"/>
+  <rect x="790" y="298" width="70" height="26" rx="8" class="edge-pill"/>
+  <text x="825" y="317" class="edge-label">Candidate</text>
+
+  <path d="M987 406 V500" class="flow"/>
+  <rect x="900" y="439" width="76" height="26" rx="8" class="edge-pill"/>
+  <text x="938" y="458" class="edge-label">Approved</text>
+
+  <path d="M865 568 H785" class="flow"/>
+  <rect x="798" y="528" width="54" height="26" rx="8" class="edge-pill"/>
+  <text x="825" y="547" class="edge-label">Result</text>
+
+  <path d="M555 568 H475" class="flow"/>
+  <rect x="488" y="528" width="54" height="26" rx="8" class="edge-pill"/>
+  <text x="515" y="547" class="edge-label">Event</text>
+
+  <!-- External outputs -->
+  <text x="30" y="782" class="section-label">REVIEW, NOTIFICATIONS AND NETWORKS</text>
+  <line x1="30" y1="798" x2="1150" y2="798" stroke="#dce5e2" stroke-width="2"/>
+
+  <path d="M367 636 V755 H310 V810" class="optional"/>
+  <rect x="315" y="680" width="50" height="26" rx="8" class="edge-pill"/>
+  <text x="340" y="699" class="edge-label">Alert</text>
+
+  <path d="M677 636 V755 H600 V810" class="flow"/>
+  <rect x="612" y="680" width="56" height="26" rx="8" class="edge-pill"/>
+  <text x="640" y="699" class="edge-label">Load</text>
+
+  <path d="M987 636 V755 H930 V810" class="flow"/>
+  <rect x="925" y="680" width="92" height="26" rx="8" class="edge-pill"/>
+  <text x="971" y="699" class="edge-label">Quote / RPC</text>
+
+  <g filter="url(#shadow)">
+    <rect x="180" y="810" width="260" height="105" rx="20" fill="#f6f0fc" stroke="#dbcbea" stroke-width="2"/>
+    <rect x="203" y="839" width="48" height="48" rx="13" fill="#5865f2"/>
+    <text x="227" y="864" class="icon-text">DC</text>
+    <text x="274" y="858" class="node-title">Discord</text>
+    <text x="274" y="885" class="node-copy">Optional webhook alerts</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="470" y="810" width="260" height="105" rx="20" fill="#eef9ed" stroke="#c6e3c3" stroke-width="2"/>
+    <rect x="493" y="839" width="48" height="48" rx="13" fill="#4aa646"/>
+    <text x="517" y="864" class="icon-text">UI</text>
+    <text x="564" y="858" class="node-title">Dashboards</text>
+    <text x="564" y="885" class="node-copy">Strategy and run review</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="760" y="810" width="340" height="105" rx="20" fill="#fff7e7" stroke="#f2d89e" stroke-width="2"/>
+    <rect x="783" y="839" width="48" height="48" rx="13" fill="#ed8b00"/>
+    <text x="807" y="864" class="icon-text">API</text>
+    <text x="854" y="858" class="node-title">Market APIs</text>
+    <text x="854" y="885" class="node-copy">DexScreener, Jupiter and Solana RPC</text>
+  </g>
+</svg>
