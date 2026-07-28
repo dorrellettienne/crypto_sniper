@@ -1,12 +1,27 @@
 # Crypto Sniper
 
-Research and operations platform for evaluating short-horizon token trading workflows with a strong emphasis on simulation, guarded execution scaffolding, analytics, and operational safety controls.
+Research and operations platform for evaluating short-horizon token trading workflows with an emphasis on simulation, analytics, guarded execution scaffolding, and operational safety controls.
 
-This repository is best understood as an engineering project, not a "plug-and-play trading bot." It combines:
+This repository is best read as a software engineering project, not a plug-and-play trading bot. It combines:
 - deterministic paper-trading simulation
 - candidate discovery and scoring workflows
 - reporting and dashboard tooling
 - guarded live-execution scaffolding that expects secrets to be provided through environment variables, never committed to the repository
+
+> Best portfolio framing: this project showcases systems design, workflow automation, testing discipline, observability, and safety-first engineering.
+
+## Quick Navigation
+
+- [At a Glance](#at-a-glance)
+- [Screenshots](#screenshots)
+- [Why It Works as a Portfolio Project](#why-it-works-as-a-portfolio-project)
+- [Tech Stack](#tech-stack)
+- [Quick Start](#quick-start)
+- [Architecture Overview](#architecture-overview)
+- [Dashboards](#dashboards)
+- [Regression Suite](#regression-suite)
+- [Recommended Review Path](#recommended-review-path)
+- [Scope and Safety](#scope-and-safety)
 
 ## At a Glance
 
@@ -14,6 +29,14 @@ This repository is best understood as an engineering project, not a "plug-and-pl
 - Added guarded execution workflows with fail-closed controls, preflight validation, and release-gate style checkpoints
 - Created artifact-driven review flows for summaries, bundles, and run analysis through browser-based dashboards
 - Backed the workflow with a substantial regression suite covering simulation behavior, live-workflow helpers, transports, and safety-profile validation
+
+| Area | What’s here |
+| --- | --- |
+| Simulation | Deterministic paper-trading runners and parameterized experiments |
+| Discovery | Candidate filtering and scoring workflows |
+| Ops | Runbooks, preflight checks, release gates, and bounded execution helpers |
+| Review | HTML dashboards for summaries, bundles, and validation artifacts |
+| Quality | Regression coverage across simulation, config validation, transports, and live-workflow helpers |
 
 ## Screenshots
 
@@ -29,20 +52,20 @@ This repository is best understood as an engineering project, not a "plug-and-pl
 
 ![Validation bundle viewer](docs/images/validation-bundles-sample.png)
 
-## Why This Is a Strong Portfolio Project
+## Why It Works as a Portfolio Project
 
-- It shows end-to-end product thinking rather than just isolated scripts.
+- It shows end-to-end product thinking rather than isolated scripts.
 - It demonstrates engineering judgment around risk, observability, and operational safeguards.
 - It gives reviewers several concrete surfaces to inspect: code structure, tests, dashboards, configs, and runbooks.
-- It is a better example of systems design and workflow automation than a typical toy trading bot repository.
+- It is a stronger systems-design example than a typical toy trading-bot repository.
 
 ## What This Project Demonstrates
 
 - Python application design across simulation, data, reporting, and ops layers
-- rule-based candidate scoring and experiment workflows
-- dashboard-style artifact review for run summaries and trading evidence
-- regression testing and release-checkpoint discipline
-- safety-oriented automation patterns such as fail-closed checks, preflight gates, and bounded execution paths
+- Rule-based candidate scoring and experiment workflows
+- Dashboard-style artifact review for run summaries and trading evidence
+- Regression testing and release-checkpoint discipline
+- Safety-oriented automation patterns such as fail-closed checks, preflight gates, and bounded execution paths
 
 ## Tech Stack
 
@@ -56,7 +79,7 @@ This repository is best understood as an engineering project, not a "plug-and-pl
 
 - No private keys, `.env` files, or webhook secrets are committed in this repository.
 - Live-operation helpers are present, but they are intentionally structured to read signer material from external environment variables or local key files outside version control.
-- The safest way to review this project is as a portfolio piece showing systems design, workflow orchestration, and operational guardrails.
+- The safest way to review this project is as a portfolio piece focused on systems design, workflow orchestration, and operational guardrails.
 
 ## Quick Start
 
@@ -114,9 +137,9 @@ Outputs can include:
 - `tests/`: regression coverage for simulation, filters, profiles, and live-workflow helpers
 - `config/`: tuned presets and safety profiles
 
-## Dashboard
+## Dashboards
 
-### Open dashboard (manual)
+### Open the main dashboard
 
 Open `frontend/index.html` in a browser, or run:
 
@@ -178,12 +201,6 @@ If you are reviewing this repository for engineering quality, the best order is:
 3. Open the dashboards in `frontend/`.
 4. Inspect `tests/` and `run_regression_tests.py`.
 5. Browse `src/live/` to see the guarded execution and safety-oriented workflow design.
-
-## Portfolio Notes
-
-- This project is strongest as a showcase of systems thinking, release discipline, analytics, and safety controls.
-- The repository includes live-trading scaffolding, but it should be presented as supervised/guarded infrastructure rather than autonomous production trading software.
-- If you share this with employers, point them to the simulation flows, dashboards, tests, and runbooks first.
 
 ## Notes
 
