@@ -46,12 +46,12 @@
 
   <!-- Operator -->
   <g filter="url(#shadow)">
-    <rect x="15" y="276" width="170" height="112" rx="20" fill="#ffffff" stroke="#d5e0dd" stroke-width="2"/>
-    <circle cx="57" cy="320" r="24" fill="#315f58"/>
-    <circle cx="57" cy="312" r="8" fill="none" stroke="#fff" stroke-width="3"/>
-    <path d="M40 337c6-12 28-12 34 0" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"/>
-    <text x="96" y="318" class="node-title">Operator</text>
-    <text x="96" y="344" class="node-copy">CLI scripts</text>
+    <rect x="15" y="289" width="170" height="112" rx="20" fill="#ffffff" stroke="#d5e0dd" stroke-width="2"/>
+    <circle cx="57" cy="333" r="24" fill="#315f58"/>
+    <circle cx="57" cy="325" r="8" fill="none" stroke="#fff" stroke-width="3"/>
+    <path d="M40 350c6-12 28-12 34 0" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"/>
+    <text x="96" y="331" class="node-title">Operator</text>
+    <text x="96" y="357" class="node-copy">CLI scripts</text>
   </g>
 
   <!-- Inputs -->
@@ -115,7 +115,7 @@
   </g>
 
   <!-- Core flow -->
-  <path d="M185 332 H210 V345 H235" class="flow"/>
+  <path d="M185 345 H235" class="flow"/>
   <path d="M495 345 H535" class="flow"/>
   <path d="M795 345 H835" class="flow"/>
   <path d="M965 420 V500" class="flow"/>
