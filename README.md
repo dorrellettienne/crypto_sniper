@@ -1,5 +1,7 @@
 # Crypto Sniper
 
+**Solana Trading Research and Risk-Control Platform**
+
 Crypto Sniper is a Python project for testing Solana token trading workflows. It includes paper simulation, token discovery, safety checks, controlled execution modes, dashboards, and audit records.
 
 > **Current status:** Start with paper mode. The live features are experimental and require operator supervision. This project does not promise profitable results.
