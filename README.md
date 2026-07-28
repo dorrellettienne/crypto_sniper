@@ -8,6 +8,20 @@ This repository is best understood as an engineering project, not a "plug-and-pl
 - reporting and dashboard tooling
 - guarded live-execution scaffolding that expects secrets to be provided through environment variables, never committed to the repository
 
+## At a Glance
+
+- Built a multi-layer Python project spanning simulation, data pipelines, operational tooling, dashboards, and safety checks
+- Added guarded execution workflows with fail-closed controls, preflight validation, and release-gate style checkpoints
+- Created artifact-driven review flows for summaries, bundles, and run analysis through browser-based dashboards
+- Backed the workflow with a substantial regression suite covering simulation behavior, live-workflow helpers, transports, and safety-profile validation
+
+## Why This Is a Strong Portfolio Project
+
+- It shows end-to-end product thinking rather than just isolated scripts.
+- It demonstrates engineering judgment around risk, observability, and operational safeguards.
+- It gives reviewers several concrete surfaces to inspect: code structure, tests, dashboards, configs, and runbooks.
+- It is a better example of systems design and workflow automation than a typical toy trading bot repository.
+
 ## What This Project Demonstrates
 
 - Python application design across simulation, data, reporting, and ops layers
@@ -15,6 +29,14 @@ This repository is best understood as an engineering project, not a "plug-and-pl
 - dashboard-style artifact review for run summaries and trading evidence
 - regression testing and release-checkpoint discipline
 - safety-oriented automation patterns such as fail-closed checks, preflight gates, and bounded execution paths
+
+## Tech Stack
+
+- Python
+- Pytest
+- HTML, CSS, and vanilla JavaScript dashboards
+- JSON-based configuration and export artifacts
+- PowerShell and batch scripting for local operational workflows
 
 ## Scope and Safety
 
@@ -133,6 +155,15 @@ python run_regression_tests.py
 Current expected checkpoint (latest verified):
 - `128 passed`
 - `Exit Code: 0`
+
+## Recommended Review Path
+
+If you are reviewing this repository for engineering quality, the best order is:
+1. Read this README for scope and architecture.
+2. Run the paper simulation flow.
+3. Open the dashboards in `frontend/`.
+4. Inspect `tests/` and `run_regression_tests.py`.
+5. Browse `src/live/` to see the guarded execution and safety-oriented workflow design.
 
 ## Portfolio Notes
 
