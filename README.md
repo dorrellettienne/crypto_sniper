@@ -16,7 +16,7 @@ Crypto Sniper is a Python project for testing Solana token trading workflows. It
 
 ## Architecture
 
-![Crypto Sniper architecture](docs/crypto-sniper-architecture-v2.svg)
+![Crypto Sniper architecture](docs/crypto-sniper-architecture-v3.svg)
 
 ## How It Works
 
