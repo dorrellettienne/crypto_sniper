@@ -1,81 +1,63 @@
 # Crypto Sniper
 
-Crypto Sniper is a Python-based research and operations project for testing short-horizon Solana token trading workflows. It combines repeatable paper simulations, candidate discovery, safety filtering, guarded execution adapters, dashboards, and audit reporting.
+Crypto Sniper is a Python project for testing Solana token trading workflows. It includes paper simulation, token discovery, safety checks, controlled execution modes, dashboards, and audit records.
 
-> **Current status:** Paper simulation is the safest place to start. The live workflows are experimental, require operator supervision, and are designed for tightly limited test runs. This is not a plug-and-play trading bot and does not promise profitable results.
+> **Current status:** Start with paper mode. The live features are experimental and require operator supervision. This project does not promise profitable results.
 
 ## What It Does
 
-- Runs deterministic paper-trading simulations with configurable seeds and strategy presets.
-- Discovers and scores token candidates using market signals.
-- Checks liquidity, route availability, token properties, and operational safety rules.
-- Supports paper, dry-run, and guarded live execution adapters.
-- Applies controls such as allowlists, order caps, position limits, audit requirements, and a kill switch.
-- Stores trading data in SQLite and exports JSON, CSV, and JSONL artifacts.
-- Provides browser dashboards for strategy results, validation bundles, and live-operations review.
-- Can send optional failure and trade-event alerts to Discord through the PowerShell operations runner.
+- Runs repeatable paper-trading simulations.
+- Finds and scores token candidates.
+- Checks liquidity, swap routes, token safety, and risk limits.
+- Supports paper, dry-run, and guarded live execution.
+- Saves results as SQLite, JSON, CSV, and JSONL data.
+- Shows results in browser dashboards.
+- Can send optional failure and trade alerts to Discord.
 
 ## Architecture
 
-![Crypto Sniper architecture](docs/crypto-sniper-architecture.svg)
+![Crypto Sniper architecture](docs/crypto-sniper-architecture-v2.svg)
 
 ## How It Works
 
-1. An operator chooses a preset, seed, or signal source and starts a workflow.
-2. The analysis layer runs a paper simulation or discovers and scores token candidates.
-3. Liquidity, route, token-safety, and risk checks decide whether a candidate can continue.
-4. An execution adapter handles the action in paper, dry-run, or guarded live mode.
-5. Results are written to SQLite, JSON, CSV, and JSONL audit files.
-6. The browser dashboards load those artifacts for review.
-7. The PowerShell operations runner can send selected failures, executions, and settlement events to a Discord-compatible webhook.
+1. The operator selects a strategy preset, seed, or signal source.
+2. The project simulates trades or discovers token candidates.
+3. Safety filters check the token, liquidity, route, and risk rules.
+4. An execution adapter runs the action in paper, dry-run, or guarded live mode.
+5. The result is saved for auditing and analysis.
+6. Dashboards display the saved results, and optional Discord alerts report selected events.
 
-In simple terms: the project collects or generates trading signals, checks whether they are safe enough to use, runs them through a controlled execution mode, and records the outcome for review.
+In simple terms: it finds or creates trading signals, checks them, runs them through a controlled trading mode, and records what happened.
 
 ## Technology Used
 
 | Part | Tools |
 | --- | --- |
-| Core application | Python |
-| Market integrations | DexScreener, Jupiter, Solana JSON-RPC |
-| Storage and reports | SQLite, JSON, CSV, JSONL |
+| Application | Python |
+| Market data | DexScreener, Jupiter, Solana JSON-RPC |
+| Storage | SQLite, JSON, CSV, JSONL |
 | Dashboards | HTML, CSS, JavaScript |
-| Local automation | PowerShell, Windows batch scripts |
-| Notifications | Discord-compatible webhooks |
+| Automation | PowerShell, Windows batch scripts |
+| Alerts | Discord webhooks |
 | Testing | Pytest |
 
 ## Screenshots
 
-### Strategy Review Dashboard
+### Strategy Review
 
 ![Strategy review dashboard](docs/images/strategy-review-sample.png)
 
-### Live Operations Dashboard
+### Live Operations
 
 ![Live operations dashboard](docs/images/live-ops-dashboard-crop.png)
 
-### Validation Bundle Viewer
+### Validation Results
 
 ![Validation bundle viewer](docs/images/validation-bundles-sample.png)
 
-## Project Structure
+## Run It Locally
 
-```text
-.
-|-- config/                # Strategy presets and safety profiles
-|-- frontend/              # Browser dashboards
-|-- src/discovery/         # Candidate and route discovery
-|-- src/execution/         # Paper-trading engine and persistence
-|-- src/filters/           # Liquidity and route filters
-|-- src/live/              # Guarded execution, risk, audit, and reconciliation
-|-- src/runner/            # Simulations and experiment runners
-|-- tests/                 # Regression tests
-|-- data/exports/          # Generated run artifacts
-`-- run_regression_tests.py
-```
-
-## Run a Paper Simulation
-
-Create a virtual environment and install the dependencies:
+Create a Python environment and install the dependencies:
 
 ```powershell
 python -m venv .venv
@@ -83,64 +65,62 @@ python -m venv .venv
 python -m pip install -r requirements.txt
 ```
 
-Run a deterministic simulation:
+Run a paper simulation and export a dashboard file:
 
 ```powershell
-python -m src.runner.paper_sim_runner --steps 50 --seed 1
+python -m src.runner.paper_sim_runner --steps 100 --seed 7 --export-json-dir data\exports
 ```
 
-Export a summary for the dashboards:
-
-```powershell
-python -m src.runner.paper_sim_runner `
-  --steps 100 `
-  --seed 7 `
-  --export-json-dir data\exports `
-  --export-csv-dir data\exports `
-  --export-trades-csv-dir data\exports
-```
-
-## Open the Dashboards
-
-Start a local web server:
+## Open the Dashboard
 
 ```powershell
 python -m http.server 8000
 ```
 
-Then open:
+Open:
 
 ```text
 http://localhost:8000/frontend/index.html
 ```
 
-The dashboards load local export files selected by the user. They do not require a separate frontend build.
+Select an exported JSON, CSV, or JSONL file when the dashboard asks for data.
 
 ## Run the Tests
-
-Run the curated regression suite:
 
 ```powershell
 python run_regression_tests.py
 ```
 
-Avoid running database-writing tests in parallel on Windows because `data/sniper.db` can lock.
+Database-writing tests should not run in parallel on Windows because `data/sniper.db` can lock.
+
+## Project Structure
+
+```text
+config/          Strategy presets and safety profiles
+frontend/        Browser dashboards
+src/discovery/   Token and route discovery
+src/execution/   Paper-trading engine
+src/filters/     Liquidity and route filters
+src/live/        Guarded execution and safety controls
+src/runner/      Simulations and experiments
+tests/           Regression tests
+```
 
 ## Discord Alerts
 
-The autonomous PowerShell runner can read a webhook URL from:
+The PowerShell operations runner can read a Discord webhook from:
 
 ```text
 CRYPTO_SNIPER_ALERT_WEBHOOK_URL
 ```
 
-When the URL is a Discord webhook, the runner formats messages for failures, executed trades, and settled trades. The webhook is optional and should be stored only in the local environment, never committed to Git.
+The webhook is optional. Keep the real URL in the local environment and never commit it to Git.
 
-## Notes
+## Safety Notes
 
-- Paper results do not fully represent fees, slippage, latency, partial fills, or live market conditions.
-- Live helpers are intended for supervised, tightly limited experiments rather than unattended production trading.
-- Private keys, `.env` files, and webhook URLs must remain outside version control.
-- External services such as DexScreener, Jupiter, and Solana RPC providers can fail or rate-limit requests.
-- Read `LIVE_READINESS_NOTES.md` and `KNOWN_LIMITATIONS.md` before working with guarded live workflows.
+- Paper results do not fully include fees, slippage, latency, or live market conditions.
+- Live runs should be supervised and limited to very small test amounts.
+- Keep private keys, `.env` files, and webhook URLs outside the repository.
+- External market services can fail or rate-limit requests.
+- Read `LIVE_READINESS_NOTES.md` and `KNOWN_LIMITATIONS.md` before using live features.
 - This project is for technical research and testing, not financial advice.

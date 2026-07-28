@@ -18,10 +18,8 @@
       .app-title { font: 700 28px "Trebuchet MS", sans-serif; fill: #173f3b; }
       .section-label { font: 700 16px "Trebuchet MS", sans-serif; letter-spacing: 2px; fill: #627773; }
       .node-title { font: 700 22px "Trebuchet MS", sans-serif; fill: #173f3b; }
-      .node-copy { font: 500 16px "Trebuchet MS", sans-serif; fill: #5f7470; }
+      .node-copy { font: 500 17px "Trebuchet MS", sans-serif; fill: #5f7470; }
       .icon-text { font: 700 16px "Trebuchet MS", sans-serif; fill: #fff; text-anchor: middle; dominant-baseline: middle; }
-      .edge-label { font: 600 15px "Trebuchet MS", sans-serif; fill: #47645f; text-anchor: middle; }
-      .edge-pill { fill: #ffffff; stroke: #dce5e2; stroke-width: 1; }
       .flow { fill: none; stroke: #315f58; stroke-width: 3; marker-end: url(#arrow); }
       .optional { fill: none; stroke: #cf6b43; stroke-width: 3; stroke-dasharray: 9 8; marker-end: url(#arrow-orange); }
     </style>
@@ -53,107 +51,84 @@
     <circle cx="72" cy="312" r="8" fill="none" stroke="#fff" stroke-width="3"/>
     <path d="M55 337c6-12 28-12 34 0" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"/>
     <text x="111" y="318" class="node-title">Operator</text>
-    <text x="111" y="344" class="node-copy">CLI and scripts</text>
+    <text x="111" y="344" class="node-copy">CLI scripts</text>
   </g>
 
   <!-- Inputs -->
   <g filter="url(#shadow)">
-    <rect x="245" y="270" width="230" height="136" rx="21" fill="#eef9ed" stroke="#c6e3c3" stroke-width="2"/>
-    <rect x="267" y="302" width="58" height="58" rx="15" fill="#4aa646"/>
-    <text x="296" y="332" class="icon-text">IN</text>
-    <text x="345" y="318" class="node-title">Inputs</text>
-    <text x="345" y="347" class="node-copy">Strategy presets</text>
-    <text x="267" y="384" class="node-copy">Seeds and signals</text>
+    <rect x="235" y="270" width="260" height="150" rx="21" fill="#eef9ed" stroke="#c6e3c3" stroke-width="2"/>
+    <rect x="257" y="294" width="52" height="52" rx="14" fill="#4aa646"/>
+    <text x="283" y="321" class="icon-text">IN</text>
+    <text x="329" y="327" class="node-title">Inputs</text>
+    <text x="257" y="374" class="node-copy">Strategy presets</text>
+    <text x="257" y="401" class="node-copy">Seeds and signals</text>
   </g>
 
   <!-- Analysis -->
   <g filter="url(#shadow)">
-    <rect x="555" y="270" width="230" height="136" rx="21" fill="#f5efff" stroke="#d9c8f3" stroke-width="2"/>
-    <rect x="577" y="302" width="58" height="58" rx="15" fill="#8c4fff"/>
-    <text x="606" y="332" class="icon-text">SIM</text>
-    <text x="655" y="318" class="node-title">Analysis</text>
-    <text x="655" y="347" class="node-copy">Paper simulation</text>
-    <text x="577" y="384" class="node-copy">Discovery and scoring</text>
+    <rect x="535" y="270" width="260" height="150" rx="21" fill="#f5efff" stroke="#d9c8f3" stroke-width="2"/>
+    <rect x="557" y="294" width="52" height="52" rx="14" fill="#8c4fff"/>
+    <text x="583" y="321" class="icon-text">SIM</text>
+    <text x="629" y="327" class="node-title">Analysis</text>
+    <text x="557" y="374" class="node-copy">Paper simulation</text>
+    <text x="557" y="401" class="node-copy">Discovery and scoring</text>
   </g>
 
   <!-- Safety -->
   <g filter="url(#shadow)">
-    <rect x="865" y="270" width="230" height="136" rx="21" fill="#fff3ee" stroke="#f0c9b9" stroke-width="2"/>
-    <rect x="887" y="302" width="58" height="58" rx="15" fill="#d96d4b"/>
-    <text x="916" y="332" class="icon-text">SAFE</text>
-    <text x="965" y="318" class="node-title">Safety Gates</text>
-    <text x="965" y="347" class="node-copy">Token checks</text>
-    <text x="887" y="384" class="node-copy">Routes, caps and kill switch</text>
+    <rect x="835" y="270" width="260" height="150" rx="21" fill="#fff3ee" stroke="#f0c9b9" stroke-width="2"/>
+    <rect x="857" y="294" width="52" height="52" rx="14" fill="#d96d4b"/>
+    <text x="883" y="321" class="icon-text">SAFE</text>
+    <text x="929" y="327" class="node-title">Safety Gates</text>
+    <text x="857" y="374" class="node-copy">Token and route checks</text>
+    <text x="857" y="401" class="node-copy">Caps, allowlists and kill switch</text>
   </g>
 
   <!-- Operations runner -->
   <g filter="url(#shadow)">
-    <rect x="245" y="500" width="230" height="136" rx="21" fill="#f3f5f5" stroke="#cfdad7" stroke-width="2"/>
-    <rect x="267" y="532" width="58" height="58" rx="15" fill="#315f58"/>
-    <text x="296" y="562" class="icon-text">OPS</text>
-    <text x="345" y="548" class="node-title">Ops Runner</text>
-    <text x="345" y="577" class="node-copy">PowerShell runner</text>
-    <text x="267" y="614" class="node-copy">Failure and trade alerts</text>
+    <rect x="235" y="500" width="260" height="150" rx="21" fill="#f3f5f5" stroke="#cfdad7" stroke-width="2"/>
+    <rect x="257" y="524" width="52" height="52" rx="14" fill="#315f58"/>
+    <text x="283" y="551" class="icon-text">OPS</text>
+    <text x="329" y="557" class="node-title">Ops Runner</text>
+    <text x="257" y="604" class="node-copy">PowerShell workflows</text>
+    <text x="257" y="631" class="node-copy">Failure and trade alerts</text>
   </g>
 
   <!-- Data -->
   <g filter="url(#shadow)">
-    <rect x="555" y="500" width="230" height="136" rx="21" fill="#eef2ff" stroke="#c9d3f4" stroke-width="2"/>
-    <rect x="577" y="532" width="58" height="58" rx="15" fill="#4265cf"/>
-    <text x="606" y="562" class="icon-text">DB</text>
-    <text x="655" y="548" class="node-title">Data &amp; Audit</text>
-    <text x="655" y="577" class="node-copy">SQLite and exports</text>
-    <text x="577" y="614" class="node-copy">JSON, CSV and JSONL</text>
+    <rect x="535" y="500" width="260" height="150" rx="21" fill="#eef2ff" stroke="#c9d3f4" stroke-width="2"/>
+    <rect x="557" y="524" width="52" height="52" rx="14" fill="#4265cf"/>
+    <text x="583" y="551" class="icon-text">DB</text>
+    <text x="629" y="557" class="node-title">Data &amp; Audit</text>
+    <text x="557" y="604" class="node-copy">SQLite and export files</text>
+    <text x="557" y="631" class="node-copy">JSON, CSV and JSONL</text>
   </g>
 
   <!-- Execution -->
   <g filter="url(#shadow)">
-    <rect x="865" y="500" width="230" height="136" rx="21" fill="#fff7e7" stroke="#f2d89e" stroke-width="2"/>
-    <rect x="887" y="532" width="58" height="58" rx="15" fill="#ed8b00"/>
-    <text x="916" y="562" class="icon-text">EXE</text>
-    <text x="965" y="548" class="node-title">Execution</text>
-    <text x="965" y="577" class="node-copy">Paper and dry-run</text>
-    <text x="887" y="614" class="node-copy">Guarded live adapter</text>
+    <rect x="835" y="500" width="260" height="150" rx="21" fill="#fff7e7" stroke="#f2d89e" stroke-width="2"/>
+    <rect x="857" y="524" width="52" height="52" rx="14" fill="#ed8b00"/>
+    <text x="883" y="551" class="icon-text">EXE</text>
+    <text x="929" y="557" class="node-title">Execution</text>
+    <text x="857" y="604" class="node-copy">Paper and dry-run modes</text>
+    <text x="857" y="631" class="node-copy">Guarded live adapter</text>
   </g>
 
   <!-- Core flow -->
-  <path d="M200 332 H245" class="flow"/>
-
-  <path d="M475 338 H555" class="flow"/>
-  <rect x="486" y="298" width="58" height="26" rx="8" class="edge-pill"/>
-  <text x="515" y="317" class="edge-label">Signals</text>
-
-  <path d="M785 338 H865" class="flow"/>
-  <rect x="790" y="298" width="70" height="26" rx="8" class="edge-pill"/>
-  <text x="825" y="317" class="edge-label">Candidate</text>
-
-  <path d="M987 406 V500" class="flow"/>
-  <rect x="900" y="439" width="76" height="26" rx="8" class="edge-pill"/>
-  <text x="938" y="458" class="edge-label">Approved</text>
-
-  <path d="M865 568 H785" class="flow"/>
-  <rect x="798" y="528" width="54" height="26" rx="8" class="edge-pill"/>
-  <text x="825" y="547" class="edge-label">Result</text>
-
-  <path d="M555 568 H475" class="flow"/>
-  <rect x="488" y="528" width="54" height="26" rx="8" class="edge-pill"/>
-  <text x="515" y="547" class="edge-label">Event</text>
+  <path d="M200 332 H235" class="flow"/>
+  <path d="M495 345 H535" class="flow"/>
+  <path d="M795 345 H835" class="flow"/>
+  <path d="M965 420 V500" class="flow"/>
+  <path d="M835 575 H795" class="flow"/>
+  <path d="M535 575 H495" class="flow"/>
 
   <!-- External outputs -->
-  <text x="30" y="782" class="section-label">REVIEW, NOTIFICATIONS AND NETWORKS</text>
+  <text x="30" y="782" class="section-label">OUTPUTS AND EXTERNAL SERVICES</text>
   <line x1="30" y1="798" x2="1150" y2="798" stroke="#dce5e2" stroke-width="2"/>
 
-  <path d="M367 636 V755 H310 V810" class="optional"/>
-  <rect x="315" y="680" width="50" height="26" rx="8" class="edge-pill"/>
-  <text x="340" y="699" class="edge-label">Alert</text>
-
-  <path d="M677 636 V755 H600 V810" class="flow"/>
-  <rect x="612" y="680" width="56" height="26" rx="8" class="edge-pill"/>
-  <text x="640" y="699" class="edge-label">Load</text>
-
-  <path d="M987 636 V755 H930 V810" class="flow"/>
-  <rect x="925" y="680" width="92" height="26" rx="8" class="edge-pill"/>
-  <text x="971" y="699" class="edge-label">Quote / RPC</text>
+  <path d="M365 650 V755 H310 V810" class="optional"/>
+  <path d="M665 650 V755 H600 V810" class="flow"/>
+  <path d="M965 650 V755 H930 V810" class="flow"/>
 
   <g filter="url(#shadow)">
     <rect x="180" y="810" width="260" height="105" rx="20" fill="#f6f0fc" stroke="#dbcbea" stroke-width="2"/>
