@@ -1,41 +1,41 @@
 # Crypto Sniper
 
-Research and operations platform for evaluating short-horizon token trading workflows with an emphasis on simulation, analytics, guarded execution scaffolding, and operational safety controls.
+Crypto Sniper is an experimental research and operations platform for evaluating short-horizon token trading workflows. It combines:
 
-This repository is best read as a software engineering project, not a plug-and-play trading bot. It combines:
 - deterministic paper-trading simulation
 - candidate discovery and scoring workflows
 - reporting and dashboard tooling
 - guarded live-execution scaffolding that expects secrets to be provided through environment variables, never committed to the repository
 
-> Best portfolio framing: this project showcases systems design, workflow automation, testing discipline, observability, and safety-first engineering.
+The project emphasizes repeatable experiments, observable workflows, and safety controls. It is not a plug-and-play trading bot and does not promise profitable results.
 
 ## Quick Navigation
 
 - [At a Glance](#at-a-glance)
 - [Screenshots](#screenshots)
-- [Why It Works as a Portfolio Project](#why-it-works-as-a-portfolio-project)
+- [Core Capabilities](#core-capabilities)
 - [Tech Stack](#tech-stack)
 - [Quick Start](#quick-start)
 - [Architecture Overview](#architecture-overview)
 - [Dashboards](#dashboards)
 - [Regression Suite](#regression-suite)
-- [Recommended Review Path](#recommended-review-path)
+- [Repository Guide](#repository-guide)
 - [Scope and Safety](#scope-and-safety)
 
 ## At a Glance
 
-- Built a multi-layer Python project spanning simulation, data pipelines, operational tooling, dashboards, and safety checks
-- Added guarded execution workflows with fail-closed controls, preflight validation, and release-gate style checkpoints
-- Created artifact-driven review flows for summaries, bundles, and run analysis through browser-based dashboards
-- Backed the workflow with a substantial regression suite covering simulation behavior, live-workflow helpers, transports, and safety-profile validation
+- Runs deterministic paper-trading simulations and parameterized experiments
+- Discovers, filters, and scores token candidates
+- Provides guarded execution workflows with fail-closed controls and preflight validation
+- Produces structured artifacts for dashboards, run analysis, and operational audits
+- Includes regression coverage for simulations, transports, configuration, and live-workflow helpers
 
-| Area | What’s here |
+| Area | What's included |
 | --- | --- |
 | Simulation | Deterministic paper-trading runners and parameterized experiments |
 | Discovery | Candidate filtering and scoring workflows |
 | Ops | Runbooks, preflight checks, release gates, and bounded execution helpers |
-| Review | HTML dashboards for summaries, bundles, and validation artifacts |
+| Reporting | HTML dashboards for summaries, bundles, and validation artifacts |
 | Quality | Regression coverage across simulation, config validation, transports, and live-workflow helpers |
 
 ## Screenshots
@@ -52,20 +52,16 @@ This repository is best read as a software engineering project, not a plug-and-p
 
 ![Validation bundle viewer](docs/images/validation-bundles-sample.png)
 
-## Why It Works as a Portfolio Project
+## Core Capabilities
 
-- It shows end-to-end product thinking rather than isolated scripts.
-- It demonstrates engineering judgment around risk, observability, and operational safeguards.
-- It gives reviewers several concrete surfaces to inspect: code structure, tests, dashboards, configs, and runbooks.
-- It is a stronger systems-design example than a typical toy trading-bot repository.
-
-## What This Project Demonstrates
-
-- Python application design across simulation, data, reporting, and ops layers
-- Rule-based candidate scoring and experiment workflows
-- Dashboard-style artifact review for run summaries and trading evidence
-- Regression testing and release-checkpoint discipline
-- Safety-oriented automation patterns such as fail-closed checks, preflight gates, and bounded execution paths
+- Deterministic paper trading with configurable strategies and seeded market behavior
+- Rule-based token discovery, candidate scoring, and safety filtering
+- Paper, dry-run, and guarded live execution adapters
+- Risk controls, preflight checks, bounded execution, and audit logging
+- JSON and CSV exports for run summaries and closed trades
+- Browser-based dashboards for strategy, validation, and operational data
+- Discord-compatible webhook alerts for operational events
+- Automated regression tests and reusable workflow presets
 
 ## Tech Stack
 
@@ -79,7 +75,7 @@ This repository is best read as a software engineering project, not a plug-and-p
 
 - No private keys, `.env` files, or webhook secrets are committed in this repository.
 - Live-operation helpers are present, but they are intentionally structured to read signer material from external environment variables or local key files outside version control.
-- The safest way to review this project is as a portfolio piece focused on systems design, workflow orchestration, and operational guardrails.
+- Live workflows should only be used after validating configuration, signal quality, fees, slippage, and risk limits in a controlled environment.
 
 ## Quick Start
 
@@ -193,18 +189,17 @@ Current expected checkpoint (latest verified):
 - `128 passed`
 - `Exit Code: 0`
 
-## Recommended Review Path
+## Repository Guide
 
-If you are reviewing this repository for engineering quality, the best order is:
-1. Read this README for scope and architecture.
-2. Run the paper simulation flow.
-3. Open the dashboards in `frontend/`.
-4. Inspect `tests/` and `run_regression_tests.py`.
-5. Browse `src/live/` to see the guarded execution and safety-oriented workflow design.
+1. Start with the paper simulation flow in `src/runner/`.
+2. Open the dashboards in `frontend/` to explore generated artifacts.
+3. Use `examples/` for workflow presets and operational entry points.
+4. See `tests/` and `run_regression_tests.py` for expected behavior.
+5. Read `LIVE_READINESS_NOTES.md` before working with guarded live workflows.
 
 ## Notes
 
-- Deterministic paper simulation is the easiest path for local review.
+- Deterministic paper simulation is the simplest local starting point.
 - Results are deterministic for the same seed and starting DB state.
 - Avoid running DB-writing tests in parallel on Windows (`data/sniper.db` can lock).
 - Before live integration work, read `LIVE_READINESS_NOTES.md` (fees/slippage realism, signal quality, safety gates, and rollout cautions).
