@@ -6,7 +6,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-sys.path.insert(0, r"C:\Users\Main_User\Desktop\crypto_sniper")
+REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT))
 
 from src.execution.persistence import init_db, get_open_positions
 from src.execution.paper_engine import simulate_buy
