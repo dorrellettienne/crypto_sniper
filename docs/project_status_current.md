@@ -1,7 +1,7 @@
 ﻿# Project Status (Current)
 
 Last updated: 2026-02-28
-Owner workspace: `C:\Users\Main_User\Desktop\crypto_sniper`
+Repository root: `<repo-root>`
 
 ## 1) Executive Snapshot
 - Current phase: `Final-stage supervised autonomy hardening`.
@@ -61,7 +61,7 @@ Interpretation:
 It does **not** yet run a fully autonomous discover->buy->manage exits strategy for profit.
 
 ## 6) One-Command Operational Paths
-From `C:\Users\Main_User\Desktop\crypto_sniper`:
+From the repository root:
 
 - Current stable execution cycle:
   - `python .\examples\run_live_pilot_workflow_preset.py --preset v30_milestone_cycle`

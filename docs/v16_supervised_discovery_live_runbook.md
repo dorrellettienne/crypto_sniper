@@ -7,7 +7,7 @@
 
 ## Preconditions
 - Working directory:
-  - `C:\Users\Main_User\Desktop\crypto_sniper`
+  - `<repo-root>`
 - Env key loaded in active PowerShell:
   - `$env:SOLANA_PILOT_PRIVATE_KEY_B58`
 - Existing tiny live config present:

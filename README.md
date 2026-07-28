@@ -1,17 +1,51 @@
-# Crypto Sniper (Paper Mode Platform)
+# Crypto Sniper
 
-Paper-mode simulation and reporting platform for testing token sniping rules safely (no live trading, no private keys).
+Research and operations platform for evaluating short-horizon token trading workflows with a strong emphasis on simulation, guarded execution scaffolding, analytics, and operational safety controls.
+
+This repository is best understood as an engineering project, not a "plug-and-play trading bot." It combines:
+- deterministic paper-trading simulation
+- candidate discovery and scoring workflows
+- reporting and dashboard tooling
+- guarded live-execution scaffolding that expects secrets to be provided through environment variables, never committed to the repository
+
+## What This Project Demonstrates
+
+- Python application design across simulation, data, reporting, and ops layers
+- rule-based candidate scoring and experiment workflows
+- dashboard-style artifact review for run summaries and trading evidence
+- regression testing and release-checkpoint discipline
+- safety-oriented automation patterns such as fail-closed checks, preflight gates, and bounded execution paths
+
+## Scope and Safety
+
+- No private keys, `.env` files, or webhook secrets are committed in this repository.
+- Live-operation helpers are present, but they are intentionally structured to read signer material from external environment variables or local key files outside version control.
+- The safest way to review this project is as a portfolio piece showing systems design, workflow orchestration, and operational guardrails.
 
 ## Quick Start
 
-### 1. Run a paper simulation
+### 1. Clone and enter the repository
 
 ```powershell
-cd C:\Users\Main_User\Desktop\crypto_sniper
+git clone https://github.com/dorrellettienne/crypto_sniper.git
+cd crypto_sniper
+```
+
+### 2. Install dependencies
+
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+### 3. Run a paper simulation
+
+```powershell
 python src/runner/paper_sim_runner.py --steps 50 --seed 1
 ```
 
-### 2. Run with rule parameters + export JSON/CSV
+### 4. Run with rule parameters and export JSON/CSV
 
 ```powershell
 python src/runner/paper_sim_runner.py `
@@ -34,6 +68,15 @@ Outputs can include:
 - Summary JSON (for dashboard)
 - Summary CSV
 - Closed-trades CSV (one row per closed trade)
+
+## Architecture Overview
+
+- `src/runner/`: paper simulation runners and experiment helpers
+- `src/live/`: guarded live-workflow scaffolding, audit logging, and execution adapters
+- `frontend/`: HTML dashboards for reviewing exports and operational artifacts
+- `examples/`: reusable scripts and workflow presets
+- `tests/`: regression coverage for simulation, filters, profiles, and live-workflow helpers
+- `config/`: tuned presets and safety profiles
 
 ## Dashboard
 
@@ -91,9 +134,15 @@ Current expected checkpoint (latest verified):
 - `128 passed`
 - `Exit Code: 0`
 
+## Portfolio Notes
+
+- This project is strongest as a showcase of systems thinking, release discipline, analytics, and safety controls.
+- The repository includes live-trading scaffolding, but it should be presented as supervised/guarded infrastructure rather than autonomous production trading software.
+- If you share this with employers, point them to the simulation flows, dashboards, tests, and runbooks first.
+
 ## Notes
 
-- Paper mode only (no live trading).
+- Deterministic paper simulation is the easiest path for local review.
 - Results are deterministic for the same seed and starting DB state.
 - Avoid running DB-writing tests in parallel on Windows (`data/sniper.db` can lock).
 - Before live integration work, read `LIVE_READINESS_NOTES.md` (fees/slippage realism, signal quality, safety gates, and rollout cautions).
