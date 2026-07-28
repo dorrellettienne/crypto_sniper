@@ -15,6 +15,20 @@ This repository is best understood as an engineering project, not a "plug-and-pl
 - Created artifact-driven review flows for summaries, bundles, and run analysis through browser-based dashboards
 - Backed the workflow with a substantial regression suite covering simulation behavior, live-workflow helpers, transports, and safety-profile validation
 
+## Screenshots
+
+### Strategy Review Dashboard
+
+![Strategy review dashboard](docs/images/strategy-review-sample.png)
+
+### Live Ops Dashboard
+
+![Live ops dashboard](docs/images/live-ops-dashboard-crop.png)
+
+### Validation Bundle Viewer
+
+![Validation bundle viewer](docs/images/validation-bundles-sample.png)
+
 ## Why This Is a Strong Portfolio Project
 
 - It shows end-to-end product thinking rather than just isolated scripts.
